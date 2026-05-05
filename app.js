@@ -12,9 +12,19 @@
     tokenStats: 'nc_token_stats',
     sidebarCollapsed: 'nc_sidebar_collapsed',
     theme: 'nc_theme',
+    mode: 'nc_mode',
+    imageBaseUrl: 'nc_image_base_url',
+    imageApiKey: 'nc_image_api_key',
+    imageModel: 'nc_image_model',
+    imageModelsCache: 'nc_image_models_cache',
+    currentImageJobId: 'nc_current_image_job_id',
+    imageDefaults: 'nc_image_defaults',
   };
 
-  function save(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+  function save(k, v) {
+    try { localStorage.setItem(k, JSON.stringify(v)); }
+    catch (e) { console.warn('localStorage save failed:', k, e); }
+  }
   function load(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
 
   // ===== Token Estimation =====
@@ -56,6 +66,8 @@
       return `\x00ICODE${idx}\x00`;
     });
 
+    html = esc(html);
+
     // Tables (must be before paragraph split)
     html = html.replace(/^(\|.+\|)\n(\|[\s:|\-]+)\n((\|.+\|\n?)+)/gm, (_, header, sep, body) => {
       const heads = header.split('|').filter(c => c.trim()).map(c => `<th>${renderInline(c.trim())}</th>`);
@@ -76,8 +88,8 @@
     html = html.replace(/^---+$/gm, '<hr>');
 
     // Blockquotes (support nested > and multi-line)
-    html = html.replace(/^(>.*)$/gm, (_, line) => {
-      const content = line.replace(/^>\s?/, '');
+    html = html.replace(/^(&gt;.*)$/gm, (_, line) => {
+      const content = line.replace(/^&gt;\s?/, '');
       return `<blockquote>${renderInline(content)}</blockquote>`;
     });
     html = html.replace(/<\/blockquote>\n<blockquote>/g, '\n');
@@ -128,18 +140,50 @@
     return html;
   }
 
-  // Inline rendering (images before links, strikethrough, bold/italic)
+  // Inline rendering (links/images before emphasis, protected by placeholders)
   function renderInline(text) {
-    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" loading="lazy">');
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    const inlineParts = [];
+    const stash = html => {
+      const idx = inlineParts.length;
+      inlineParts.push(html);
+      return `\x00PART${idx}\x00`;
+    };
+
+    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+      const safeUrl = sanitizeUrl(url, { image: true });
+      return stash(`<img src="${safeUrl}" alt="${stripMd(alt)}" loading="lazy">`);
+    });
+    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
+      const safeUrl = sanitizeUrl(url);
+      return stash(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+    });
     text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
     text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     // Italic: only match single * not adjacent to another *
     text = text.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
+    text = text.replace(/\x00PART(\d+)\x00/g, (_, idx) => inlineParts[idx]);
     return text;
   }
 
   function esc(t) { return t.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
+
+  function stripMd(t) {
+    return t.replace(/[*_~`[\]]/g, '');
+  }
+
+  function sanitizeUrl(rawUrl, opts = {}) {
+    const url = rawUrl.trim().replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    if (!url) return '#';
+    if (opts.image && /^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) return esc(url);
+    try {
+      const parsed = new URL(url, window.location.href);
+      const allowed = opts.image ? ['http:', 'https:'] : ['http:', 'https:', 'mailto:', 'tel:'];
+      if (allowed.includes(parsed.protocol)) return esc(url);
+    } catch {
+      if (!opts.image && /^(#|\/(?!\/)|\.{1,2}\/)/.test(url)) return esc(url);
+    }
+    return '#';
+  }
 
   function highlightCode(code, lang) {
     // Collect all highlight regions first, then build output in one pass (no placeholders)
@@ -192,7 +236,11 @@
   }
 
   // ===== State =====
+  const DEFAULT_IMAGE_MODELS = ['gpt-image-2', 'gpt-image-2-2026-04-21', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-3', 'dall-e-2'];
+  const DEFAULT_IMAGE_PARAMS = { size: '1024x1024', quality: 'auto', outputFormat: 'png', background: 'auto' };
+
   const state = {
+    mode: load(KEYS.mode) || 'chat',
     baseUrl: load(KEYS.baseUrl) || '',
     apiKey: load(KEYS.apiKey) || '',
     model: load(KEYS.model) || '',
@@ -202,11 +250,22 @@
     tokenStats: load(KEYS.tokenStats) || { input: 0, output: 0, total: 0 },
     sidebarCollapsed: load(KEYS.sidebarCollapsed) || false,
     theme: load(KEYS.theme) || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
+    imageBaseUrl: load(KEYS.imageBaseUrl) || '',
+    imageApiKey: load(KEYS.imageApiKey) || '',
+    imageModel: load(KEYS.imageModel) || 'gpt-image-2',
+    imageModelsCache: load(KEYS.imageModelsCache) || DEFAULT_IMAGE_MODELS,
+    imageJobs: [],
+    currentImageJobId: load(KEYS.currentImageJobId) || null,
+    imageDefaults: Object.assign({}, DEFAULT_IMAGE_PARAMS, load(KEYS.imageDefaults) || {}),
     isStreaming: false,
+    isGeneratingImage: false,
+    viewerImage: null,
+    imageRef: null,
     pendingFiles: [],
   };
 
   function persist() {
+    save(KEYS.mode, state.mode);
     save(KEYS.baseUrl, state.baseUrl);
     save(KEYS.apiKey, state.apiKey);
     save(KEYS.model, state.model);
@@ -216,6 +275,12 @@
     save(KEYS.tokenStats, state.tokenStats);
     save(KEYS.sidebarCollapsed, state.sidebarCollapsed);
     save(KEYS.theme, state.theme);
+    save(KEYS.imageBaseUrl, state.imageBaseUrl);
+    save(KEYS.imageApiKey, state.imageApiKey);
+    save(KEYS.imageModel, state.imageModel);
+    save(KEYS.imageModelsCache, state.imageModelsCache);
+    save(KEYS.currentImageJobId, state.currentImageJobId);
+    save(KEYS.imageDefaults, state.imageDefaults);
   }
 
   function currentConv() {
@@ -231,11 +296,95 @@
   }
 
   function configured() { return state.baseUrl && state.apiKey && state.model; }
+  function imageConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imageModel; }
 
   function normalizeUrl(u) {
     u = u.replace(/\/+$/, '');
     if (!u.endsWith('/v1')) u += '/v1';
     return u;
+  }
+
+  // ===== IndexedDB for large image history =====
+  const IMAGE_DB = { name: 'ownchat_image_db', version: 1, store: 'jobs' };
+  let imageDbPromise = null;
+  let imageDbWarned = false;
+
+  function openImageDb() {
+    if (imageDbPromise) return imageDbPromise;
+    imageDbPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+      const req = indexedDB.open(IMAGE_DB.name, IMAGE_DB.version);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IMAGE_DB.store)) {
+          const store = db.createObjectStore(IMAGE_DB.store, { keyPath: 'id' });
+          store.createIndex('createdAt', 'createdAt');
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return imageDbPromise;
+  }
+
+  async function imageDbGetAllJobs() {
+    const legacyJobs = load('nc_image_jobs') || [];
+    try {
+      const db = await openImageDb();
+      const jobs = await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.store, 'readonly');
+        const req = tx.objectStore(IMAGE_DB.store).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+      const merged = mergeJobs(jobs, legacyJobs).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      if (legacyJobs.length) {
+        await Promise.allSettled(legacyJobs.map(imageDbPutJob));
+        localStorage.removeItem('nc_image_jobs');
+      }
+      return merged;
+    } catch (e) {
+      console.warn('Image history load failed:', e);
+      return legacyJobs;
+    }
+  }
+
+  function mergeJobs(a, b) {
+    const map = new Map();
+    [...a, ...b].forEach(job => { if (job?.id) map.set(job.id, job); });
+    return Array.from(map.values());
+  }
+
+  async function imageDbPutJob(job) {
+    try {
+      const db = await openImageDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.store, 'readwrite');
+        tx.objectStore(IMAGE_DB.store).put(job);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('Image history save failed:', e);
+      if (!imageDbWarned) {
+        imageDbWarned = true;
+        showToast('图片历史保存失败，当前页面仍可查看');
+      }
+    }
+  }
+
+  async function imageDbDeleteJob(id) {
+    try {
+      const db = await openImageDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.store, 'readwrite');
+        tx.objectStore(IMAGE_DB.store).delete(id);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('Image history delete failed:', e);
+    }
   }
 
   // ===== DOM =====
@@ -246,6 +395,8 @@
     sidebarToggle: $('sidebar-toggle'),
     convList: $('conv-list'),
     newChatBtn: $('new-chat-btn'),
+    modeChatBtn: $('mode-chat-btn'),
+    modeImageBtn: $('mode-image-btn'),
     settingsBtn: $('settings-btn'),
     themeBtn: $('theme-btn'),
     sidebarBackdrop: $('sidebar-backdrop'),
@@ -254,17 +405,49 @@
     modelDropdownBtn: $('model-dropdown-btn'),
     modelDropdownList: $('model-dropdown-list'),
     currentModel: $('current-model'),
+    modelDropdown: $('model-dropdown'),
+    chatModelSlot: $('chat-model-slot'),
+    imageModelSlot: $('image-model-slot'),
     messages: $('messages'),
     welcome: $('welcome'),
+    imageWorkspace: $('image-workspace'),
+    imageEmpty: $('image-empty'),
+    imageGallery: $('image-gallery'),
     userInput: $('user-input'),
     sendBtn: $('send-btn'),
+    inputArea: $('input-area'),
+    imageInputArea: $('image-input-area'),
+    imagePrompt: $('image-prompt'),
+    imageSize: $('image-size'),
+    imageQuality: $('image-quality'),
+    imageFormat: $('image-format'),
+    imageBackground: $('image-background'),
+    imageRefInput: $('image-ref-input'),
+    imageRefPreview: $('image-ref-preview'),
+    imageRefBtn: $('image-ref-btn'),
+    imageGenerateBtn: $('image-generate-btn'),
     // Settings modal
     settingsModal: $('settings-modal'),
     modalClose: $('modal-close'),
+    settingsChatTab: $('settings-chat-tab'),
+    settingsImageTab: $('settings-image-tab'),
+    settingsChatPanel: $('settings-chat-panel'),
+    settingsImagePanel: $('settings-image-panel'),
     cfgBaseUrl: $('cfg-base-url'),
     cfgApiKey: $('cfg-api-key'),
     cfgModelSelect: $('cfg-model-select'),
     cfgRefreshModels: $('cfg-refresh-models'),
+    cfgModelManual: $('cfg-model-manual'),
+    cfgImageBaseUrl: $('cfg-image-base-url'),
+    cfgImageApiKey: $('cfg-image-api-key'),
+    cfgImageModelSelect: $('cfg-image-model-select'),
+    cfgRefreshImageModels: $('cfg-refresh-image-models'),
+    cfgImageModelManual: $('cfg-image-model-manual'),
+    imageViewer: $('image-viewer'),
+    imageViewerImg: $('image-viewer-img'),
+    imageViewerClose: $('image-viewer-close'),
+    imageViewerCopy: $('image-viewer-copy'),
+    imageViewerDownload: $('image-viewer-download'),
     cfgSave: $('cfg-save'),
     cfgCancel: $('cfg-cancel'),
     // Input params
@@ -289,7 +472,7 @@
 
   // ===== Render Functions =====
   function updateModelBadge() {
-    dom.currentModel.textContent = state.model || '未配置';
+    dom.currentModel.textContent = state.mode === 'image' ? (state.imageModel || '未配置') : (state.model || '未配置');
   }
 
   function applyTheme() {
@@ -316,6 +499,30 @@
   }
 
   function updateSidebar() {
+    if (state.mode === 'image') {
+      dom.newChatBtn.innerHTML = `
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <circle cx="8.5" cy="8.5" r="1.5"/>
+          <path d="M21 15l-5-5L5 21"/>
+        </svg>
+        新绘画
+      `;
+      dom.convList.innerHTML = state.imageJobs.map(j => `
+        <div class="conv-item ${j.id === state.currentImageJobId ? 'active' : ''}" data-id="${j.id}">
+          <span class="conv-item-title">${esc(j.title || j.prompt || '未命名绘画')}</span>
+          <button class="conv-item-delete" type="button" title="删除">&times;</button>
+        </div>
+      `).join('');
+      return;
+    }
+    dom.newChatBtn.innerHTML = `
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="12" y1="5" x2="12" y2="19" />
+        <line x1="5" y1="12" x2="19" y2="12" />
+      </svg>
+      新对话
+    `;
     dom.convList.innerHTML = state.conversations.map(c => `
       <div class="conv-item ${c.id === state.currentConvId ? 'active' : ''}" data-id="${c.id}">
         <span class="conv-item-title">${esc(c.title)}</span>
@@ -329,6 +536,60 @@
 
   function updateSendBtn() {
     dom.sendBtn.disabled = !dom.userInput.value.trim() || state.isStreaming || !configured();
+  }
+
+  function updateImageGenerateBtn() {
+    dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage || !imageConfigured();
+    dom.imageGenerateBtn.textContent = state.imageRef ? '编辑' : '生成';
+  }
+
+  function renderImageRefPreview() {
+    if (!state.imageRef) {
+      dom.imageRefPreview.classList.add('hidden');
+      dom.imageRefPreview.innerHTML = '';
+      return;
+    }
+    dom.imageRefPreview.classList.remove('hidden');
+    dom.imageRefPreview.innerHTML = `
+      <div class="image-ref-card">
+        <img src="${esc(state.imageRef.base64)}" alt="${esc(state.imageRef.name || '参考图')}">
+        <div class="image-ref-info">
+          <div class="image-ref-name">${esc(state.imageRef.name || '参考图')}</div>
+          <div class="image-ref-hint">将基于这张图片进行编辑</div>
+        </div>
+        <button class="image-ref-remove" type="button" title="移除参考图">&times;</button>
+      </div>
+    `;
+  }
+
+  function moveModelDropdown() {
+    const target = state.mode === 'image' ? dom.imageModelSlot : dom.chatModelSlot;
+    if (target && dom.modelDropdown.parentElement !== target) target.appendChild(dom.modelDropdown);
+  }
+
+  function switchMode(mode) {
+    state.mode = mode;
+    dom.modeChatBtn.classList.toggle('active', mode === 'chat');
+    dom.modeImageBtn.classList.toggle('active', mode === 'image');
+    dom.messages.classList.toggle('hidden', mode !== 'chat');
+    dom.welcome.classList.toggle('hidden', mode !== 'chat' || !!currentConv()?.messages.length);
+    dom.inputArea.classList.toggle('hidden', mode !== 'chat');
+    dom.imageWorkspace.classList.toggle('hidden', mode !== 'image');
+    dom.imageInputArea.classList.toggle('hidden', mode !== 'image');
+    moveModelDropdown();
+    closeModelDropdown();
+    updateModelBadge();
+    updateSidebar();
+    if (mode === 'chat') {
+      renderMessages();
+      dom.userInput.focus();
+    } else {
+      syncImageParams();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      dom.imagePrompt.focus();
+    }
+    persist();
   }
 
   function toggleSidebar() {
@@ -346,6 +607,8 @@
   const SVG_COPY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   const SVG_REFRESH = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-8.36L23 10"/></svg>';
   const SVG_EDIT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  const SVG_DOWNLOAD = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+  const SVG_MAXIMIZE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
 
   // ===== Clipboard =====
   function copyText(text) {
@@ -532,18 +795,21 @@
 
   // ===== Model Dropdown =====
   function renderModelDropdown() {
+    const models = state.mode === 'image' ? state.imageModelsCache : state.modelsCache;
+    const current = state.mode === 'image' ? state.imageModel : state.model;
     dom.modelDropdownList.innerHTML = `
       <div class="model-dropdown-header">选择模型</div>
       <div class="model-dropdown-scroll">
-        ${state.modelsCache.map(m => `
-          <div class="model-option ${m === state.model ? 'active' : ''}" data-model="${esc(m)}">${esc(m)}</div>
+        ${models.map(m => `
+          <div class="model-option ${m === current ? 'active' : ''}" data-model="${esc(m)}">${esc(m)}</div>
         `).join('')}
       </div>
     `;
   }
 
   function openModelDropdown() {
-    if (!configured()) return;
+    if (state.mode === 'chat' && !configured()) return;
+    if (state.mode === 'image' && !imageConfigured()) return;
     renderModelDropdown();
     dom.modelDropdownList.classList.remove('hidden');
   }
@@ -565,22 +831,24 @@
     }
   }
 
-  function populateSelectFromCache(selectEl) {
+  function populateSelectFromCache(selectEl, opts = {}) {
+    const models = opts.image ? state.imageModelsCache : state.modelsCache;
+    const current = opts.image ? state.imageModel : state.model;
     selectEl.innerHTML = '';
-    if (state.modelsCache.length === 0) {
+    if (models.length === 0) {
       selectEl.innerHTML = '<option value="">-- 点击刷新按钮获取模型 --</option>';
       return;
     }
-    state.modelsCache.forEach(m => {
+    models.forEach(m => {
       const opt = document.createElement('option');
       opt.value = m;
       opt.textContent = m;
-      if (m === state.model) opt.selected = true;
+      if (m === current) opt.selected = true;
       selectEl.appendChild(opt);
     });
   }
 
-  async function refreshModelsForSelect(baseUrl, apiKey, selectEl, refreshBtn) {
+  async function refreshModelsForSelect(baseUrl, apiKey, selectEl, refreshBtn, opts = {}) {
     if (!baseUrl || !apiKey) {
       alert('请先填写 Base URL 和 API Key');
       return;
@@ -589,16 +857,21 @@
     selectEl.innerHTML = '<option value="">加载中...</option>';
     try {
       const models = await fetchModels(baseUrl, apiKey);
-      state.modelsCache = models;
+      if (opts.image) state.imageModelsCache = mergeUnique(DEFAULT_IMAGE_MODELS, models);
+      else state.modelsCache = models;
       persist();
-      populateSelectFromCache(selectEl);
-      selectEl.value = state.model || models[0] || '';
+      populateSelectFromCache(selectEl, opts);
+      selectEl.value = (opts.image ? state.imageModel : state.model) || models[0] || '';
     } catch (e) {
       selectEl.innerHTML = '<option value="">-- 获取失败 --</option>';
       alert('获取模型列表失败: ' + e.message);
     } finally {
       refreshBtn.disabled = false;
     }
+  }
+
+  function mergeUnique(...lists) {
+    return Array.from(new Set(lists.flat().filter(Boolean)));
   }
 
   // ===== Send Message =====
@@ -767,16 +1040,33 @@
   }
 
   // ===== Settings Modal =====
-  function showSettings() {
+  function showSettings(tab = state.mode) {
     dom.cfgBaseUrl.value = state.baseUrl;
     dom.cfgApiKey.value = state.apiKey;
     populateSelectFromCache(dom.cfgModelSelect);
     dom.cfgModelSelect.value = state.model;
+    dom.cfgModelManual.value = '';
+    dom.cfgModelManual.placeholder = `手动填写模型，当前 ${state.model || '未配置'}`;
+    dom.cfgImageBaseUrl.value = state.imageBaseUrl;
+    dom.cfgImageApiKey.value = state.imageApiKey;
+    populateSelectFromCache(dom.cfgImageModelSelect, { image: true });
+    dom.cfgImageModelSelect.value = state.imageModel;
+    dom.cfgImageModelManual.value = '';
+    dom.cfgImageModelManual.placeholder = `手动填写模型，当前 ${state.imageModel || 'gpt-image-2'}`;
+    switchSettingsTab(tab === 'image' ? 'image' : 'chat');
     dom.settingsModal.classList.remove('hidden');
   }
 
   function hideSettings() {
     dom.settingsModal.classList.add('hidden');
+  }
+
+  function switchSettingsTab(tab) {
+    const isImage = tab === 'image';
+    dom.settingsChatTab.classList.toggle('active', !isImage);
+    dom.settingsImageTab.classList.toggle('active', isImage);
+    dom.settingsChatPanel.classList.toggle('hidden', isImage);
+    dom.settingsImagePanel.classList.toggle('hidden', !isImage);
   }
 
   // ===== Setup Overlay =====
@@ -792,11 +1082,359 @@
     dom.setupOverlay.classList.add('hidden');
   }
 
+  async function loadImageHistory() {
+    state.imageJobs = await imageDbGetAllJobs();
+    state.imageJobs.forEach(job => {
+      if (job.status === 'generating') {
+        job.status = 'error';
+        job.error = '上次生成未完成，请重新生成。';
+      }
+    });
+    if (state.currentImageJobId && !state.imageJobs.some(j => j.id === state.currentImageJobId)) {
+      state.currentImageJobId = state.imageJobs[0]?.id || null;
+      persist();
+    }
+    if (state.mode === 'image') {
+      updateSidebar();
+      renderImageWorkspace();
+    }
+  }
+
+  // ===== Image Mode =====
+  function syncImageParams() {
+    dom.imageSize.value = state.imageDefaults.size;
+    dom.imageQuality.value = state.imageDefaults.quality;
+    dom.imageFormat.value = state.imageDefaults.outputFormat;
+    dom.imageBackground.value = state.imageDefaults.background;
+  }
+
+  function saveImageParams() {
+    state.imageDefaults = {
+      size: dom.imageSize.value,
+      quality: dom.imageQuality.value,
+      outputFormat: dom.imageFormat.value,
+      background: dom.imageBackground.value,
+    };
+    persist();
+  }
+
+  function currentImageJob() {
+    return state.imageJobs.find(j => j.id === state.currentImageJobId);
+  }
+
+  function dataUrlForImage(out, fallbackFormat) {
+    const format = out.format || fallbackFormat || 'png';
+    if (out.url) return sanitizeUrl(out.url, { image: true });
+    return `data:image/${format};base64,${out.b64}`;
+  }
+
+  function imageFilename(job, out) {
+    const ext = out?.format || job.params?.outputFormat || 'png';
+    return `${(job.title || 'ownchat-image').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60)}.${ext}`;
+  }
+
+  function downloadImage(job, out) {
+    const a = document.createElement('a');
+    a.href = dataUrlForImage(out, job.params?.outputFormat);
+    a.download = imageFilename(job, out);
+    if (out.url) {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    }
+    a.click();
+  }
+
+  async function copyImage(job, out) {
+    if (out.url && !out.b64) {
+      copyText(out.url);
+      showToast('已复制图片链接');
+      return;
+    }
+    if (!navigator.clipboard || !window.ClipboardItem) {
+      showToast('当前浏览器不支持直接复制图片');
+      return;
+    }
+    try {
+      const src = dataUrlForImage(out, job.params?.outputFormat);
+      const blob = src.startsWith('data:')
+        ? await (await fetch(src)).blob()
+        : await (await fetch(src, { mode: 'cors' })).blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
+      showToast('图片已复制');
+    } catch {
+      showToast('复制图片失败，可先下载');
+    }
+  }
+
+  function openImageViewer(job, out) {
+    state.viewerImage = { jobId: job.id, index: job.outputs.indexOf(out) };
+    dom.imageViewerImg.src = dataUrlForImage(out, job.params?.outputFormat);
+    dom.imageViewer.classList.remove('hidden');
+  }
+
+  function closeImageViewer() {
+    dom.imageViewer.classList.add('hidden');
+    dom.imageViewerImg.src = '';
+    state.viewerImage = null;
+  }
+
+  function currentViewerImage() {
+    if (!state.viewerImage) return null;
+    const job = state.imageJobs.find(j => j.id === state.viewerImage.jobId);
+    const out = job?.outputs?.[state.viewerImage.index];
+    return job && out ? { job, out } : null;
+  }
+
+  function estimateImageSeconds(params) {
+    const qualityFactor = params.quality === 'high' ? 55 : params.quality === 'medium' ? 40 : params.quality === 'low' ? 25 : 35;
+    const sizeFactor = params.size === '1536x1024' || params.size === '1024x1536' ? 10 : 0;
+    return Math.max(25, qualityFactor + sizeFactor);
+  }
+
+  function renderImageWorkspace() {
+    const selected = currentImageJob();
+    const jobs = selected ? [selected] : state.imageJobs;
+    dom.imageEmpty.classList.toggle('hidden', state.imageJobs.length > 0);
+    dom.imageGallery.innerHTML = jobs.map(job => {
+      const meta = [
+        job.model,
+        job.params?.size,
+        job.params?.quality !== 'auto' ? job.params?.quality : '',
+        new Date(job.createdAt).toLocaleString(),
+      ].filter(Boolean).map(esc).join(' · ');
+      const outputs = (job.outputs || []).map((out, i) => `
+        <div class="image-result" data-job="${job.id}" data-index="${i}">
+          <img src="${esc(dataUrlForImage(out, job.params?.outputFormat))}" alt="${esc(job.prompt)}" loading="lazy" class="image-preview">
+          <div class="image-result-actions">
+            <button class="msg-action-btn image-action" data-action="view" data-job="${job.id}" data-index="${i}" title="放大查看">${SVG_MAXIMIZE}</button>
+            <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${job.id}" data-index="${i}" title="以图编辑">${SVG_EDIT}</button>
+            <button class="msg-action-btn image-action" data-action="copy-image" data-job="${job.id}" data-index="${i}" title="复制图片">${SVG_COPY}</button>
+            <button class="msg-action-btn image-action" data-action="download" data-job="${job.id}" data-index="${i}" title="下载">${SVG_DOWNLOAD}</button>
+          </div>
+        </div>
+      `).join('');
+      const inputImage = job.inputImage
+        ? `<div class="image-input-ref">
+            <img src="${esc(job.inputImage.base64)}" alt="${esc(job.inputImage.name || '参考图')}">
+            <span>参考图：${esc(job.inputImage.name || '生成图')}</span>
+          </div>`
+        : '';
+      const progress = job.status === 'generating'
+        ? `<div class="image-progress">
+            <div class="image-spinner"></div>
+            <div>
+              <div class="image-progress-title">正在生成图片</div>
+              <div class="image-progress-note">预计约 ${job.estimatedSeconds || estimateImageSeconds(job.params || DEFAULT_IMAGE_PARAMS)} 秒，复杂提示词或高质量图片可能更久。</div>
+            </div>
+          </div>`
+        : '';
+      return `
+        <article class="image-job-card" data-id="${job.id}">
+          <div class="image-job-header">
+            <div>
+              <h2>${esc(job.title || '未命名绘画')}</h2>
+              <div class="image-job-meta">${meta}</div>
+            </div>
+            <div class="image-job-actions">
+              <button class="btn-secondary image-action" data-action="reuse" data-job="${job.id}" type="button">复用</button>
+              <button class="btn-secondary image-action" data-action="retry" data-job="${job.id}" type="button">重绘</button>
+            </div>
+          </div>
+          <p class="image-job-prompt">${esc(job.prompt)}</p>
+          ${inputImage}
+          ${progress}
+          ${job.error ? `<div class="image-error">${esc(job.error)}</div>` : ''}
+          <div class="image-results">${outputs}</div>
+        </article>
+      `;
+    }).join('');
+  }
+
+  function parseImageOutputs(data, format) {
+    return (data.data || []).map(item => ({
+      b64: item.b64_json || '',
+      url: item.url || '',
+      revisedPrompt: item.revised_prompt || '',
+      format,
+      createdAt: Date.now(),
+    })).filter(item => item.b64 || item.url);
+  }
+
+  function buildImageRequestBody(prompt, params) {
+    const body = {
+      model: state.imageModel,
+      prompt: prompt.trim(),
+      n: 1,
+    };
+    if (params.size !== 'auto') body.size = params.size;
+    if (params.quality !== 'auto') body.quality = params.quality;
+    if (params.outputFormat && !/^dall-e/i.test(state.imageModel)) body.output_format = params.outputFormat;
+    if (params.background !== 'auto') body.background = params.background;
+    return body;
+  }
+
+  async function requestOneImage(prompt, params) {
+    let body = buildImageRequestBody(prompt, params);
+    let resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok && (body.output_format || body.background || body.quality)) {
+      body = { model: state.imageModel, prompt: prompt.trim(), n: 1 };
+      if (params.size !== 'auto') body.size = params.size;
+      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/generations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        body: JSON.stringify(body),
+      });
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
+      throw new Error(err.error?.message || `HTTP ${resp.status}`);
+    }
+    return parseImageOutputs(await resp.json(), params.outputFormat);
+  }
+
+  function dataUrlToBlob(dataUrl) {
+    const [header, data] = dataUrl.split(',');
+    const mime = header.match(/data:([^;]+)/)?.[1] || 'image/png';
+    const bin = atob(data);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  function filenameForBlob(name, blob) {
+    const ext = blob.type.includes('jpeg') ? 'jpg' : blob.type.includes('webp') ? 'webp' : 'png';
+    const base = (name || 'reference').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60);
+    return `${base || 'reference'}.${ext}`;
+  }
+
+  async function requestImageEdit(prompt, params, ref) {
+    const form = new FormData();
+    const refBlob = dataUrlToBlob(ref.base64);
+    form.append('model', state.imageModel);
+    form.append('prompt', prompt.trim());
+    form.append('image', refBlob, filenameForBlob(ref.name, refBlob));
+    if (params.size !== 'auto') form.append('size', params.size);
+    if (params.quality !== 'auto') form.append('quality', params.quality);
+    if (params.outputFormat && !/^dall-e/i.test(state.imageModel)) form.append('output_format', params.outputFormat);
+    if (params.background !== 'auto') form.append('background', params.background);
+
+    let resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/edits', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
+      body: form,
+    });
+    if (!resp.ok && (form.has('quality') || form.has('output_format') || form.has('background'))) {
+      const fallback = new FormData();
+      fallback.append('model', state.imageModel);
+      fallback.append('prompt', prompt.trim());
+      fallback.append('image', refBlob, filenameForBlob(ref.name, refBlob));
+      if (params.size !== 'auto') fallback.append('size', params.size);
+      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/edits', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
+        body: fallback,
+      });
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
+      throw new Error(err.error?.message || `HTTP ${resp.status}`);
+    }
+    return parseImageOutputs(await resp.json(), params.outputFormat);
+  }
+
+  async function generateImage(prompt, params = state.imageDefaults, retryJob = null) {
+    if (!imageConfigured()) { showSettings('image'); return; }
+    if (!prompt.trim() || state.isGeneratingImage) return;
+
+    state.isGeneratingImage = true;
+    updateImageGenerateBtn();
+    const startedAt = Date.now();
+    const ref = state.imageRef ? Object.assign({}, state.imageRef) : null;
+    const job = retryJob || {
+      id: startedAt.toString(),
+      title: prompt.trim().slice(0, 30) + (prompt.trim().length > 30 ? '...' : ''),
+      prompt: prompt.trim(),
+      model: state.imageModel,
+      createdAt: startedAt,
+      params: Object.assign({}, params),
+      inputImage: ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : null,
+      outputs: [],
+      error: null,
+      status: 'generating',
+      estimatedSeconds: estimateImageSeconds(params),
+    };
+    if (!retryJob) {
+      state.imageJobs.unshift(job);
+      state.currentImageJobId = job.id;
+    } else {
+      job.model = state.imageModel;
+      job.params = Object.assign({}, params);
+      job.inputImage = ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : job.inputImage || null;
+      job.error = null;
+      job.outputs = [];
+      job.status = 'generating';
+      job.estimatedSeconds = estimateImageSeconds(params);
+    }
+    persist();
+    imageDbPutJob(job);
+    updateSidebar();
+    renderImageWorkspace();
+
+    try {
+      job.outputs = job.inputImage
+        ? await requestImageEdit(prompt, params, job.inputImage)
+        : await requestOneImage(prompt, params);
+      if (job.outputs.length === 0) throw new Error('接口未返回可显示的图片数据');
+      job.error = null;
+      job.status = 'done';
+      if (!retryJob && ref) {
+        state.imageRef = null;
+        renderImageRefPreview();
+      }
+      showToast('图片已生成');
+    } catch (e) {
+      job.error = e.message;
+      job.status = 'error';
+      showToast('生成失败');
+    } finally {
+      state.isGeneratingImage = false;
+      if (job.status === 'generating') job.status = 'done';
+      persist();
+      imageDbPutJob(job);
+      updateSidebar();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+    }
+  }
+
   // ===== Event Binding =====
   // Sidebar
   dom.sidebarToggle.addEventListener('click', toggleSidebar);
   dom.sidebarBackdrop.addEventListener('click', closeSidebarMobile);
-  dom.newChatBtn.addEventListener('click', () => { newConv(); updateSidebar(); renderMessages(); closeSidebarMobile(); syncConvParams(); dom.userInput.focus(); });
+  dom.modeChatBtn.addEventListener('click', () => switchMode('chat'));
+  dom.modeImageBtn.addEventListener('click', () => switchMode('image'));
+  dom.newChatBtn.addEventListener('click', () => {
+    if (state.mode === 'image') {
+      state.currentImageJobId = null;
+      dom.imagePrompt.value = '';
+      persist();
+      updateSidebar();
+      renderImageWorkspace();
+      closeSidebarMobile();
+      dom.imagePrompt.focus();
+      return;
+    }
+    newConv();
+    updateSidebar();
+    renderMessages();
+    closeSidebarMobile();
+    syncConvParams();
+    dom.userInput.focus();
+  });
 
   // Sync params to/from current conversation
   function syncConvParams() {
@@ -838,6 +1476,30 @@
 
   // Conversation list
   dom.convList.addEventListener('click', (e) => {
+    if (state.mode === 'image') {
+      const delBtn = e.target.closest('.conv-item-delete');
+      if (delBtn) {
+        const item = delBtn.closest('.conv-item');
+        const id = item.dataset.id;
+        state.imageJobs = state.imageJobs.filter(j => j.id !== id);
+        if (state.currentImageJobId === id) state.currentImageJobId = state.imageJobs[0]?.id || null;
+        persist();
+        imageDbDeleteJob(id);
+        updateSidebar();
+        renderImageWorkspace();
+        return;
+      }
+      const item = e.target.closest('.conv-item');
+      if (item) {
+        state.currentImageJobId = item.dataset.id;
+        persist();
+        updateSidebar();
+        renderImageWorkspace();
+        closeSidebarMobile();
+      }
+      return;
+    }
+
     const renameBtn = e.target.closest('.conv-item-rename');
     if (renameBtn) {
       const item = renameBtn.closest('.conv-item');
@@ -892,27 +1554,47 @@
 
   // Settings
   dom.themeBtn.addEventListener('click', toggleTheme);
-  dom.settingsBtn.addEventListener('click', showSettings);
+  dom.settingsBtn.addEventListener('click', () => showSettings());
   dom.modalClose.addEventListener('click', hideSettings);
   dom.cfgCancel.addEventListener('click', hideSettings);
   dom.settingsModal.querySelector('.modal-backdrop').addEventListener('click', hideSettings);
+  dom.settingsChatTab.addEventListener('click', () => switchSettingsTab('chat'));
+  dom.settingsImageTab.addEventListener('click', () => switchSettingsTab('image'));
 
   dom.cfgRefreshModels.addEventListener('click', () => {
     refreshModelsForSelect(dom.cfgBaseUrl.value.trim(), dom.cfgApiKey.value.trim(), dom.cfgModelSelect, dom.cfgRefreshModels);
   });
 
+  dom.cfgRefreshImageModels.addEventListener('click', () => {
+    refreshModelsForSelect(dom.cfgImageBaseUrl.value.trim(), dom.cfgImageApiKey.value.trim(), dom.cfgImageModelSelect, dom.cfgRefreshImageModels, { image: true });
+  });
+
   dom.cfgSave.addEventListener('click', () => {
     const b = dom.cfgBaseUrl.value.trim();
     const k = dom.cfgApiKey.value.trim();
-    const m = dom.cfgModelSelect.value;
-    if (!b || !k || !m) { alert('请填写所有配置项并选择模型'); return; }
+    const m = dom.cfgModelManual.value.trim() || dom.cfgModelSelect.value;
+    const ib = dom.cfgImageBaseUrl.value.trim();
+    const ik = dom.cfgImageApiKey.value.trim();
+    const im = dom.cfgImageModelManual.value.trim() || dom.cfgImageModelSelect.value;
+    if (!b || !k || !m) { alert('请填写聊天配置项并选择模型'); return; }
     state.baseUrl = b;
     state.apiKey = k;
     state.model = m;
+    state.modelsCache = mergeUnique([m], state.modelsCache);
+    if (ib || ik) {
+      if (!ib || !ik || !im) { alert('绘画配置需要同时填写 Base URL、API Key 和模型'); return; }
+      state.imageBaseUrl = ib;
+      state.imageApiKey = ik;
+    }
+    if (im) {
+      state.imageModel = im;
+      state.imageModelsCache = mergeUnique([im], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
+    }
     persist();
     updateModelBadge();
     hideSettings();
     updateSendBtn();
+    updateImageGenerateBtn();
   });
 
   // Setup overlay
@@ -951,12 +1633,14 @@
     e.stopPropagation();
     const opt = e.target.closest('.model-option');
     if (!opt) return;
-    state.model = opt.dataset.model;
+    if (state.mode === 'image') state.imageModel = opt.dataset.model;
+    else state.model = opt.dataset.model;
     persist();
     updateModelBadge();
     closeModelDropdown();
     updateSendBtn();
-    showToast(`已切换到 ${state.model}`);
+    updateImageGenerateBtn();
+    showToast(`已切换到 ${state.mode === 'image' ? state.imageModel : state.model}`);
   });
 
   document.addEventListener('click', (e) => {
@@ -1066,6 +1750,114 @@
     renderFilePreview();
   });
 
+  dom.imagePrompt.addEventListener('input', updateImageGenerateBtn);
+  dom.imageRefBtn.addEventListener('click', () => dom.imageRefInput.click());
+  dom.imageRefInput.addEventListener('change', () => {
+    const file = dom.imageRefInput.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      state.imageRef = { name: file.name, type: file.type, base64: ev.target.result };
+      renderImageRefPreview();
+      updateImageGenerateBtn();
+    };
+    reader.readAsDataURL(file);
+    dom.imageRefInput.value = '';
+  });
+  dom.imageRefPreview.addEventListener('click', (e) => {
+    if (!e.target.closest('.image-ref-remove')) return;
+    state.imageRef = null;
+    renderImageRefPreview();
+    updateImageGenerateBtn();
+  });
+  [dom.imageSize, dom.imageQuality, dom.imageFormat, dom.imageBackground].forEach(el => {
+    el.addEventListener('change', () => {
+      saveImageParams();
+      updateImageGenerateBtn();
+    });
+  });
+  dom.imageGenerateBtn.addEventListener('click', () => {
+    saveImageParams();
+    const prompt = dom.imagePrompt.value.trim();
+    if (!prompt) return;
+    generateImage(prompt);
+  });
+  dom.imagePrompt.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      dom.imageGenerateBtn.click();
+    }
+  });
+  dom.imageGallery.addEventListener('click', (e) => {
+    const preview = e.target.closest('.image-preview');
+    if (preview) {
+      const result = preview.closest('.image-result');
+      const job = state.imageJobs.find(j => j.id === result.dataset.job);
+      const out = job?.outputs?.[parseInt(result.dataset.index, 10)];
+      if (job && out) openImageViewer(job, out);
+      return;
+    }
+
+    const btn = e.target.closest('.image-action');
+    if (!btn) return;
+    const job = state.imageJobs.find(j => j.id === btn.dataset.job);
+    if (!job) return;
+    if (btn.dataset.action === 'reuse') {
+      dom.imagePrompt.value = job.prompt;
+      state.currentImageJobId = job.id;
+      state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {});
+      syncImageParams();
+      updateImageGenerateBtn();
+      persist();
+      updateSidebar();
+      dom.imagePrompt.focus();
+    } else if (btn.dataset.action === 'retry') {
+      state.currentImageJobId = job.id;
+      generateImage(job.prompt, job.params || state.imageDefaults, job);
+    } else if (btn.dataset.action === 'view') {
+      const out = job.outputs[parseInt(btn.dataset.index, 10)];
+      if (out) openImageViewer(job, out);
+    } else if (btn.dataset.action === 'use-as-ref') {
+      const out = job.outputs[parseInt(btn.dataset.index, 10)];
+      if (!out) return;
+      if (!out.b64) {
+        showToast('链接图片无法直接作为参考图，请先下载后上传');
+        return;
+      }
+      state.imageRef = {
+        name: imageFilename(job, out),
+        type: `image/${out.format || job.params?.outputFormat || 'png'}`,
+        base64: dataUrlForImage(out, job.params?.outputFormat),
+      };
+      dom.imagePrompt.value = job.prompt;
+      state.currentImageJobId = null;
+      renderImageRefPreview();
+      updateImageGenerateBtn();
+      persist();
+      updateSidebar();
+      renderImageWorkspace();
+      dom.imagePrompt.focus();
+    } else if (btn.dataset.action === 'copy-image') {
+      const out = job.outputs[parseInt(btn.dataset.index, 10)];
+      if (out) copyImage(job, out);
+    } else if (btn.dataset.action === 'download') {
+      const out = job.outputs[parseInt(btn.dataset.index, 10)];
+      if (!out) return;
+      downloadImage(job, out);
+    }
+  });
+
+  dom.imageViewerClose.addEventListener('click', closeImageViewer);
+  dom.imageViewer.querySelector('.image-viewer-backdrop').addEventListener('click', closeImageViewer);
+  dom.imageViewerCopy.addEventListener('click', () => {
+    const current = currentViewerImage();
+    if (current) copyImage(current.job, current.out);
+  });
+  dom.imageViewerDownload.addEventListener('click', () => {
+    const current = currentViewerImage();
+    if (current) downloadImage(current.job, current.out);
+  });
+
   // Send
   dom.sendBtn.addEventListener('click', () => {
     const text = dom.userInput.value.trim();
@@ -1102,6 +1894,8 @@
   updateModelBadge();
   updateSidebar();
   updateSendBtn();
+  syncImageParams();
+  updateImageGenerateBtn();
 
   if (configured()) {
     hideSetup();
@@ -1115,8 +1909,11 @@
       dom.welcome.classList.remove('hidden');
       dom.messages.innerHTML = '';
     }
-    dom.userInput.focus();
+    switchMode(state.mode === 'image' ? 'image' : 'chat');
   } else {
+    state.mode = 'chat';
+    switchMode('chat');
     showSetup();
   }
+  loadImageHistory();
 })();

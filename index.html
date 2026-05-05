@@ -54,14 +54,9 @@
           </svg>
         </button>
         <div class="header-model">
-          <div id="model-dropdown" class="model-dropdown">
-            <button id="model-dropdown-btn" class="model-dropdown-btn">
-              <span id="current-model">未配置</span>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-            </button>
-            <div id="model-dropdown-list" class="model-dropdown-list hidden"></div>
+          <div class="mode-switch" role="tablist" aria-label="模式切换">
+            <button id="mode-chat-btn" class="mode-btn active" type="button">聊天</button>
+            <button id="mode-image-btn" class="mode-btn" type="button">绘画</button>
           </div>
         </div>
         <div class="header-actions">
@@ -90,7 +85,35 @@
       <div id="messages"></div>
 
       <!-- Welcome Screen (hidden by default, shown via JS when no messages) -->
-      <div id="welcome" class="welcome hidden"></div>
+      <div id="welcome" class="welcome hidden">
+        <div class="welcome-inner">
+          <h1>OwnChat</h1>
+          <p>选择一个提示开始，或直接输入你的问题。</p>
+          <div class="welcome-tips">
+            <button class="tip-card" type="button" data-prompt="帮我把下面这段内容整理成清晰的要点：">
+              整理要点
+            </button>
+            <button class="tip-card" type="button" data-prompt="请以资深工程师的视角 review 下面这段代码：">
+              代码 Review
+            </button>
+            <button class="tip-card" type="button" data-prompt="帮我写一封简洁、礼貌、目标明确的邮件，背景如下：">
+              写邮件
+            </button>
+            <button class="tip-card" type="button" data-prompt="请一步步解释这个问题，并给出可执行的解决方案：">
+              拆解问题
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Image workspace -->
+      <div id="image-workspace" class="image-workspace hidden">
+        <div id="image-empty" class="image-empty">
+          <h1>绘画模式</h1>
+          <p>输入提示词生成图片，配置和历史记录与聊天模式独立保存。</p>
+        </div>
+        <div id="image-gallery" class="image-gallery"></div>
+      </div>
 
       <!-- Input -->
       <div id="input-area">
@@ -115,12 +138,25 @@
                 </svg>
               </button>
             </div>
-            <button id="send-btn" class="send-btn" title="发送">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22 2 15 22 11 13 2 9" />
-              </svg>
-            </button>
+            <div class="toolbar-right">
+              <div id="chat-model-slot" class="model-slot">
+                <div id="model-dropdown" class="model-dropdown">
+                  <button id="model-dropdown-btn" class="model-dropdown-btn">
+                    <span id="current-model">未配置</span>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                  <div id="model-dropdown-list" class="model-dropdown-list hidden"></div>
+                </div>
+              </div>
+              <button id="send-btn" class="send-btn" title="发送">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9" />
+                </svg>
+              </button>
+            </div>
           </div>
           <div id="conv-settings-panel" class="conv-settings-panel hidden">
             <div class="conv-settings-row">
@@ -146,6 +182,55 @@
         </div>
         <div class="input-disclaimer">AI 生成的内容可能不准确。请核实重要信息。</div>
       </div>
+
+      <!-- Image Input -->
+      <div id="image-input-area" class="hidden">
+        <input type="file" id="image-ref-input" class="hidden" accept="image/*" title="上传参考图">
+        <div class="image-input-wrapper">
+          <div id="image-ref-preview" class="image-ref-preview hidden"></div>
+          <textarea id="image-prompt" placeholder="描述你想生成的图片..." rows="3" maxlength="4000"></textarea>
+          <div class="image-params">
+            <button id="image-ref-btn" class="btn-secondary image-ref-btn" type="button">参考图</button>
+            <label>
+              尺寸
+              <select id="image-size" title="图片尺寸">
+                <option value="auto">auto</option>
+                <option value="1024x1024" selected>1024x1024</option>
+                <option value="1536x1024">1536x1024</option>
+                <option value="1024x1536">1024x1536</option>
+              </select>
+            </label>
+            <label>
+              质量
+              <select id="image-quality" title="图片质量">
+                <option value="auto" selected>auto</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+            <label>
+              格式
+              <select id="image-format" title="输出格式">
+                <option value="png" selected>png</option>
+                <option value="jpeg">jpeg</option>
+                <option value="webp">webp</option>
+              </select>
+            </label>
+            <label>
+              背景
+              <select id="image-background" title="背景">
+                <option value="auto" selected>auto</option>
+                <option value="transparent">transparent</option>
+                <option value="opaque">opaque</option>
+              </select>
+            </label>
+            <div id="image-model-slot" class="model-slot"></div>
+            <button id="image-generate-btn" class="btn-primary" type="button">生成</button>
+          </div>
+        </div>
+        <div class="input-disclaimer">绘画模式使用独立 API 配置，不会读取聊天模型配置。</div>
+      </div>
     </main>
 
     <!-- Settings Modal -->
@@ -161,7 +246,12 @@
             </svg>
           </button>
         </div>
+        <div class="settings-tabs">
+          <button id="settings-chat-tab" class="settings-tab active" type="button">聊天</button>
+          <button id="settings-image-tab" class="settings-tab" type="button">绘画</button>
+        </div>
         <div class="modal-body">
+          <div id="settings-chat-panel" class="settings-panel">
           <div class="form-group">
             <label>Base URL</label>
             <input type="text" id="cfg-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
@@ -174,20 +264,67 @@
           </div>
           <div class="form-group">
             <label>模型</label>
-            <div class="model-field">
-              <select id="cfg-model-select" title="选择模型"></select>
-              <button id="cfg-refresh-models" class="btn-refresh" title="刷新模型列表">
+              <div class="model-field">
+                <select id="cfg-model-select" title="选择模型"></select>
+                <button id="cfg-refresh-models" class="btn-refresh" title="刷新模型列表">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polyline points="23 4 23 10 17 10" />
                   <path d="M20.49 15a9 9 0 1 1-2.12-8.36L23 10" />
                 </svg>
-              </button>
+                </button>
+              </div>
+              <input type="text" id="cfg-model-manual" class="model-manual-input" placeholder="手动填写模型" spellcheck="false">
+              <div class="field-hint">手动填写优先，适合未出现在模型列表里的服务</div>
+            </div>
+          </div>
+          <div id="settings-image-panel" class="settings-panel hidden">
+            <div class="form-group">
+              <label>Image Base URL</label>
+              <input type="text" id="cfg-image-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
+              <div class="field-hint">绘画接口地址，独立于聊天 Base URL</div>
+            </div>
+            <div class="form-group">
+              <label>Image API Key</label>
+              <input type="password" id="cfg-image-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+              <div class="field-hint">绘画密钥仅保存在浏览器本地</div>
+            </div>
+            <div class="form-group">
+              <label>绘画模型</label>
+              <div class="model-field">
+                <select id="cfg-image-model-select" title="选择绘画模型"></select>
+                <button id="cfg-refresh-image-models" class="btn-refresh" title="刷新绘画模型列表">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-8.36L23 10" />
+                  </svg>
+                </button>
+              </div>
+              <input type="text" id="cfg-image-model-manual" class="model-manual-input" placeholder="手动填写模型，如 gpt-image-2" spellcheck="false">
+              <div class="field-hint">手动填写优先；推荐默认 gpt-image-2</div>
             </div>
           </div>
         </div>
         <div class="modal-footer">
           <button id="cfg-save" class="btn-primary" type="button">保存</button>
           <button id="cfg-cancel" class="btn-secondary" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Image viewer -->
+    <div id="image-viewer" class="image-viewer hidden">
+      <div class="image-viewer-backdrop"></div>
+      <div class="image-viewer-content">
+        <button id="image-viewer-close" class="modal-close-btn image-viewer-close" type="button" title="关闭">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+        <img id="image-viewer-img" src="" alt="生成图片预览">
+        <div class="image-viewer-toolbar">
+          <button id="image-viewer-copy" class="btn-secondary" type="button">复制图片</button>
+          <button id="image-viewer-download" class="btn-primary" type="button">下载</button>
         </div>
       </div>
     </div>
