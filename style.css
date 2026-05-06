@@ -368,6 +368,7 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
 }
 
 .model-option:hover { background: var(--bg-hover); color: var(--text-1); }
+.model-option-clear { color: var(--danger); }
 .model-option.active {
   color: var(--accent);
   font-weight: 600;
@@ -1531,6 +1532,7 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
 .setup-card h1 { font-size: 32px; font-weight: 700; margin-bottom: 4px; }
 .setup-desc { color: var(--text-3); font-size: 14px; margin-bottom: 32px; }
 .setup-card .form-group { text-align: left; }
+.setup-later-btn { margin-top: 10px; }
 
 /* ===== Animations ===== */
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -1613,10 +1615,23 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
     width: 100%;
     border-radius: var(--radius-lg) var(--radius-lg) 0 0;
     padding-bottom: calc(8px + env(safe-area-inset-bottom));
-    z-index: 51;
+    z-index: 240;
     animation: slideUp 0.3s ease;
     border: none;
     box-shadow: 0 -4px 24px rgba(0,0,0,0.3);
+  }
+
+  .toolbar-right .model-dropdown-list,
+  .image-params .model-dropdown-list {
+    position: fixed;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    transform: none;
+    max-height: 60vh;
+    width: 100%;
+    z-index: 240;
   }
 
   .model-dropdown-list::before {

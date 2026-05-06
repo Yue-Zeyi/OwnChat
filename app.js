@@ -16,6 +16,7 @@
     imageBaseUrl: 'nc_image_base_url',
     imageApiKey: 'nc_image_api_key',
     imageModel: 'nc_image_model',
+    imageMapModel: 'nc_image_map_model',
     imageModelsCache: 'nc_image_models_cache',
     currentImageJobId: 'nc_current_image_job_id',
     imageDefaults: 'nc_image_defaults',
@@ -157,10 +158,13 @@
       const safeUrl = sanitizeUrl(url);
       return stash(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`);
     });
+    text = text.replace(/&lt;code&gt;([\s\S]*?)&lt;\/code&gt;/g, (_, code) => stash(`<code>${code}</code>`));
     text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
-    text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Italic: only match single * not adjacent to another *
-    text = text.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
+    text = text.replace(/\*\*([^\n*](?:[^\n]*?[^\n*])?)\*\*/g, '<strong>$1</strong>');
+    // Italic: avoid lookbehind for broader browser compatibility.
+    text = text.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
+    text = text.replace(/\*\*([^*\n]{1,80})$/g, '$1');
+    text = text.replace(/(^|[\s([])\*([^\s*\n][^*\n]{0,79})$/g, '$1$2');
     text = text.replace(/\x00PART(\d+)\x00/g, (_, idx) => inlineParts[idx]);
     return text;
   }
@@ -237,7 +241,7 @@
 
   // ===== State =====
   const DEFAULT_IMAGE_MODELS = ['gpt-image-2', 'gpt-image-2-2026-04-21', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-3', 'dall-e-2'];
-  const DEFAULT_IMAGE_PARAMS = { size: '1024x1024', quality: 'auto', outputFormat: 'png', background: 'auto' };
+  const DEFAULT_IMAGE_PARAMS = { size: 'auto', quality: 'auto', outputFormat: 'png', background: 'auto' };
 
   const state = {
     mode: load(KEYS.mode) || 'chat',
@@ -253,6 +257,7 @@
     imageBaseUrl: load(KEYS.imageBaseUrl) || '',
     imageApiKey: load(KEYS.imageApiKey) || '',
     imageModel: load(KEYS.imageModel) || 'gpt-image-2',
+    imageMapModel: load(KEYS.imageMapModel) || '',
     imageModelsCache: load(KEYS.imageModelsCache) || DEFAULT_IMAGE_MODELS,
     imageJobs: [],
     currentImageJobId: load(KEYS.currentImageJobId) || null,
@@ -278,6 +283,7 @@
     save(KEYS.imageBaseUrl, state.imageBaseUrl);
     save(KEYS.imageApiKey, state.imageApiKey);
     save(KEYS.imageModel, state.imageModel);
+    save(KEYS.imageMapModel, state.imageMapModel);
     save(KEYS.imageModelsCache, state.imageModelsCache);
     save(KEYS.currentImageJobId, state.currentImageJobId);
     save(KEYS.imageDefaults, state.imageDefaults);
@@ -443,6 +449,8 @@
     cfgImageModelSelect: $('cfg-image-model-select'),
     cfgRefreshImageModels: $('cfg-refresh-image-models'),
     cfgImageModelManual: $('cfg-image-model-manual'),
+    cfgImageMapModelSelect: $('cfg-image-map-model-select'),
+    cfgImageMapModelManual: $('cfg-image-map-model-manual'),
     imageViewer: $('image-viewer'),
     imageViewerImg: $('image-viewer-img'),
     imageViewerClose: $('image-viewer-close'),
@@ -468,11 +476,14 @@
     setupModelSelect: $('setup-model-select'),
     setupRefreshModels: $('setup-refresh-models'),
     setupSave: $('setup-save'),
+    setupLater: $('setup-later'),
   };
 
   // ===== Render Functions =====
   function updateModelBadge() {
-    dom.currentModel.textContent = state.mode === 'image' ? (state.imageModel || '未配置') : (state.model || '未配置');
+    dom.currentModel.textContent = state.mode === 'image'
+      ? (state.imageMapModel ? `映射 ${state.imageMapModel}` : (state.imageModel || '未配置'))
+      : (state.model || '未配置');
   }
 
   function applyTheme() {
@@ -535,12 +546,26 @@
   }
 
   function updateSendBtn() {
-    dom.sendBtn.disabled = !dom.userInput.value.trim() || state.isStreaming || !configured();
+    dom.sendBtn.disabled = !dom.userInput.value.trim() || state.isStreaming;
   }
 
   function updateImageGenerateBtn() {
-    dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage || !imageConfigured();
+    dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage;
     dom.imageGenerateBtn.textContent = state.imageRef ? '编辑' : '生成';
+  }
+
+  function ensureModeConfigured(mode, opts = {}) {
+    if (mode === 'chat' && !configured()) {
+      showSettings('chat');
+      if (opts.toast !== false) showToast('请先完成聊天配置');
+      return false;
+    }
+    if (mode === 'image' && !imageConfigured()) {
+      showSettings('image');
+      if (opts.toast !== false) showToast('请先完成绘画配置');
+      return false;
+    }
+    return true;
   }
 
   function renderImageRefPreview() {
@@ -796,10 +821,11 @@
   // ===== Model Dropdown =====
   function renderModelDropdown() {
     const models = state.mode === 'image' ? state.imageModelsCache : state.modelsCache;
-    const current = state.mode === 'image' ? state.imageModel : state.model;
+    const current = state.mode === 'image' ? (state.imageMapModel || state.imageModel) : state.model;
     dom.modelDropdownList.innerHTML = `
       <div class="model-dropdown-header">选择模型</div>
       <div class="model-dropdown-scroll">
+        ${state.mode === 'image' && state.imageMapModel ? '<div class="model-option model-option-clear" data-clear-map="1">关闭映射，使用绘画模型</div>' : ''}
         ${models.map(m => `
           <div class="model-option ${m === current ? 'active' : ''}" data-model="${esc(m)}">${esc(m)}</div>
         `).join('')}
@@ -808,8 +834,7 @@
   }
 
   function openModelDropdown() {
-    if (state.mode === 'chat' && !configured()) return;
-    if (state.mode === 'image' && !imageConfigured()) return;
+    if (!ensureModeConfigured(state.mode)) return;
     renderModelDropdown();
     dom.modelDropdownList.classList.remove('hidden');
   }
@@ -848,6 +873,17 @@
     });
   }
 
+  function populateImageMapModelSelect() {
+    dom.cfgImageMapModelSelect.innerHTML = '<option value="">关闭映射，使用绘画模型</option>';
+    mergeUnique(state.imageModelsCache, state.modelsCache).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      if (m === state.imageMapModel) opt.selected = true;
+      dom.cfgImageMapModelSelect.appendChild(opt);
+    });
+  }
+
   async function refreshModelsForSelect(baseUrl, apiKey, selectEl, refreshBtn, opts = {}) {
     if (!baseUrl || !apiKey) {
       alert('请先填写 Base URL 和 API Key');
@@ -876,6 +912,7 @@
 
   // ===== Send Message =====
   async function sendMsg(userContent) {
+    if (!ensureModeConfigured('chat')) return;
     const conv = currentConv();
     if (!conv) return;
 
@@ -1053,6 +1090,10 @@
     dom.cfgImageModelSelect.value = state.imageModel;
     dom.cfgImageModelManual.value = '';
     dom.cfgImageModelManual.placeholder = `手动填写模型，当前 ${state.imageModel || 'gpt-image-2'}`;
+    populateImageMapModelSelect();
+    dom.cfgImageMapModelSelect.value = state.imageMapModel;
+    dom.cfgImageMapModelManual.value = '';
+    dom.cfgImageMapModelManual.placeholder = state.imageMapModel ? `当前 ${state.imageMapModel}` : '可选，如 gpt-5.5';
     switchSettingsTab(tab === 'image' ? 'image' : 'chat');
     dom.settingsModal.classList.remove('hidden');
   }
@@ -1186,9 +1227,19 @@
   }
 
   function estimateImageSeconds(params) {
-    const qualityFactor = params.quality === 'high' ? 55 : params.quality === 'medium' ? 40 : params.quality === 'low' ? 25 : 35;
-    const sizeFactor = params.size === '1536x1024' || params.size === '1024x1536' ? 10 : 0;
-    return Math.max(25, qualityFactor + sizeFactor);
+    const qualityFactor = params.quality === 'high' ? 130 : params.quality === 'medium' ? 95 : params.quality === 'low' ? 60 : 90;
+    const sizeFactor = params.size === '1536x1024' || params.size === '1024x1536' ? 35 : params.size === 'auto' ? 15 : 20;
+    const editFactor = state.imageRef ? 35 : 0;
+    return Math.max(60, qualityFactor + sizeFactor + editFactor);
+  }
+
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return s ? `${m}m ${s}s` : `${m}m`;
   }
 
   function renderImageWorkspace() {
@@ -1198,8 +1249,10 @@
     dom.imageGallery.innerHTML = jobs.map(job => {
       const meta = [
         job.model,
+        job.mapModel ? `映射 ${job.mapModel}` : '',
         job.params?.size,
         job.params?.quality !== 'auto' ? job.params?.quality : '',
+        job.durationMs ? `耗时 ${formatDuration(job.durationMs)}` : '',
         new Date(job.createdAt).toLocaleString(),
       ].filter(Boolean).map(esc).join(' · ');
       const outputs = (job.outputs || []).map((out, i) => `
@@ -1224,7 +1277,7 @@
             <div class="image-spinner"></div>
             <div>
               <div class="image-progress-title">正在生成图片</div>
-              <div class="image-progress-note">预计约 ${job.estimatedSeconds || estimateImageSeconds(job.params || DEFAULT_IMAGE_PARAMS)} 秒，复杂提示词或高质量图片可能更久。</div>
+              <div class="image-progress-note">预计约 ${formatDuration((job.estimatedSeconds || estimateImageSeconds(job.params || DEFAULT_IMAGE_PARAMS)) * 1000)}，高峰期、参考图编辑或高质量图片可能更久。</div>
             </div>
           </div>`
         : '';
@@ -1258,6 +1311,81 @@
       format,
       createdAt: Date.now(),
     })).filter(item => item.b64 || item.url);
+  }
+
+  function parseResponseImageOutputs(data, format) {
+    const outputs = [];
+    const scan = value => {
+      if (!value) return;
+      if (Array.isArray(value)) { value.forEach(scan); return; }
+      if (typeof value !== 'object') return;
+      if ((value.type === 'image_generation_call' || value.type === 'image_generation') && value.result) {
+        outputs.push({ b64: value.result, url: '', revisedPrompt: '', format, createdAt: Date.now() });
+      }
+      Object.keys(value).forEach(k => scan(value[k]));
+    };
+    scan(data.output || data);
+    return outputs;
+  }
+
+  function imageToolOptions(params) {
+    const opts = { type: 'image_generation' };
+    if (params.size !== 'auto') opts.size = params.size;
+    if (params.quality !== 'auto') opts.quality = params.quality;
+    if (params.outputFormat) opts.output_format = params.outputFormat;
+    if (params.background !== 'auto') opts.background = params.background;
+    return opts;
+  }
+
+  function mappedImageInput(prompt, ref) {
+    if (!ref) return prompt.trim();
+    return [{
+      role: 'user',
+      content: [
+        { type: 'input_text', text: prompt.trim() },
+        { type: 'input_image', image_url: ref.base64 },
+      ],
+    }];
+  }
+
+  async function requestMappedImage(prompt, params, ref = null) {
+    const body = {
+      model: state.imageMapModel,
+      input: mappedImageInput(prompt, ref),
+      tools: [imageToolOptions(params)],
+      tool_choice: 'required',
+    };
+    let resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      body.tool_choice = { type: 'image_generation' };
+      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/responses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        body: JSON.stringify(body),
+      });
+    }
+    if (!resp.ok && (body.tools[0].output_format || body.tools[0].background || body.tools[0].quality || body.tools[0].size)) {
+      const fallback = {
+        model: state.imageMapModel,
+        input: mappedImageInput(prompt, ref),
+        tools: [{ type: 'image_generation' }],
+        tool_choice: 'required',
+      };
+      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/responses', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        body: JSON.stringify(fallback),
+      });
+    }
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
+      throw new Error(err.error?.message || `HTTP ${resp.status}`);
+    }
+    return parseResponseImageOutputs(await resp.json(), params.outputFormat);
   }
 
   function buildImageRequestBody(prompt, params) {
@@ -1347,37 +1475,42 @@
   }
 
   async function generateImage(prompt, params = state.imageDefaults, retryJob = null) {
-    if (!imageConfigured()) { showSettings('image'); return; }
+    if (!ensureModeConfigured('image')) return;
     if (!prompt.trim() || state.isGeneratingImage) return;
 
     state.isGeneratingImage = true;
     updateImageGenerateBtn();
     const startedAt = Date.now();
     const ref = state.imageRef ? Object.assign({}, state.imageRef) : null;
+    const estimatedSeconds = estimateImageSeconds(params);
     const job = retryJob || {
       id: startedAt.toString(),
       title: prompt.trim().slice(0, 30) + (prompt.trim().length > 30 ? '...' : ''),
       prompt: prompt.trim(),
       model: state.imageModel,
+      mapModel: state.imageMapModel,
       createdAt: startedAt,
       params: Object.assign({}, params),
       inputImage: ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : null,
       outputs: [],
       error: null,
       status: 'generating',
-      estimatedSeconds: estimateImageSeconds(params),
+      estimatedSeconds,
+      durationMs: null,
     };
     if (!retryJob) {
       state.imageJobs.unshift(job);
       state.currentImageJobId = job.id;
     } else {
       job.model = state.imageModel;
+      job.mapModel = state.imageMapModel;
       job.params = Object.assign({}, params);
       job.inputImage = ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : job.inputImage || null;
       job.error = null;
       job.outputs = [];
       job.status = 'generating';
-      job.estimatedSeconds = estimateImageSeconds(params);
+      job.estimatedSeconds = estimatedSeconds;
+      job.durationMs = null;
     }
     persist();
     imageDbPutJob(job);
@@ -1385,12 +1518,15 @@
     renderImageWorkspace();
 
     try {
-      job.outputs = job.inputImage
-        ? await requestImageEdit(prompt, params, job.inputImage)
-        : await requestOneImage(prompt, params);
+      job.outputs = state.imageMapModel
+        ? await requestMappedImage(prompt, params, job.inputImage)
+        : job.inputImage
+          ? await requestImageEdit(prompt, params, job.inputImage)
+          : await requestOneImage(prompt, params);
       if (job.outputs.length === 0) throw new Error('接口未返回可显示的图片数据');
       job.error = null;
       job.status = 'done';
+      job.durationMs = Date.now() - startedAt;
       if (!retryJob && ref) {
         state.imageRef = null;
         renderImageRefPreview();
@@ -1399,6 +1535,7 @@
     } catch (e) {
       job.error = e.message;
       job.status = 'error';
+      job.durationMs = Date.now() - startedAt;
       showToast('生成失败');
     } finally {
       state.isGeneratingImage = false;
@@ -1415,7 +1552,9 @@
   // Sidebar
   dom.sidebarToggle.addEventListener('click', toggleSidebar);
   dom.sidebarBackdrop.addEventListener('click', closeSidebarMobile);
-  dom.modeChatBtn.addEventListener('click', () => switchMode('chat'));
+  dom.modeChatBtn.addEventListener('click', () => {
+    switchMode('chat');
+  });
   dom.modeImageBtn.addEventListener('click', () => switchMode('image'));
   dom.newChatBtn.addEventListener('click', () => {
     if (state.mode === 'image') {
@@ -1558,8 +1697,12 @@
   dom.modalClose.addEventListener('click', hideSettings);
   dom.cfgCancel.addEventListener('click', hideSettings);
   dom.settingsModal.querySelector('.modal-backdrop').addEventListener('click', hideSettings);
-  dom.settingsChatTab.addEventListener('click', () => switchSettingsTab('chat'));
-  dom.settingsImageTab.addEventListener('click', () => switchSettingsTab('image'));
+  dom.settingsChatTab.addEventListener('click', () => {
+    switchSettingsTab('chat');
+  });
+  dom.settingsImageTab.addEventListener('click', () => {
+    switchSettingsTab('image');
+  });
 
   dom.cfgRefreshModels.addEventListener('click', () => {
     refreshModelsForSelect(dom.cfgBaseUrl.value.trim(), dom.cfgApiKey.value.trim(), dom.cfgModelSelect, dom.cfgRefreshModels);
@@ -1570,25 +1713,36 @@
   });
 
   dom.cfgSave.addEventListener('click', () => {
+    const savingImageTab = dom.settingsImageTab.classList.contains('active');
     const b = dom.cfgBaseUrl.value.trim();
     const k = dom.cfgApiKey.value.trim();
     const m = dom.cfgModelManual.value.trim() || dom.cfgModelSelect.value;
     const ib = dom.cfgImageBaseUrl.value.trim();
     const ik = dom.cfgImageApiKey.value.trim();
     const im = dom.cfgImageModelManual.value.trim() || dom.cfgImageModelSelect.value;
-    if (!b || !k || !m) { alert('请填写聊天配置项并选择模型'); return; }
-    state.baseUrl = b;
-    state.apiKey = k;
-    state.model = m;
-    state.modelsCache = mergeUnique([m], state.modelsCache);
-    if (ib || ik) {
+    const imm = dom.cfgImageMapModelManual.value.trim();
+    const mapModel = imm || dom.cfgImageMapModelSelect.value;
+
+    const needChat = !savingImageTab;
+    const needImage = savingImageTab;
+
+    if (needChat && (!b || !k || !m)) { alert('请填写聊天配置项并选择模型'); return; }
+    if (needImage && (!ib || !ik || !im)) { alert('请填写绘画配置项并选择模型'); return; }
+
+    if (needChat || b || k || dom.cfgModelManual.value.trim()) {
+      if (!b || !k || !m) { alert('聊天配置需要同时填写 Base URL、API Key 和模型'); return; }
+      state.baseUrl = b;
+      state.apiKey = k;
+      state.model = m;
+      state.modelsCache = mergeUnique([m], state.modelsCache);
+    }
+    if (needImage || ib || ik || dom.cfgImageModelManual.value.trim()) {
       if (!ib || !ik || !im) { alert('绘画配置需要同时填写 Base URL、API Key 和模型'); return; }
       state.imageBaseUrl = ib;
       state.imageApiKey = ik;
-    }
-    if (im) {
       state.imageModel = im;
-      state.imageModelsCache = mergeUnique([im], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
+      state.imageMapModel = mapModel || '';
+      state.imageModelsCache = mergeUnique([im, mapModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
     }
     persist();
     updateModelBadge();
@@ -1618,6 +1772,10 @@
     renderMessages();
     dom.userInput.focus();
   });
+  dom.setupLater.addEventListener('click', () => {
+    hideSetup();
+    if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); renderMessages(); }
+  });
 
   // Model dropdown in header
   dom.modelDropdownBtn.addEventListener('click', (e) => {
@@ -1633,7 +1791,19 @@
     e.stopPropagation();
     const opt = e.target.closest('.model-option');
     if (!opt) return;
-    if (state.mode === 'image') state.imageModel = opt.dataset.model;
+    if (opt.dataset.clearMap) {
+      state.imageMapModel = '';
+      persist();
+      updateModelBadge();
+      closeModelDropdown();
+      updateImageGenerateBtn();
+      showToast('已关闭映射模型');
+      return;
+    }
+    if (state.mode === 'image') {
+      if (state.imageMapModel) state.imageMapModel = opt.dataset.model;
+      else state.imageModel = opt.dataset.model;
+    }
     else state.model = opt.dataset.model;
     persist();
     updateModelBadge();
@@ -1779,6 +1949,7 @@
   dom.imageGenerateBtn.addEventListener('click', () => {
     saveImageParams();
     const prompt = dom.imagePrompt.value.trim();
+    if (!ensureModeConfigured('image')) return;
     if (!prompt) return;
     generateImage(prompt);
   });
@@ -1861,6 +2032,7 @@
   // Send
   dom.sendBtn.addEventListener('click', () => {
     const text = dom.userInput.value.trim();
+    if (!ensureModeConfigured('chat')) return;
     if (!text || state.isStreaming) return;
     if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); }
     dom.userInput.value = '';
@@ -1913,7 +2085,8 @@
   } else {
     state.mode = 'chat';
     switchMode('chat');
-    showSetup();
+    hideSetup();
+    if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); renderMessages(); }
   }
   loadImageHistory();
 })();
