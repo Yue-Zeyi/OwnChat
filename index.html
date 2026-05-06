@@ -277,8 +277,19 @@
       <div class="modal-content">
         <div class="modal-header">
           <h2>设置</h2>
-          <div class="settings-global-tools">
-            <span>配置</span>
+          <button id="modal-close" class="modal-close-btn" type="button" title="关闭">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="settings-config-tools">
+          <div class="settings-config-info">
+            <div class="settings-config-title">配置管理</div>
+            <div class="settings-config-desc">导出或导入对话与绘画配置</div>
+          </div>
+          <div class="tool-chip-group">
             <button id="cfg-export-safe" class="tool-chip" type="button" title="导出配置">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -306,12 +317,6 @@
             </button>
             <input id="cfg-import-input" class="hidden" type="file" accept="application/json,.json">
           </div>
-          <button id="modal-close" class="modal-close-btn" type="button" title="关闭">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </button>
         </div>
         <div class="settings-tabs">
           <button id="settings-chat-tab" class="settings-tab active" type="button">对话</button>
@@ -399,7 +404,6 @@
           </div>
         </div>
         <div class="modal-footer">
-          <button id="cfg-test" class="btn-secondary" type="button">测试连接</button>
           <button id="cfg-save" class="btn-primary" type="button">保存</button>
           <button id="cfg-cancel" class="btn-secondary" type="button">取消</button>
         </div>

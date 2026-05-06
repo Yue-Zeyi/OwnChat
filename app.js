@@ -702,7 +702,6 @@
     cfgImageMapModelManual: $('cfg-image-map-model-manual'),
     cfgImagePromptModelSelect: $('cfg-image-prompt-model-select'),
     cfgImagePromptModelManual: $('cfg-image-prompt-model-manual'),
-    cfgTest: $('cfg-test'),
     imageViewer: $('image-viewer'),
     imageViewerImg: $('image-viewer-img'),
     imageViewerClose: $('image-viewer-close'),
@@ -1263,26 +1262,6 @@
       alert('获取模型列表失败: ' + e.message);
     } finally {
       refreshBtn.disabled = false;
-    }
-  }
-
-  async function testConnection(baseUrl, apiKey, btn) {
-    if (!baseUrl || !apiKey) {
-      showToast('请先填写 Base URL 和 API Key');
-      return;
-    }
-    const oldText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = '测试中...';
-    try {
-      const models = await fetchModels(baseUrl, apiKey);
-      showToast(`连接成功，获取到 ${models.length} 个模型`);
-    } catch (e) {
-      showToast('连接失败');
-      alert('测试连接失败: ' + e.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = oldText;
     }
   }
 
@@ -2498,13 +2477,6 @@
     populateImagePromptModelSelect();
     dom.cfgImageMapModelSelect.value = state.imageMapModel;
     dom.cfgImagePromptModelSelect.value = state.imagePromptModel;
-  });
-
-  dom.cfgTest.addEventListener('click', () => {
-    const testingImageTab = dom.settingsImageTab.classList.contains('active');
-    const baseUrl = testingImageTab ? dom.cfgImageBaseUrl.value.trim() : dom.cfgBaseUrl.value.trim();
-    const apiKey = testingImageTab ? dom.cfgImageApiKey.value.trim() : dom.cfgApiKey.value.trim();
-    testConnection(baseUrl, apiKey, dom.cfgTest);
   });
 
   dom.cfgExportSafe.addEventListener('click', () => {
