@@ -21,6 +21,7 @@
           </svg>
           新对话
         </button>
+        <input id="sidebar-search" class="sidebar-search" type="search" placeholder="搜索对话..." autocomplete="off">
       </div>
       <div id="conv-list" class="sidebar-list"></div>
       <div class="sidebar-footer">
@@ -55,8 +56,8 @@
         </button>
         <div class="header-model">
           <div class="mode-switch" role="tablist" aria-label="模式切换">
-            <button id="mode-chat-btn" class="mode-btn active" type="button">聊天</button>
-            <button id="mode-image-btn" class="mode-btn" type="button">绘画</button>
+            <button id="mode-chat-btn" class="mode-btn active" type="button">对话模式</button>
+            <button id="mode-image-btn" class="mode-btn" type="button">绘画模式</button>
           </div>
         </div>
         <div class="header-actions">
@@ -110,7 +111,7 @@
       <div id="image-workspace" class="image-workspace hidden">
         <div id="image-empty" class="image-empty">
           <h1>绘画模式</h1>
-          <p>输入提示词生成图片，配置和历史记录与聊天模式独立保存。</p>
+          <p>输入提示词生成图片，配置和历史记录与对话模式独立保存。</p>
         </div>
         <div id="image-gallery" class="image-gallery"></div>
       </div>
@@ -163,6 +164,10 @@
               <label>对话名称</label>
               <input type="text" id="conv-rename-input" placeholder="当前对话名称" maxlength="50" title="对话名称">
             </div>
+            <div class="conv-settings-row conv-role-row">
+              <label>角色设定</label>
+              <textarea id="conv-role-input" placeholder="例如：你是一名严谨的全栈工程师，回答要直接、可执行。" maxlength="8000" rows="3" title="角色设定"></textarea>
+            </div>
             <div class="conv-settings-row">
               <label>Temperature</label>
               <input type="number" id="param-temperature" min="0" max="2" step="0.1" value="0.7" title="Temperature">
@@ -189,47 +194,80 @@
         <div class="image-input-wrapper">
           <div id="image-ref-preview" class="image-ref-preview hidden"></div>
           <textarea id="image-prompt" placeholder="描述你想生成的图片..." rows="3" maxlength="4000"></textarea>
-          <div class="image-params">
-            <button id="image-ref-btn" class="btn-secondary image-ref-btn" type="button">参考图</button>
-            <label>
-              尺寸
-              <select id="image-size" title="图片尺寸">
-                <option value="auto" selected>auto</option>
-                <option value="1024x1024">1024x1024</option>
-                <option value="1536x1024">1536x1024</option>
-                <option value="1024x1536">1024x1536</option>
-              </select>
-            </label>
-            <label>
-              质量
-              <select id="image-quality" title="图片质量">
-                <option value="auto" selected>auto</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
-              </select>
-            </label>
-            <label>
-              格式
-              <select id="image-format" title="输出格式">
-                <option value="png" selected>png</option>
-                <option value="jpeg">jpeg</option>
-                <option value="webp">webp</option>
-              </select>
-            </label>
-            <label>
-              背景
-              <select id="image-background" title="背景">
-                <option value="auto" selected>auto</option>
-                <option value="transparent">transparent</option>
-                <option value="opaque">opaque</option>
-              </select>
-            </label>
-            <div id="image-model-slot" class="model-slot"></div>
-            <button id="image-generate-btn" class="btn-primary" type="button">生成</button>
+          <div class="image-params input-toolbar">
+            <div class="toolbar-left image-toolbar-left">
+              <button id="image-ref-btn" class="toolbar-btn image-ref-btn" type="button" title="添加参考图">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <circle cx="8.5" cy="8.5" r="1.5" />
+                  <path d="M21 15l-5-5L5 21" />
+                </svg>
+              </button>
+              <button id="image-settings-btn" class="toolbar-btn" type="button" title="绘画设置">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+              <button id="image-optimize-btn" class="toolbar-btn" type="button" title="优化提示词">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 3l1.7 5.2L19 10l-5.3 1.8L12 17l-1.7-5.2L5 10l5.3-1.8L12 3z" />
+                  <path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z" />
+                </svg>
+              </button>
+            </div>
+            <div class="toolbar-right image-toolbar-right">
+              <div id="image-model-slot" class="model-slot"></div>
+              <button id="image-generate-btn" class="send-btn image-generate-btn" type="button" title="生成">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="22" y1="2" x2="11" y2="13" />
+                  <polygon points="22 2 15 22 11 13 2 9" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div id="image-settings-panel" class="image-settings-panel conv-settings-panel hidden">
+            <div class="image-settings-grid">
+              <label class="image-param-field">
+                <span>尺寸</span>
+                <select id="image-size" title="图片尺寸">
+                  <option value="auto" selected>auto</option>
+                  <option value="1024x1024">1024x1024</option>
+                  <option value="1536x1024">1536x1024</option>
+                  <option value="1024x1536">1024x1536</option>
+                  <option value="3840x2160">3840x2160</option>
+                  <option value="2160x3840">2160x3840</option>
+                </select>
+              </label>
+              <label class="image-param-field">
+                <span>质量</span>
+                <select id="image-quality" title="图片质量">
+                  <option value="auto" selected>auto</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                </select>
+              </label>
+              <label class="image-param-field">
+                <span>格式</span>
+                <select id="image-format" title="输出格式">
+                  <option value="png" selected>png</option>
+                  <option value="jpeg">jpeg</option>
+                  <option value="webp">webp</option>
+                </select>
+              </label>
+              <label class="image-param-field">
+                <span>背景</span>
+                <select id="image-background" title="背景">
+                  <option value="auto" selected>auto</option>
+                  <option value="transparent">transparent</option>
+                  <option value="opaque">opaque</option>
+                </select>
+              </label>
+            </div>
           </div>
         </div>
-        <div class="input-disclaimer">绘画模式使用独立 API 配置，不会读取聊天模型配置。</div>
+        <div class="input-disclaimer">绘画模式使用独立 API 配置，不会读取对话模型配置。</div>
       </div>
     </main>
 
@@ -239,6 +277,35 @@
       <div class="modal-content">
         <div class="modal-header">
           <h2>设置</h2>
+          <div class="settings-global-tools">
+            <span>配置</span>
+            <button id="cfg-export-safe" class="tool-chip" type="button" title="导出配置">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              导出
+            </button>
+            <button id="cfg-export-full" class="tool-chip" type="button" title="含密钥导出">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M15 7a5 5 0 1 1-4-4" />
+                <path d="M14 6l7-3-3 7" />
+                <path d="M9 15l-4 4" />
+                <path d="M5 19H2v3" />
+              </svg>
+              含密钥
+            </button>
+            <button id="cfg-import-file" class="tool-chip" type="button" title="导入配置">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="17 8 12 3 7 8" />
+                <line x1="12" y1="3" x2="12" y2="15" />
+              </svg>
+              导入
+            </button>
+            <input id="cfg-import-input" class="hidden" type="file" accept="application/json,.json">
+          </div>
           <button id="modal-close" class="modal-close-btn" type="button" title="关闭">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <line x1="18" y1="6" x2="6" y2="18" />
@@ -247,23 +314,23 @@
           </button>
         </div>
         <div class="settings-tabs">
-          <button id="settings-chat-tab" class="settings-tab active" type="button">聊天</button>
+          <button id="settings-chat-tab" class="settings-tab active" type="button">对话</button>
           <button id="settings-image-tab" class="settings-tab" type="button">绘画</button>
         </div>
         <div class="modal-body">
           <div id="settings-chat-panel" class="settings-panel">
-          <div class="form-group">
-            <label>Base URL</label>
-            <input type="text" id="cfg-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
-            <div class="field-hint">兼容 OpenAI API 格式的服务地址</div>
-          </div>
-          <div class="form-group">
-            <label>API Key</label>
-            <input type="password" id="cfg-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
-            <div class="field-hint">密钥仅保存在浏览器本地，不会发送到第三方</div>
-          </div>
-          <div class="form-group">
-            <label>模型</label>
+            <div class="form-group">
+              <label>Base URL</label>
+              <input type="text" id="cfg-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
+              <div class="field-hint">兼容 OpenAI API 格式的服务地址</div>
+            </div>
+            <div class="form-group">
+              <label>API Key</label>
+              <input type="password" id="cfg-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+              <div class="field-hint">密钥仅保存在浏览器本地，不会发送到第三方</div>
+            </div>
+            <div class="form-group">
+              <label>模型</label>
               <div class="model-field">
                 <select id="cfg-model-select" title="选择模型"></select>
                 <button id="cfg-refresh-models" class="btn-refresh" title="刷新模型列表">
@@ -281,7 +348,7 @@
             <div class="form-group">
               <label>Image Base URL</label>
               <input type="text" id="cfg-image-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
-              <div class="field-hint">绘画接口地址，独立于聊天 Base URL</div>
+              <div class="field-hint">绘画接口地址，独立于对话 Base URL</div>
             </div>
             <div class="form-group">
               <label>Image API Key</label>
@@ -310,11 +377,55 @@
               <input type="text" id="cfg-image-map-model-manual" class="model-manual-input" placeholder="可选，如 gpt-5.5；留空则关闭映射" spellcheck="false">
               <div class="field-hint">启用后使用该模型通过 image_generation 工具生图；留空或选择关闭则使用原绘画模型</div>
             </div>
+            <div class="form-group">
+              <label>提示词优化模型</label>
+              <div class="model-field">
+                <select id="cfg-image-prompt-model-select" title="选择提示词优化模型"></select>
+              </div>
+              <input type="text" id="cfg-image-prompt-model-manual" class="model-manual-input" placeholder="可选，如 gpt-5.5；仅用于优化提示词" spellcheck="false">
+              <div class="field-hint">只调用绘画 Base URL 和绘画 API Key，不读取对话配置；留空则关闭提示词优化</div>
+            </div>
+            <div class="image-history-tools">
+              <div class="image-history-info">
+                <div class="image-history-title">绘画历史</div>
+                <div id="image-history-summary" class="image-history-summary">点击统计查看占用</div>
+              </div>
+              <div class="tool-chip-group">
+                <button id="image-history-stats" class="tool-chip" type="button">统计</button>
+                <button id="image-history-trim" class="tool-chip" type="button">保留 20</button>
+                <button id="image-history-clear" class="tool-chip danger-chip" type="button">清空</button>
+              </div>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
+          <button id="cfg-test" class="btn-secondary" type="button">测试连接</button>
           <button id="cfg-save" class="btn-primary" type="button">保存</button>
           <button id="cfg-cancel" class="btn-secondary" type="button">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Config import confirmation -->
+    <div id="config-import-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2>导入接口配置</h2>
+          <button id="config-import-close" class="modal-close-btn" type="button" title="关闭">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div id="config-import-preview" class="config-preview"></div>
+          <div class="field-hint">确认后会覆盖本地对应配置。API Key 会保存到当前浏览器本地。</div>
+        </div>
+        <div class="modal-footer">
+          <button id="config-import-apply" class="btn-primary" type="button">确认导入</button>
+          <button id="config-import-cancel" class="btn-secondary" type="button">取消</button>
         </div>
       </div>
     </div>
@@ -348,7 +459,7 @@
           </svg>
         </div>
         <h1>OwnChat</h1>
-        <p class="setup-desc">配置你的 API 连接以开始聊天</p>
+        <p class="setup-desc">配置你的 API 连接以开始对话</p>
         <div class="form-group">
           <label>Base URL</label>
           <input type="text" id="setup-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
@@ -371,7 +482,7 @@
             </button>
           </div>
         </div>
-        <button id="setup-save" class="btn-primary btn-block">开始聊天</button>
+        <button id="setup-save" class="btn-primary btn-block">开始对话</button>
         <button id="setup-later" class="btn-secondary btn-block setup-later-btn" type="button">稍后配置</button>
       </div>
     </div>

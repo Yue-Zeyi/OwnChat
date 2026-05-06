@@ -17,6 +17,7 @@
     imageApiKey: 'nc_image_api_key',
     imageModel: 'nc_image_model',
     imageMapModel: 'nc_image_map_model',
+    imagePromptModel: 'nc_image_prompt_model',
     imageModelsCache: 'nc_image_models_cache',
     currentImageJobId: 'nc_current_image_job_id',
     imageDefaults: 'nc_image_defaults',
@@ -152,13 +153,13 @@
 
     text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
       const safeUrl = sanitizeUrl(url, { image: true });
-      return stash(`<img src="${safeUrl}" alt="${stripMd(alt)}" loading="lazy">`);
+      return stash(`<img src="${safeUrl}" alt="${esc(stripMd(alt))}" loading="lazy">`);
     });
     text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
       const safeUrl = sanitizeUrl(url);
-      return stash(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${label}</a>`);
+      return stash(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${esc(stripMd(label))}</a>`);
     });
-    text = text.replace(/&lt;code&gt;([\s\S]*?)&lt;\/code&gt;/g, (_, code) => stash(`<code>${code}</code>`));
+    text = text.replace(/&lt;code&gt;([\s\S]*?)&lt;\/code&gt;/g, (_, code) => stash(`<code>${esc(code)}</code>`));
     text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
     text = text.replace(/\*\*([^\n*](?:[^\n]*?[^\n*])?)\*\*/g, '<strong>$1</strong>');
     // Italic: avoid lookbehind for broader browser compatibility.
@@ -294,15 +295,25 @@
     imageApiKey: load(KEYS.imageApiKey) || '',
     imageModel: load(KEYS.imageModel) || 'gpt-image-2',
     imageMapModel: load(KEYS.imageMapModel) || '',
+    imagePromptModel: load(KEYS.imagePromptModel) || '',
     imageModelsCache: load(KEYS.imageModelsCache) || DEFAULT_IMAGE_MODELS,
     imageJobs: [],
     currentImageJobId: load(KEYS.currentImageJobId) || null,
     imageDefaults: Object.assign({}, DEFAULT_IMAGE_PARAMS, load(KEYS.imageDefaults) || {}),
     isStreaming: false,
+    chatAbortController: null,
     isGeneratingImage: false,
+    imageAbortController: null,
+    imageProgressTimer: null,
+    isOptimizingImagePrompt: false,
     viewerImage: null,
+    imageViewerTransform: { scale: 1, x: 0, y: 0 },
+    imageViewerDragging: null,
+    imageViewerTouch: null,
     imageRef: null,
     pendingFiles: [],
+    sidebarSearch: '',
+    pendingImportConfig: null,
   };
 
   function persist() {
@@ -320,9 +331,133 @@
     save(KEYS.imageApiKey, state.imageApiKey);
     save(KEYS.imageModel, state.imageModel);
     save(KEYS.imageMapModel, state.imageMapModel);
+    save(KEYS.imagePromptModel, state.imagePromptModel);
     save(KEYS.imageModelsCache, state.imageModelsCache);
     save(KEYS.currentImageJobId, state.currentImageJobId);
     save(KEYS.imageDefaults, state.imageDefaults);
+  }
+
+  function cleanConfigUrl() {
+    if (!window.history?.replaceState) return;
+    const url = new URL(window.location.href);
+    ['config', 'config_b64', 'oc_config', 'oc_config_b64'].forEach(k => url.searchParams.delete(k));
+    window.history.replaceState({}, document.title, url.href);
+  }
+
+  function decodeBase64Url(value) {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    return decodeURIComponent(Array.from(atob(padded), c => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join(''));
+  }
+
+  function stringValue(...values) {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return '';
+  }
+
+  function arrayValue(value) {
+    return Array.isArray(value) ? value.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()) : [];
+  }
+
+  function parseImportConfig(text) {
+    const cfg = JSON.parse(text);
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('配置必须是 JSON 对象');
+    return cfg;
+  }
+
+  function importConfigSummary(cfg) {
+    const chat = cfg.chat && typeof cfg.chat === 'object' ? cfg.chat : {};
+    const image = cfg.image && typeof cfg.image === 'object' ? cfg.image : {};
+    return {
+      chatBaseUrl: stringValue(chat.baseUrl, chat.base_url, cfg.baseUrl, cfg.base_url),
+      chatApiKey: stringValue(chat.apiKey, chat.api_key, cfg.apiKey, cfg.api_key),
+      chatModel: stringValue(chat.model, cfg.model),
+      imageBaseUrl: stringValue(image.baseUrl, image.base_url, cfg.imageBaseUrl, cfg.image_base_url),
+      imageApiKey: stringValue(image.apiKey, image.api_key, cfg.imageApiKey, cfg.image_api_key),
+      imageModel: stringValue(image.model, cfg.imageModel, cfg.image_model),
+      imageMapModel: stringValue(image.mapModel, image.map_model, cfg.imageMapModel, cfg.image_map_model),
+      imagePromptModel: stringValue(image.promptModel, image.prompt_model, cfg.imagePromptModel, cfg.image_prompt_model),
+      mode: stringValue(cfg.mode),
+      imageDefaults: image.defaults && typeof image.defaults === 'object' ? image.defaults : null,
+      chatModels: mergeUnique(arrayValue(chat.models), arrayValue(cfg.models)),
+      imageModels: mergeUnique(arrayValue(image.models), arrayValue(cfg.imageModels), arrayValue(cfg.image_models)),
+      hasImageMapModel: 'mapModel' in image || 'map_model' in image || 'imageMapModel' in cfg || 'image_map_model' in cfg,
+      hasImagePromptModel: 'promptModel' in image || 'prompt_model' in image || 'imagePromptModel' in cfg || 'image_prompt_model' in cfg,
+    };
+  }
+
+  function maskKey(value) {
+    if (!value) return '未提供';
+    if (value.length <= 10) return `${value.slice(0, 3)}***`;
+    return `${value.slice(0, 6)}...${value.slice(-4)}`;
+  }
+
+  function applyImportedConfig(cfg) {
+    const summary = importConfigSummary(cfg);
+    if (summary.chatBaseUrl) state.baseUrl = normalizeUrl(summary.chatBaseUrl);
+    if (summary.chatApiKey) state.apiKey = summary.chatApiKey;
+    if (summary.chatModel) state.model = summary.chatModel;
+    if (summary.imageBaseUrl) state.imageBaseUrl = normalizeUrl(summary.imageBaseUrl);
+    if (summary.imageApiKey) state.imageApiKey = summary.imageApiKey;
+    if (summary.imageModel) state.imageModel = summary.imageModel;
+    if (summary.hasImageMapModel) state.imageMapModel = summary.imageMapModel;
+    if (summary.hasImagePromptModel) state.imagePromptModel = summary.imagePromptModel;
+    if (summary.imageDefaults) state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, summary.imageDefaults);
+    state.modelsCache = mergeUnique([state.model], summary.chatModels, state.modelsCache);
+    state.imageModelsCache = mergeUnique(
+      [state.imageModel, state.imageMapModel, state.imagePromptModel],
+      summary.imageModels,
+      state.imageModelsCache,
+      DEFAULT_IMAGE_MODELS,
+    );
+    if (['image', 'draw', 'painting'].includes(summary.mode)) state.mode = 'image';
+    if (['chat', 'dialog', 'conversation'].includes(summary.mode)) state.mode = 'chat';
+    persist();
+    updateModelBadge();
+    updateSendBtn();
+    updateImageGenerateBtn();
+    switchMode(state.mode === 'image' ? 'image' : 'chat');
+  }
+
+  function showConfigImportConfirm(cfg) {
+    state.pendingImportConfig = cfg;
+    const summary = importConfigSummary(cfg);
+    dom.configImportPreview.innerHTML = [
+      ['模式', summary.mode || '不修改'],
+      ['对话 Base URL', summary.chatBaseUrl || '不修改'],
+      ['对话 API Key', maskKey(summary.chatApiKey)],
+      ['对话模型', summary.chatModel || '不修改'],
+      ['绘画 Base URL', summary.imageBaseUrl || '不修改'],
+      ['绘画 API Key', maskKey(summary.imageApiKey)],
+      ['绘画模型', summary.imageModel || '不修改'],
+      ['映射模型', summary.hasImageMapModel ? (summary.imageMapModel || '关闭') : '不修改'],
+      ['提示词优化模型', summary.hasImagePromptModel ? (summary.imagePromptModel || '关闭') : '不修改'],
+    ].map(([k, v]) => `<div class="config-preview-row"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('');
+    dom.configImportModal.classList.remove('hidden');
+  }
+
+  function hideConfigImportConfirm() {
+    state.pendingImportConfig = null;
+    dom.configImportModal.classList.add('hidden');
+  }
+
+  function importConfigFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('config') || params.get('oc_config');
+    const rawB64 = params.get('config_b64') || params.get('oc_config_b64');
+    if (!raw && !rawB64) return false;
+    try {
+      const text = rawB64 ? decodeBase64Url(rawB64) : raw;
+      showConfigImportConfirm(parseImportConfig(text));
+      cleanConfigUrl();
+      return true;
+    } catch (e) {
+      cleanConfigUrl();
+      alert(`导入接口配置失败: ${e.message}`);
+      return false;
+    }
   }
 
   function currentConv() {
@@ -330,7 +465,7 @@
   }
 
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: 4096 };
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: 4096, systemPrompt: '' };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -339,6 +474,7 @@
 
   function configured() { return state.baseUrl && state.apiKey && state.model; }
   function imageConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imageModel; }
+  function imagePromptOptimizerConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imagePromptModel; }
 
   function normalizeUrl(u) {
     u = (u || '').trim();
@@ -374,13 +510,35 @@
     if (window.location.protocol === 'file:') {
       hints.push('当前是 file:// 打开页面，建议用本地静态服务访问页面');
     }
-    return new Error(`网络请求失败：${hints.join('；')}。请检查 Base URL、代理服务和浏览器控制台 Network 面板。`);
+    const message = `网络请求失败：${hints.join('；')}。请检查 Base URL、代理服务和浏览器控制台 Network 面板。`;
+    const error = new Error(message);
+    error.diagnostics = [
+      `请求地址: ${url}`,
+      `页面地址: ${window.location.href}`,
+      `原始错误: ${msg}`,
+      `排查建议: ${hints.join('；')}`,
+    ].join('\n');
+    return error;
   }
 
-  async function apiFetch(url, options) {
+  function httpError(status, message, url) {
+    const error = new Error(message || `HTTP ${status}`);
+    error.diagnostics = [
+      `请求地址: ${url}`,
+      `HTTP 状态: ${status}`,
+      `错误信息: ${message || `HTTP ${status}`}`,
+      `当前模式: ${state.mode}`,
+      `对话模型: ${state.model || '未配置'}`,
+      `绘画模型: ${state.imageModel || '未配置'}`,
+    ].join('\n');
+    return error;
+  }
+
+  async function apiFetch(url, options = {}) {
     try {
       return await fetch(url, options);
     } catch (err) {
+      if (err?.name === 'AbortError') throw err;
       throw describeNetworkError(err, url);
     }
   }
@@ -436,6 +594,18 @@
     return Array.from(map.values());
   }
 
+  async function estimateImageDbUsage() {
+    if (navigator.storage?.estimate) {
+      try {
+        const estimate = await navigator.storage.estimate();
+        return estimate.usage || 0;
+      } catch { /* ignore */ }
+    }
+    return state.imageJobs.reduce((sum, job) => {
+      return sum + (job.outputs || []).reduce((n, out) => n + imageByteSize(out), 0);
+    }, 0);
+  }
+
   async function imageDbPutJob(job) {
     try {
       const db = await openImageDb();
@@ -479,6 +649,7 @@
     modeChatBtn: $('mode-chat-btn'),
     modeImageBtn: $('mode-image-btn'),
     settingsBtn: $('settings-btn'),
+    sidebarSearch: $('sidebar-search'),
     themeBtn: $('theme-btn'),
     sidebarBackdrop: $('sidebar-backdrop'),
     main: $('main'),
@@ -506,6 +677,9 @@
     imageRefInput: $('image-ref-input'),
     imageRefPreview: $('image-ref-preview'),
     imageRefBtn: $('image-ref-btn'),
+    imageSettingsBtn: $('image-settings-btn'),
+    imageSettingsPanel: $('image-settings-panel'),
+    imageOptimizeBtn: $('image-optimize-btn'),
     imageGenerateBtn: $('image-generate-btn'),
     // Settings modal
     settingsModal: $('settings-modal'),
@@ -526,6 +700,9 @@
     cfgImageModelManual: $('cfg-image-model-manual'),
     cfgImageMapModelSelect: $('cfg-image-map-model-select'),
     cfgImageMapModelManual: $('cfg-image-map-model-manual'),
+    cfgImagePromptModelSelect: $('cfg-image-prompt-model-select'),
+    cfgImagePromptModelManual: $('cfg-image-prompt-model-manual'),
+    cfgTest: $('cfg-test'),
     imageViewer: $('image-viewer'),
     imageViewerImg: $('image-viewer-img'),
     imageViewerClose: $('image-viewer-close'),
@@ -533,6 +710,19 @@
     imageViewerDownload: $('image-viewer-download'),
     cfgSave: $('cfg-save'),
     cfgCancel: $('cfg-cancel'),
+    cfgExportSafe: $('cfg-export-safe'),
+    cfgExportFull: $('cfg-export-full'),
+    cfgImportFile: $('cfg-import-file'),
+    cfgImportInput: $('cfg-import-input'),
+    imageHistoryStats: $('image-history-stats'),
+    imageHistoryTrim: $('image-history-trim'),
+    imageHistoryClear: $('image-history-clear'),
+    imageHistorySummary: $('image-history-summary'),
+    configImportModal: $('config-import-modal'),
+    configImportPreview: $('config-import-preview'),
+    configImportClose: $('config-import-close'),
+    configImportApply: $('config-import-apply'),
+    configImportCancel: $('config-import-cancel'),
     // Input params
     paramTemperature: $('param-temperature'),
     paramTopP: $('param-top-p'),
@@ -540,6 +730,7 @@
     convSettingsBtn: $('conv-settings-btn'),
     convSettingsPanel: $('conv-settings-panel'),
     convRenameInput: $('conv-rename-input'),
+    convRoleInput: $('conv-role-input'),
     // File upload
     attachBtn: $('attach-btn'),
     fileInput: $('file-input'),
@@ -586,6 +777,11 @@
 
   function updateSidebar() {
     if (state.mode === 'image') {
+      dom.sidebarSearch.placeholder = '搜索绘画...';
+      const q = state.sidebarSearch.trim().toLowerCase();
+      const imageJobs = q
+        ? state.imageJobs.filter(j => `${j.title || ''} ${j.prompt || ''} ${j.model || ''}`.toLowerCase().includes(q))
+        : state.imageJobs;
       dom.newChatBtn.innerHTML = `
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -594,14 +790,22 @@
         </svg>
         新绘画
       `;
-      dom.convList.innerHTML = state.imageJobs.map(j => `
+      dom.convList.innerHTML = imageJobs.map(j => `
         <div class="conv-item ${j.id === state.currentImageJobId ? 'active' : ''}" data-id="${j.id}">
           <span class="conv-item-title">${esc(j.title || j.prompt || '未命名绘画')}</span>
           <button class="conv-item-delete" type="button" title="删除">&times;</button>
         </div>
-      `).join('');
+      `).join('') || `<div class="sidebar-empty">没有匹配的绘画</div>`;
       return;
     }
+    dom.sidebarSearch.placeholder = '搜索对话...';
+    const q = state.sidebarSearch.trim().toLowerCase();
+    const conversations = q
+      ? state.conversations.filter(c => {
+          const body = (c.messages || []).map(messageTextContent).join(' ');
+          return `${c.title || ''} ${c.systemPrompt || ''} ${body}`.toLowerCase().includes(q);
+        })
+      : state.conversations;
     dom.newChatBtn.innerHTML = `
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <line x1="12" y1="5" x2="12" y2="19" />
@@ -609,7 +813,7 @@
       </svg>
       新对话
     `;
-    dom.convList.innerHTML = state.conversations.map(c => `
+    dom.convList.innerHTML = conversations.map(c => `
       <div class="conv-item ${c.id === state.currentConvId ? 'active' : ''}" data-id="${c.id}">
         <span class="conv-item-title">${esc(c.title)}</span>
         <button class="conv-item-rename" type="button" title="重命名">
@@ -617,22 +821,30 @@
         </button>
         <button class="conv-item-delete" type="button" title="删除">&times;</button>
       </div>
-    `).join('');
+    `).join('') || `<div class="sidebar-empty">没有匹配的对话</div>`;
   }
 
   function updateSendBtn() {
-    dom.sendBtn.disabled = !dom.userInput.value.trim() || state.isStreaming;
+    dom.sendBtn.disabled = !state.isStreaming && !dom.userInput.value.trim();
+    dom.sendBtn.classList.toggle('is-stopping', state.isStreaming);
+    dom.sendBtn.title = state.isStreaming ? '停止生成' : '发送';
+    dom.sendBtn.setAttribute('aria-label', state.isStreaming ? '停止生成' : '发送');
   }
 
   function updateImageGenerateBtn() {
     dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage;
-    dom.imageGenerateBtn.textContent = state.imageRef ? '编辑' : '生成';
+    dom.imageGenerateBtn.title = state.imageRef ? '编辑图片' : '生成图片';
+    dom.imageGenerateBtn.setAttribute('aria-label', state.imageRef ? '编辑图片' : '生成图片');
+    dom.imageOptimizeBtn.disabled = !dom.imagePrompt.value.trim() || state.isOptimizingImagePrompt || state.isGeneratingImage;
+    dom.imageOptimizeBtn.title = state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词';
+    dom.imageOptimizeBtn.setAttribute('aria-label', state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词');
+    dom.imageOptimizeBtn.classList.toggle('active', state.isOptimizingImagePrompt);
   }
 
   function ensureModeConfigured(mode, opts = {}) {
     if (mode === 'chat' && !configured()) {
       showSettings('chat');
-      if (opts.toast !== false) showToast('请先完成聊天配置');
+      if (opts.toast !== false) showToast('请先完成对话配置');
       return false;
     }
     if (mode === 'image' && !imageConfigured()) {
@@ -669,6 +881,7 @@
 
   function switchMode(mode) {
     state.mode = mode;
+    dom.modeChatBtn.parentElement.classList.toggle('is-image', mode === 'image');
     dom.modeChatBtn.classList.toggle('active', mode === 'chat');
     dom.modeImageBtn.classList.toggle('active', mode === 'image');
     dom.messages.classList.toggle('hidden', mode !== 'chat');
@@ -731,12 +944,59 @@
     document.body.removeChild(ta);
   }
 
+  function messageTextContent(msg) {
+    if (!msg) return '';
+    if (typeof msg.content === 'string') return msg.content;
+    if (Array.isArray(msg.content)) {
+      return msg.content.filter(p => p.type === 'text').map(p => p.text || '').join('\n\n');
+    }
+    return '';
+  }
+
+  function copyableMessageText(msg) {
+    const text = messageTextContent(msg);
+    if (msg?.role !== 'assistant') return text;
+    return splitThinkTags(text).content.trim();
+  }
+
   function showToast(msg) {
     $('toast-el')?.remove();
     const el = document.createElement('div');
     el.id = 'toast-el'; el.className = 'toast'; el.textContent = msg;
     dom.main.appendChild(el);
     setTimeout(() => el.remove(), 1800);
+  }
+
+  function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function appConfigSnapshot(includeSecrets = false) {
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      mode: state.mode,
+      chat: {
+        baseUrl: state.baseUrl,
+        apiKey: includeSecrets ? state.apiKey : '',
+        model: state.model,
+        models: state.modelsCache,
+      },
+      image: {
+        baseUrl: state.imageBaseUrl,
+        apiKey: includeSecrets ? state.imageApiKey : '',
+        model: state.imageModel,
+        mapModel: state.imageMapModel,
+        promptModel: state.imagePromptModel,
+        models: state.imageModelsCache,
+        defaults: state.imageDefaults,
+      },
+    };
   }
 
   // ===== Retry =====
@@ -937,7 +1197,7 @@
     try {
       const url = requestUrl(baseUrl, '/models');
       const resp = await apiFetch(url, { headers: { 'Authorization': `Bearer ${apiKey}` } });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      if (!resp.ok) throw httpError(resp.status, `HTTP ${resp.status}`, url);
       const data = await resp.json();
       return (data.data || []).map(m => m.id).sort();
     } catch (e) {
@@ -973,6 +1233,17 @@
     });
   }
 
+  function populateImagePromptModelSelect() {
+    dom.cfgImagePromptModelSelect.innerHTML = '<option value="">关闭提示词优化</option>';
+    mergeUnique(state.imageModelsCache, state.modelsCache).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      if (m === state.imagePromptModel) opt.selected = true;
+      dom.cfgImagePromptModelSelect.appendChild(opt);
+    });
+  }
+
   async function refreshModelsForSelect(baseUrl, apiKey, selectEl, refreshBtn, opts = {}) {
     if (!baseUrl || !apiKey) {
       alert('请先填写 Base URL 和 API Key');
@@ -992,6 +1263,26 @@
       alert('获取模型列表失败: ' + e.message);
     } finally {
       refreshBtn.disabled = false;
+    }
+  }
+
+  async function testConnection(baseUrl, apiKey, btn) {
+    if (!baseUrl || !apiKey) {
+      showToast('请先填写 Base URL 和 API Key');
+      return;
+    }
+    const oldText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '测试中...';
+    try {
+      const models = await fetchModels(baseUrl, apiKey);
+      showToast(`连接成功，获取到 ${models.length} 个模型`);
+    } catch (e) {
+      showToast('连接失败');
+      alert('测试连接失败: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = oldText;
     }
   }
 
@@ -1033,20 +1324,36 @@
     renderMessages();
 
     // Build API messages (convert multimodal format for API)
-    const apiMessages = conv.messages.map(m => {
+    const apiMessages = [];
+    if (conv.systemPrompt?.trim()) {
+      apiMessages.push({ role: 'system', content: conv.systemPrompt.trim() });
+      contextTokens += estimateTokens(conv.systemPrompt);
+    }
+    apiMessages.push(...conv.messages.map(m => {
       if (typeof m.content === 'string') return { role: m.role, content: m.content };
       return { role: m.role, content: m.content };
-    });
+    }));
 
     // Clear pending files after adding to message
     state.pendingFiles = [];
     renderFilePreview();
 
     state.isStreaming = true;
-    dom.sendBtn.disabled = true;
+    const controller = new AbortController();
+    state.chatAbortController = controller;
     dom.userInput.disabled = true;
+    updateSendBtn();
 
     addTyping();
+    let assistantRawContent = '';
+    let assistantContent = '';
+    let apiReasoningContent = '';
+    let tagReasoningContent = '';
+    let reasoningContent = '';
+    let firstTokenTime = null;
+    let reasoningStartTime = null;
+    let reasoningEndTime = null;
+    const streamStartTime = Date.now();
 
     try {
       const reqBody = { model: state.model, messages: apiMessages, stream: true };
@@ -1057,11 +1364,12 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
         body: JSON.stringify(reqBody),
+        signal: controller.signal,
       });
 
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-        throw new Error(err.error?.message || `HTTP ${resp.status}`);
+        throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, requestUrl(state.baseUrl, '/chat/completions'));
       }
 
       removeTyping();
@@ -1069,16 +1377,7 @@
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
-      let assistantRawContent = '';
-      let assistantContent = '';
-      let apiReasoningContent = '';
-      let tagReasoningContent = '';
-      let reasoningContent = '';
       let buffer = '';
-      let firstTokenTime = null;
-      let reasoningStartTime = null;
-      let reasoningEndTime = null;
-      const streamStartTime = Date.now();
 
       while (true) {
         const { done, value } = await reader.read();
@@ -1156,10 +1455,21 @@
     } catch (e) {
       removeTyping();
       $('stream-el')?.remove();
-      conv.messages.push({ role: 'assistant', content: `**错误**: ${e.message}`, tokens: 0 });
+      if (e?.name === 'AbortError') {
+        const stoppedContent = assistantContent.trim()
+          ? `${assistantContent}\n\n_已停止生成_`
+          : '**已停止生成**';
+        const stoppedMsg = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(assistantContent), model: state.model };
+        if (reasoningContent) stoppedMsg.reasoningContent = reasoningContent;
+        conv.messages.push(stoppedMsg);
+      } else {
+        const detail = e.diagnostics ? `\n\n\`\`\`text\n${e.diagnostics}\n\`\`\`` : '';
+        conv.messages.push({ role: 'assistant', content: `**错误**: ${e.message}${detail}`, tokens: 0 });
+      }
       renderMessages();
     } finally {
       state.isStreaming = false;
+      state.chatAbortController = null;
       dom.userInput.disabled = false;
       dom.userInput.focus();
       updateSendBtn();
@@ -1190,6 +1500,10 @@
     dom.cfgImageMapModelSelect.value = state.imageMapModel;
     dom.cfgImageMapModelManual.value = '';
     dom.cfgImageMapModelManual.placeholder = state.imageMapModel ? `当前 ${state.imageMapModel}` : '可选，如 gpt-5.5';
+    populateImagePromptModelSelect();
+    dom.cfgImagePromptModelSelect.value = state.imagePromptModel;
+    dom.cfgImagePromptModelManual.value = '';
+    dom.cfgImagePromptModelManual.placeholder = state.imagePromptModel ? `当前 ${state.imagePromptModel}` : '可选，如 gpt-5.5';
     switchSettingsTab(tab === 'image' ? 'image' : 'chat');
     dom.settingsModal.classList.remove('hidden');
   }
@@ -1224,7 +1538,9 @@
     state.imageJobs.forEach(job => {
       if (job.status === 'generating') {
         job.status = 'error';
-        job.error = '上次生成未完成，请重新生成。';
+        job.error = '上次生成因页面刷新或关闭而中断，请点击“重绘”重新生成。';
+        job.durationMs = job.startedAt ? Date.now() - job.startedAt : job.durationMs;
+        imageDbPutJob(job);
       }
     });
     if (state.currentImageJobId && !state.imageJobs.some(j => j.id === state.currentImageJobId)) {
@@ -1263,6 +1579,70 @@
     const format = out.format || fallbackFormat || 'png';
     if (out.url) return sanitizeUrl(out.url, { image: true });
     return `data:image/${format};base64,${out.b64}`;
+  }
+
+  function imageByteSize(out) {
+    if (Number.isFinite(out?.bytes)) return out.bytes;
+    if (!out?.b64) return 0;
+    const clean = out.b64.replace(/\s/g, '');
+    const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
+  }
+
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB`;
+    const mb = kb / 1024;
+    return `${mb.toFixed(mb >= 100 ? 0 : 2)} MB`;
+  }
+
+  function normalizeImageFormat(format) {
+    const value = (format || '').toLowerCase().replace(/^image\//, '');
+    if (value === 'jpg') return 'jpeg';
+    return value || '';
+  }
+
+  function imageOutputMeta(out, fallbackFormat) {
+    const size = out?.width && out?.height ? `${out.width}x${out.height}` : '尺寸读取中';
+    const format = normalizeImageFormat(out?.format || fallbackFormat || '') || '未知格式';
+    const bytes = formatBytes(imageByteSize(out)) || '大小未知';
+    return [size, format.toUpperCase(), bytes].filter(Boolean);
+  }
+
+  async function updateRemoteImageOutputMeta(job, out, metaEl) {
+    if (!out?.url || out.metaFetchTried || out.bytes) return;
+    out.metaFetchTried = true;
+    try {
+      const resp = await fetch(out.url, { mode: 'cors' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      out.bytes = blob.size || 0;
+      if (blob.type) out.format = normalizeImageFormat(blob.type);
+      imageDbPutJob(job);
+      if (metaEl) metaEl.innerHTML = imageOutputMeta(out, job.params?.outputFormat).map(esc).join('<span>·</span>');
+    } catch {
+      if (metaEl) metaEl.innerHTML = imageOutputMeta(out, job.params?.outputFormat).map(esc).join('<span>·</span>');
+    }
+  }
+
+  function updateImageOutputMeta(jobId, index, img) {
+    const job = state.imageJobs.find(j => j.id === jobId);
+    const out = job?.outputs?.[index];
+    if (!job || !out || !img?.naturalWidth || !img?.naturalHeight) return;
+    const nextWidth = img.naturalWidth;
+    const nextHeight = img.naturalHeight;
+    if (out.width === nextWidth && out.height === nextHeight && out.bytes) return;
+    out.width = nextWidth;
+    out.height = nextHeight;
+    out.bytes = imageByteSize(out);
+    imageDbPutJob(job);
+    const resultEl = Array.from(dom.imageGallery.querySelectorAll('.image-result'))
+      .find(el => el.dataset.job === jobId && parseInt(el.dataset.index, 10) === index);
+    const metaEl = resultEl?.querySelector('.image-result-meta');
+    if (metaEl) metaEl.innerHTML = imageOutputMeta(out, job.params?.outputFormat).map(esc).join('<span>·</span>');
+    updateRemoteImageOutputMeta(job, out, metaEl);
   }
 
   function imageFilename(job, out) {
@@ -1305,6 +1685,7 @@
 
   function openImageViewer(job, out) {
     state.viewerImage = { jobId: job.id, index: job.outputs.indexOf(out) };
+    resetImageViewerTransform();
     dom.imageViewerImg.src = dataUrlForImage(out, job.params?.outputFormat);
     dom.imageViewer.classList.remove('hidden');
   }
@@ -1313,6 +1694,7 @@
     dom.imageViewer.classList.add('hidden');
     dom.imageViewerImg.src = '';
     state.viewerImage = null;
+    state.imageViewerDragging = null;
   }
 
   function currentViewerImage() {
@@ -1322,9 +1704,121 @@
     return job && out ? { job, out } : null;
   }
 
+  function clampImageScale(scale) {
+    return Math.min(8, Math.max(0.25, scale));
+  }
+
+  function applyImageViewerTransform() {
+    const t = state.imageViewerTransform;
+    dom.imageViewerImg.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.scale})`;
+    dom.imageViewerImg.classList.toggle('is-zoomed', t.scale > 1.01);
+  }
+
+  function resetImageViewerTransform() {
+    state.imageViewerTransform = { scale: 1, x: 0, y: 0 };
+    state.imageViewerDragging = null;
+    applyImageViewerTransform();
+  }
+
+  function zoomImageViewer(e) {
+    if (dom.imageViewer.classList.contains('hidden')) return;
+    e.preventDefault();
+    const current = state.imageViewerTransform;
+    const nextScale = clampImageScale(current.scale * (e.deltaY < 0 ? 1.16 : 1 / 1.16));
+    if (Math.abs(nextScale - current.scale) < 0.001) return;
+
+    const rect = dom.imageViewerImg.getBoundingClientRect();
+    const cx = e.clientX - (rect.left + rect.width / 2);
+    const cy = e.clientY - (rect.top + rect.height / 2);
+    const ratio = nextScale / current.scale;
+    state.imageViewerTransform = {
+      scale: nextScale,
+      x: current.x - cx * (ratio - 1),
+      y: current.y - cy * (ratio - 1),
+    };
+    applyImageViewerTransform();
+  }
+
+  function startImageViewerDrag(e) {
+    if (dom.imageViewer.classList.contains('hidden')) return;
+    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+    e.preventDefault();
+    state.imageViewerDragging = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: state.imageViewerTransform.x,
+      originY: state.imageViewerTransform.y,
+    };
+    dom.imageViewerImg.setPointerCapture?.(e.pointerId);
+    dom.imageViewer.classList.add('is-panning');
+  }
+
+  function moveImageViewerDrag(e) {
+    const drag = state.imageViewerDragging;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    e.preventDefault();
+    state.imageViewerTransform.x = drag.originX + e.clientX - drag.startX;
+    state.imageViewerTransform.y = drag.originY + e.clientY - drag.startY;
+    applyImageViewerTransform();
+  }
+
+  function endImageViewerDrag(e) {
+    const drag = state.imageViewerDragging;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    e.preventDefault();
+    state.imageViewerDragging = null;
+    dom.imageViewerImg.releasePointerCapture?.(e.pointerId);
+    dom.imageViewer.classList.remove('is-panning');
+  }
+
+  function touchDistance(touches) {
+    const [a, b] = touches;
+    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  }
+
+  function touchCenter(touches) {
+    const [a, b] = touches;
+    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+  }
+
+  function startImageViewerTouch(e) {
+    if (dom.imageViewer.classList.contains('hidden') || e.touches.length !== 2) return;
+    e.preventDefault();
+    state.imageViewerTouch = {
+      distance: touchDistance(e.touches),
+      center: touchCenter(e.touches),
+      scale: state.imageViewerTransform.scale,
+      x: state.imageViewerTransform.x,
+      y: state.imageViewerTransform.y,
+    };
+  }
+
+  function moveImageViewerTouch(e) {
+    const start = state.imageViewerTouch;
+    if (!start || e.touches.length !== 2) return;
+    e.preventDefault();
+    const center = touchCenter(e.touches);
+    const nextScale = clampImageScale(start.scale * (touchDistance(e.touches) / start.distance));
+    state.imageViewerTransform = {
+      scale: nextScale,
+      x: start.x + center.x - start.center.x,
+      y: start.y + center.y - start.center.y,
+    };
+    applyImageViewerTransform();
+  }
+
+  function endImageViewerTouch(e) {
+    if (e.touches.length < 2) state.imageViewerTouch = null;
+  }
+
   function estimateImageSeconds(params) {
     const qualityFactor = params.quality === 'high' ? 130 : params.quality === 'medium' ? 95 : params.quality === 'low' ? 60 : 90;
-    const sizeFactor = params.size === '1536x1024' || params.size === '1024x1536' ? 35 : params.size === 'auto' ? 15 : 20;
+    const sizeFactor = params.size === '3840x2160' || params.size === '2160x3840'
+      ? 95
+      : params.size === '1536x1024' || params.size === '1024x1536'
+        ? 35
+        : params.size === 'auto' ? 15 : 20;
     const editFactor = state.imageRef ? 35 : 0;
     return Math.max(60, qualityFactor + sizeFactor + editFactor);
   }
@@ -1336,6 +1830,88 @@
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
     return s ? `${m}m ${s}s` : `${m}m`;
+  }
+
+  function imageTimeoutMs(params) {
+    return Math.max(10 * 60 * 1000, estimateImageSeconds(params) * 1000 * 3);
+  }
+
+  function startImageProgressTimer() {
+    stopImageProgressTimer();
+    state.imageProgressTimer = setInterval(() => {
+      if (state.mode === 'image' && state.imageJobs.some(job => job.status === 'generating')) {
+        renderImageWorkspace();
+      }
+    }, 1000);
+  }
+
+  function stopImageProgressTimer() {
+    if (!state.imageProgressTimer) return;
+    clearInterval(state.imageProgressTimer);
+    state.imageProgressTimer = null;
+  }
+
+  function cancelImageGeneration(reason = '已取消生成') {
+    const job = state.imageJobs.find(j => j.status === 'generating');
+    if (!job) return;
+    if (state.imageAbortController) state.imageAbortController.abort();
+    job.status = 'cancelled';
+    job.error = reason;
+    job.durationMs = Date.now() - (job.startedAt || job.createdAt);
+    state.isGeneratingImage = false;
+    state.imageAbortController = null;
+    stopImageProgressTimer();
+    persist();
+    imageDbPutJob(job);
+    renderImageWorkspace();
+    updateSidebar();
+    updateImageGenerateBtn();
+  }
+
+  async function updateImageHistorySummary() {
+    const usage = await estimateImageDbUsage();
+    const outputCount = state.imageJobs.reduce((sum, job) => sum + (job.outputs?.length || 0), 0);
+    dom.imageHistorySummary.textContent = `绘画历史 ${state.imageJobs.length} 条，图片 ${outputCount} 张，浏览器存储约 ${formatBytes(usage) || '未知'}`;
+  }
+
+  async function trimImageHistory(keep = 20) {
+    const sorted = state.imageJobs.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    const keepJobs = sorted.slice(0, keep);
+    const removeJobs = sorted.slice(keep);
+    if (!removeJobs.length) {
+      showToast('无需清理');
+      updateImageHistorySummary();
+      return;
+    }
+    if (!confirm(`将删除 ${removeJobs.length} 条较早的绘画历史，确认继续？`)) return;
+    state.imageJobs = keepJobs;
+    if (state.currentImageJobId && !state.imageJobs.some(j => j.id === state.currentImageJobId)) {
+      state.currentImageJobId = state.imageJobs[0]?.id || null;
+    }
+    await Promise.allSettled(removeJobs.map(j => imageDbDeleteJob(j.id)));
+    persist();
+    updateSidebar();
+    renderImageWorkspace();
+    updateImageHistorySummary();
+    showToast('已清理绘画历史');
+  }
+
+  async function clearImageHistory() {
+    if (!state.imageJobs.length) {
+      showToast('没有绘画历史');
+      updateImageHistorySummary();
+      return;
+    }
+    if (!confirm(`确认删除全部 ${state.imageJobs.length} 条绘画历史？此操作不可恢复。`)) return;
+    const ids = state.imageJobs.map(j => j.id);
+    state.imageJobs = [];
+    state.currentImageJobId = null;
+    await Promise.allSettled(ids.map(imageDbDeleteJob));
+    persist();
+    updateSidebar();
+    renderImageWorkspace();
+    updateImageHistorySummary();
+    showToast('绘画历史已清空');
   }
 
   function renderImageWorkspace() {
@@ -1351,9 +1927,12 @@
         job.durationMs ? `耗时 ${formatDuration(job.durationMs)}` : '',
         new Date(job.createdAt).toLocaleString(),
       ].filter(Boolean).map(esc).join(' · ');
-      const outputs = (job.outputs || []).map((out, i) => `
-        <div class="image-result" data-job="${job.id}" data-index="${i}">
+      const outputs = (job.outputs || []).map((out, i) => {
+        const outputMeta = imageOutputMeta(out, job.params?.outputFormat).map(esc).join('<span>·</span>');
+        return `
+        <div class="image-result" data-job="${esc(job.id)}" data-index="${i}">
           <img src="${esc(dataUrlForImage(out, job.params?.outputFormat))}" alt="${esc(job.prompt)}" loading="lazy" class="image-preview">
+          <div class="image-result-meta">${outputMeta}</div>
           <div class="image-result-actions">
             <button class="msg-action-btn image-action" data-action="view" data-job="${job.id}" data-index="${i}" title="放大查看">${SVG_MAXIMIZE}</button>
             <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${job.id}" data-index="${i}" title="以图编辑">${SVG_EDIT}</button>
@@ -1361,20 +1940,24 @@
             <button class="msg-action-btn image-action" data-action="download" data-job="${job.id}" data-index="${i}" title="下载">${SVG_DOWNLOAD}</button>
           </div>
         </div>
-      `).join('');
+      `;
+      }).join('');
       const inputImage = job.inputImage
         ? `<div class="image-input-ref">
             <img src="${esc(job.inputImage.base64)}" alt="${esc(job.inputImage.name || '参考图')}">
             <span>参考图：${esc(job.inputImage.name || '生成图')}</span>
           </div>`
         : '';
+      const waitedMs = Date.now() - (job.startedAt || job.createdAt);
+      const estimatedMs = (job.estimatedSeconds || estimateImageSeconds(job.params || DEFAULT_IMAGE_PARAMS)) * 1000;
       const progress = job.status === 'generating'
         ? `<div class="image-progress">
             <div class="image-spinner"></div>
-            <div>
-              <div class="image-progress-title">正在生成图片</div>
-              <div class="image-progress-note">预计约 ${formatDuration((job.estimatedSeconds || estimateImageSeconds(job.params || DEFAULT_IMAGE_PARAMS)) * 1000)}，高峰期、参考图编辑或高质量图片可能更久。</div>
+            <div class="image-progress-body">
+              <div class="image-progress-title">正在生成图片 · 已等待 ${formatDuration(waitedMs)}</div>
+              <div class="image-progress-note">预计约 ${formatDuration(estimatedMs)}，高峰期、参考图编辑或高质量图片可能更久。请勿刷新或关闭页面。</div>
             </div>
+            <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${job.id}" type="button">取消</button>
           </div>`
         : '';
       return `
@@ -1386,7 +1969,7 @@
             </div>
             <div class="image-job-actions">
               <button class="btn-secondary image-action" data-action="reuse" data-job="${job.id}" type="button">复用</button>
-              <button class="btn-secondary image-action" data-action="retry" data-job="${job.id}" type="button">重绘</button>
+              <button class="btn-secondary image-action" data-action="retry" data-job="${job.id}" type="button">${job.status === 'generating' ? '生成中' : '重绘'}</button>
             </div>
           </div>
           <p class="image-job-prompt">${esc(job.prompt)}</p>
@@ -1404,7 +1987,8 @@
       b64: item.b64_json || '',
       url: item.url || '',
       revisedPrompt: item.revised_prompt || '',
-      format,
+      format: normalizeImageFormat(item.output_format || item.mime_type || format),
+      bytes: item.b64_json ? imageByteSize({ b64: item.b64_json }) : 0,
       createdAt: Date.now(),
     })).filter(item => item.b64 || item.url);
   }
@@ -1416,7 +2000,14 @@
       if (Array.isArray(value)) { value.forEach(scan); return; }
       if (typeof value !== 'object') return;
       if ((value.type === 'image_generation_call' || value.type === 'image_generation') && value.result) {
-        outputs.push({ b64: value.result, url: '', revisedPrompt: '', format, createdAt: Date.now() });
+        outputs.push({
+          b64: value.result,
+          url: '',
+          revisedPrompt: '',
+          format: normalizeImageFormat(value.output_format || value.mime_type || format),
+          bytes: imageByteSize({ b64: value.result }),
+          createdAt: Date.now(),
+        });
       }
       Object.keys(value).forEach(k => scan(value[k]));
     };
@@ -1444,7 +2035,7 @@
     }];
   }
 
-  async function requestMappedImage(prompt, params, ref = null) {
+  async function requestMappedImage(prompt, params, ref = null, signal = null) {
     const url = requestUrl(state.imageBaseUrl, '/responses');
     const body = {
       model: state.imageMapModel,
@@ -1456,6 +2047,7 @@
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
       body: JSON.stringify(body),
+      signal,
     });
     if (!resp.ok) {
       body.tool_choice = { type: 'image_generation' };
@@ -1463,6 +2055,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
         body: JSON.stringify(body),
+        signal,
       });
     }
     if (!resp.ok && (body.tools[0].output_format || body.tools[0].background || body.tools[0].quality || body.tools[0].size)) {
@@ -1476,11 +2069,12 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
         body: JSON.stringify(fallback),
+        signal,
       });
     }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-      throw new Error(err.error?.message || `HTTP ${resp.status}`);
+      throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
     }
     return parseResponseImageOutputs(await resp.json(), params.outputFormat);
   }
@@ -1498,13 +2092,74 @@
     return body;
   }
 
-  async function requestOneImage(prompt, params) {
+  function extractChatText(data) {
+    const msg = data?.choices?.[0]?.message;
+    if (!msg) return '';
+    if (typeof msg.content === 'string') return msg.content.trim();
+    if (Array.isArray(msg.content)) {
+      return msg.content.map(part => part.text || '').join('').trim();
+    }
+    return '';
+  }
+
+  async function optimizeImagePrompt() {
+    if (!imagePromptOptimizerConfigured()) {
+      showSettings('image');
+      showToast('请先配置提示词优化模型');
+      return;
+    }
+    const prompt = dom.imagePrompt.value.trim();
+    if (!prompt || state.isOptimizingImagePrompt || state.isGeneratingImage) return;
+    const model = state.imagePromptModel;
+    state.isOptimizingImagePrompt = true;
+    updateImageGenerateBtn();
+    showToast('正在优化提示词...');
+    try {
+      const resp = await apiFetch(requestUrl(state.imageBaseUrl, '/chat/completions'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        body: JSON.stringify({
+          model,
+          temperature: 0.4,
+          messages: [
+            {
+              role: 'system',
+              content: '你是专业图像生成提示词编辑器。把用户的中文或英文需求优化成更适合图像生成模型的提示词。只输出优化后的提示词，不要解释，不要使用 Markdown。保留用户核心意图，补充主体、构图、风格、光线、色彩、细节、画面质量。不要加入违反安全或版权的内容。',
+            },
+            {
+              role: 'user',
+              content: `优化这个绘画提示词：\n${prompt}`,
+            },
+          ],
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
+        throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, requestUrl(state.imageBaseUrl, '/chat/completions'));
+      }
+      const optimized = extractChatText(await resp.json()).replace(/^["“]|["”]$/g, '').trim();
+      if (!optimized) throw new Error('接口未返回优化后的提示词');
+      dom.imagePrompt.value = optimized;
+      saveImageParams();
+      updateImageGenerateBtn();
+      showToast('提示词已优化');
+    } catch (e) {
+      showToast('优化失败');
+      alert(`优化提示词失败: ${e.message}\n\n请确认绘画设置里的“提示词优化模型”支持 /chat/completions，并且绘画 Base URL 与 API Key 可用。`);
+    } finally {
+      state.isOptimizingImagePrompt = false;
+      updateImageGenerateBtn();
+    }
+  }
+
+  async function requestOneImage(prompt, params, signal = null) {
     const url = requestUrl(state.imageBaseUrl, '/images/generations');
     let body = buildImageRequestBody(prompt, params);
     let resp = await apiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
       body: JSON.stringify(body),
+      signal,
     });
     if (!resp.ok && (body.output_format || body.background || body.quality)) {
       body = { model: state.imageModel, prompt: prompt.trim(), n: 1 };
@@ -1513,11 +2168,12 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
         body: JSON.stringify(body),
+        signal,
       });
     }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-      throw new Error(err.error?.message || `HTTP ${resp.status}`);
+      throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
     }
     return parseImageOutputs(await resp.json(), params.outputFormat);
   }
@@ -1537,7 +2193,7 @@
     return `${base || 'reference'}.${ext}`;
   }
 
-  async function requestImageEdit(prompt, params, ref) {
+  async function requestImageEdit(prompt, params, ref, signal = null) {
     const url = requestUrl(state.imageBaseUrl, '/images/edits');
     const form = new FormData();
     const refBlob = dataUrlToBlob(ref.base64);
@@ -1553,6 +2209,7 @@
       method: 'POST',
       headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
       body: form,
+      signal,
     });
     if (!resp.ok && (form.has('quality') || form.has('output_format') || form.has('background'))) {
       const fallback = new FormData();
@@ -1564,11 +2221,12 @@
         method: 'POST',
         headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
         body: fallback,
+        signal,
       });
     }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-      throw new Error(err.error?.message || `HTTP ${resp.status}`);
+      throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
     }
     return parseImageOutputs(await resp.json(), params.outputFormat);
   }
@@ -1578,6 +2236,8 @@
     if (!prompt.trim() || state.isGeneratingImage) return;
 
     state.isGeneratingImage = true;
+    const controller = new AbortController();
+    state.imageAbortController = controller;
     updateImageGenerateBtn();
     const startedAt = Date.now();
     const ref = state.imageRef ? Object.assign({}, state.imageRef) : null;
@@ -1594,6 +2254,7 @@
       outputs: [],
       error: null,
       status: 'generating',
+      startedAt,
       estimatedSeconds,
       durationMs: null,
     };
@@ -1608,6 +2269,7 @@
       job.error = null;
       job.outputs = [];
       job.status = 'generating';
+      job.startedAt = startedAt;
       job.estimatedSeconds = estimatedSeconds;
       job.durationMs = null;
     }
@@ -1615,13 +2277,16 @@
     imageDbPutJob(job);
     updateSidebar();
     renderImageWorkspace();
+    startImageProgressTimer();
+    let timeoutId = null;
 
     try {
+      timeoutId = setTimeout(() => controller.abort(), imageTimeoutMs(params));
       job.outputs = state.imageMapModel
-        ? await requestMappedImage(prompt, params, job.inputImage)
+        ? await requestMappedImage(prompt, params, job.inputImage, controller.signal)
         : job.inputImage
-          ? await requestImageEdit(prompt, params, job.inputImage)
-          : await requestOneImage(prompt, params);
+          ? await requestImageEdit(prompt, params, job.inputImage, controller.signal)
+          : await requestOneImage(prompt, params, controller.signal);
       if (job.outputs.length === 0) throw new Error('接口未返回可显示的图片数据');
       job.error = null;
       job.status = 'done';
@@ -1632,12 +2297,16 @@
       }
       showToast('图片已生成');
     } catch (e) {
-      job.error = e.message;
-      job.status = 'error';
+      const aborted = e?.name === 'AbortError';
+      job.error = aborted ? '请求已中断。可能是手动取消、页面刷新或等待超时，请重试。' : `${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`;
+      job.status = aborted ? 'cancelled' : 'error';
       job.durationMs = Date.now() - startedAt;
-      showToast('生成失败');
+      showToast(aborted ? '生成已中断' : '生成失败');
     } finally {
       state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      stopImageProgressTimer();
+      if (timeoutId) clearTimeout(timeoutId);
       if (job.status === 'generating') job.status = 'done';
       persist();
       imageDbPutJob(job);
@@ -1651,6 +2320,10 @@
   // Sidebar
   dom.sidebarToggle.addEventListener('click', toggleSidebar);
   dom.sidebarBackdrop.addEventListener('click', closeSidebarMobile);
+  dom.sidebarSearch.addEventListener('input', () => {
+    state.sidebarSearch = dom.sidebarSearch.value;
+    updateSidebar();
+  });
   dom.modeChatBtn.addEventListener('click', () => {
     switchMode('chat');
   });
@@ -1682,6 +2355,7 @@
       dom.paramTopP.value = conv.topP;
       dom.paramMaxTokens.value = conv.maxTokens;
       dom.convRenameInput.value = conv.title;
+      dom.convRoleInput.value = conv.systemPrompt || '';
     }
   }
 
@@ -1691,6 +2365,7 @@
     conv.temperature = parseFloat(dom.paramTemperature.value) || 0.7;
     conv.topP = parseFloat(dom.paramTopP.value) || 1;
     conv.maxTokens = parseInt(dom.paramMaxTokens.value) || 4096;
+    conv.systemPrompt = dom.convRoleInput.value.trim();
     const newName = dom.convRenameInput.value.trim();
     if (newName) conv.title = newName;
     persist();
@@ -1706,11 +2381,21 @@
     }
   }
 
+  function toggleImageSettings() {
+    dom.imageSettingsPanel.classList.toggle('hidden');
+    const open = !dom.imageSettingsPanel.classList.contains('hidden');
+    dom.imageSettingsBtn.classList.toggle('active', open);
+    if (open) syncImageParams();
+  }
+
   dom.convSettingsBtn.addEventListener('click', toggleConvSettings);
+  dom.imageSettingsBtn.addEventListener('click', toggleImageSettings);
   dom.paramTemperature.addEventListener('change', saveConvParams);
   dom.paramTopP.addEventListener('change', saveConvParams);
   dom.paramMaxTokens.addEventListener('change', saveConvParams);
   dom.convRenameInput.addEventListener('change', saveConvParams);
+  dom.convRoleInput.addEventListener('change', saveConvParams);
+  dom.convRoleInput.addEventListener('blur', saveConvParams);
 
   // Conversation list
   dom.convList.addEventListener('click', (e) => {
@@ -1807,8 +2492,65 @@
     refreshModelsForSelect(dom.cfgBaseUrl.value.trim(), dom.cfgApiKey.value.trim(), dom.cfgModelSelect, dom.cfgRefreshModels);
   });
 
-  dom.cfgRefreshImageModels.addEventListener('click', () => {
-    refreshModelsForSelect(dom.cfgImageBaseUrl.value.trim(), dom.cfgImageApiKey.value.trim(), dom.cfgImageModelSelect, dom.cfgRefreshImageModels, { image: true });
+  dom.cfgRefreshImageModels.addEventListener('click', async () => {
+    await refreshModelsForSelect(dom.cfgImageBaseUrl.value.trim(), dom.cfgImageApiKey.value.trim(), dom.cfgImageModelSelect, dom.cfgRefreshImageModels, { image: true });
+    populateImageMapModelSelect();
+    populateImagePromptModelSelect();
+    dom.cfgImageMapModelSelect.value = state.imageMapModel;
+    dom.cfgImagePromptModelSelect.value = state.imagePromptModel;
+  });
+
+  dom.cfgTest.addEventListener('click', () => {
+    const testingImageTab = dom.settingsImageTab.classList.contains('active');
+    const baseUrl = testingImageTab ? dom.cfgImageBaseUrl.value.trim() : dom.cfgBaseUrl.value.trim();
+    const apiKey = testingImageTab ? dom.cfgImageApiKey.value.trim() : dom.cfgApiKey.value.trim();
+    testConnection(baseUrl, apiKey, dom.cfgTest);
+  });
+
+  dom.cfgExportSafe.addEventListener('click', () => {
+    downloadJson(`ownchat-config-${Date.now()}.json`, appConfigSnapshot(false));
+  });
+  dom.cfgExportFull.addEventListener('click', () => {
+    if (!confirm('含密钥导出会把 API Key 写入 JSON 文件。确认继续？')) return;
+    downloadJson(`ownchat-config-with-keys-${Date.now()}.json`, appConfigSnapshot(true));
+  });
+  dom.cfgImportFile.addEventListener('click', () => dom.cfgImportInput.click());
+  dom.cfgImportInput.addEventListener('change', () => {
+    const file = dom.cfgImportInput.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        showConfigImportConfirm(parseImportConfig(String(reader.result || '')));
+      } catch (e) {
+        alert(`导入配置失败: ${e.message}`);
+      }
+    };
+    reader.readAsText(file);
+    dom.cfgImportInput.value = '';
+  });
+
+  dom.imageHistoryStats.addEventListener('click', updateImageHistorySummary);
+  dom.imageHistoryTrim.addEventListener('click', () => trimImageHistory(20));
+  dom.imageHistoryClear.addEventListener('click', clearImageHistory);
+
+  dom.configImportClose.addEventListener('click', hideConfigImportConfirm);
+  dom.configImportCancel.addEventListener('click', hideConfigImportConfirm);
+  dom.configImportModal.querySelector('.modal-backdrop').addEventListener('click', hideConfigImportConfirm);
+  dom.configImportApply.addEventListener('click', () => {
+    if (!state.pendingImportConfig) return;
+    try {
+      applyImportedConfig(state.pendingImportConfig);
+      hideConfigImportConfirm();
+      hideSetup();
+      hideSettings();
+      if (!currentConv()) newConv();
+      updateSidebar();
+      syncConvParams();
+      showToast('接口配置已导入');
+    } catch (e) {
+      alert(`导入配置失败: ${e.message}`);
+    }
   });
 
   dom.cfgSave.addEventListener('click', () => {
@@ -1821,15 +2563,17 @@
     const im = dom.cfgImageModelManual.value.trim() || dom.cfgImageModelSelect.value;
     const imm = dom.cfgImageMapModelManual.value.trim();
     const mapModel = imm || dom.cfgImageMapModelSelect.value;
+    const ipm = dom.cfgImagePromptModelManual.value.trim();
+    const promptModel = ipm || dom.cfgImagePromptModelSelect.value;
 
     const needChat = !savingImageTab;
     const needImage = savingImageTab;
 
-    if (needChat && (!b || !k || !m)) { alert('请填写聊天配置项并选择模型'); return; }
+    if (needChat && (!b || !k || !m)) { alert('请填写对话配置项并选择模型'); return; }
     if (needImage && (!ib || !ik || !im)) { alert('请填写绘画配置项并选择模型'); return; }
 
     if (needChat || b || k || dom.cfgModelManual.value.trim()) {
-      if (!b || !k || !m) { alert('聊天配置需要同时填写 Base URL、API Key 和模型'); return; }
+      if (!b || !k || !m) { alert('对话配置需要同时填写 Base URL、API Key 和模型'); return; }
       state.baseUrl = b;
       state.apiKey = k;
       state.model = m;
@@ -1841,7 +2585,8 @@
       state.imageApiKey = ik;
       state.imageModel = im;
       state.imageMapModel = mapModel || '';
-      state.imageModelsCache = mergeUnique([im, mapModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
+      state.imagePromptModel = promptModel || '';
+      state.imageModelsCache = mergeUnique([im, mapModel, promptModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
     }
     persist();
     updateModelBadge();
@@ -1918,6 +2663,10 @@
       dom.convSettingsPanel.classList.add('hidden');
       dom.convSettingsBtn.classList.remove('active');
     }
+    if (!e.target.closest('#image-settings-panel') && !e.target.closest('#image-settings-btn')) {
+      dom.imageSettingsPanel.classList.add('hidden');
+      dom.imageSettingsBtn.classList.remove('active');
+    }
   });
 
   // Message action buttons & thinking toggle
@@ -1947,11 +2696,11 @@
     if (!msg) return;
 
     if (btn.dataset.action === 'copy') {
-      copyText(msg.content);
+      copyText(copyableMessageText(msg));
     } else if (btn.dataset.action === 'retry') {
       retryMessage(idx);
     } else if (btn.dataset.action === 'edit') {
-      const text = typeof msg.content === 'string' ? msg.content : msg.content.find(p => p.type === 'text')?.text || '';
+      const text = messageTextContent(msg);
       dom.userInput.value = text;
       dom.userInput.focus();
       autoResize();
@@ -2021,6 +2770,7 @@
 
   dom.imagePrompt.addEventListener('input', updateImageGenerateBtn);
   dom.imageRefBtn.addEventListener('click', () => dom.imageRefInput.click());
+  dom.imageOptimizeBtn.addEventListener('click', optimizeImagePrompt);
   dom.imageRefInput.addEventListener('change', () => {
     const file = dom.imageRefInput.files?.[0];
     if (!file) return;
@@ -2082,8 +2832,11 @@
       updateSidebar();
       dom.imagePrompt.focus();
     } else if (btn.dataset.action === 'retry') {
+      if (job.status === 'generating') return;
       state.currentImageJobId = job.id;
       generateImage(job.prompt, job.params || state.imageDefaults, job);
+    } else if (btn.dataset.action === 'cancel') {
+      cancelImageGeneration();
     } else if (btn.dataset.action === 'view') {
       const out = job.outputs[parseInt(btn.dataset.index, 10)];
       if (out) openImageViewer(job, out);
@@ -2116,9 +2869,27 @@
       downloadImage(job, out);
     }
   });
+  dom.imageGallery.addEventListener('load', (e) => {
+    const img = e.target.closest?.('.image-preview');
+    if (!img) return;
+    const result = img.closest('.image-result');
+    if (!result) return;
+    updateImageOutputMeta(result.dataset.job, parseInt(result.dataset.index, 10), img);
+  }, true);
 
   dom.imageViewerClose.addEventListener('click', closeImageViewer);
   dom.imageViewer.querySelector('.image-viewer-backdrop').addEventListener('click', closeImageViewer);
+  dom.imageViewerImg.addEventListener('wheel', zoomImageViewer, { passive: false });
+  dom.imageViewerImg.addEventListener('pointerdown', startImageViewerDrag);
+  dom.imageViewer.addEventListener('pointermove', moveImageViewerDrag);
+  dom.imageViewer.addEventListener('pointerup', endImageViewerDrag);
+  dom.imageViewer.addEventListener('pointercancel', endImageViewerDrag);
+  dom.imageViewerImg.addEventListener('contextmenu', e => e.preventDefault());
+  dom.imageViewerImg.addEventListener('dblclick', resetImageViewerTransform);
+  dom.imageViewerImg.addEventListener('touchstart', startImageViewerTouch, { passive: false });
+  dom.imageViewerImg.addEventListener('touchmove', moveImageViewerTouch, { passive: false });
+  dom.imageViewerImg.addEventListener('touchend', endImageViewerTouch);
+  dom.imageViewerImg.addEventListener('touchcancel', endImageViewerTouch);
   dom.imageViewerCopy.addEventListener('click', () => {
     const current = currentViewerImage();
     if (current) copyImage(current.job, current.out);
@@ -2128,8 +2899,18 @@
     if (current) downloadImage(current.job, current.out);
   });
 
+  window.addEventListener('beforeunload', (e) => {
+    if (!state.isGeneratingImage) return;
+    e.preventDefault();
+    e.returnValue = '图片正在生成，刷新或关闭页面会中断当前请求。';
+  });
+
   // Send
   dom.sendBtn.addEventListener('click', () => {
+    if (state.isStreaming) {
+      state.chatAbortController?.abort();
+      return;
+    }
     const text = dom.userInput.value.trim();
     if (!ensureModeConfigured('chat')) return;
     if (!text || state.isStreaming) return;
@@ -2167,8 +2948,9 @@
   updateSendBtn();
   syncImageParams();
   updateImageGenerateBtn();
+  importConfigFromUrl();
 
-  if (configured()) {
+  if (configured() || imageConfigured()) {
     hideSetup();
     if (currentConv()) {
       renderMessages();
