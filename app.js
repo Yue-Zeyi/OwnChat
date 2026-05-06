@@ -189,6 +189,42 @@
     return '#';
   }
 
+  function splitThinkTags(raw) {
+    const text = raw || '';
+    const contentParts = [];
+    const reasoningParts = [];
+    const tagRe = /<\/?think>/ig;
+    let last = 0;
+    let inThink = false;
+    let sawThink = false;
+    let match;
+
+    while ((match = tagRe.exec(text))) {
+      sawThink = true;
+      if (/^<think>$/i.test(match[0])) {
+        if (inThink) {
+          reasoningParts.push(text.slice(last, match.index));
+        } else {
+          contentParts.push(text.slice(last, match.index));
+          inThink = true;
+        }
+      } else if (inThink) {
+        reasoningParts.push(text.slice(last, match.index));
+        inThink = false;
+      } else {
+        contentParts.push(text.slice(last, match.index));
+      }
+      last = match.index + match[0].length;
+    }
+
+    if (inThink) reasoningParts.push(text.slice(last));
+    else contentParts.push(text.slice(last));
+
+    const reasoning = reasoningParts.join('').replace(/^\s+|\s+$/g, '');
+    const content = sawThink ? contentParts.join('').replace(/^\s+/, '') : text;
+    return { reasoning, content, openThink: inThink };
+  }
+
   function highlightCode(code, lang) {
     // Collect all highlight regions first, then build output in one pass (no placeholders)
     const regions = [];
@@ -305,9 +341,48 @@
   function imageConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imageModel; }
 
   function normalizeUrl(u) {
+    u = (u || '').trim();
+    if (!u) throw new Error('Base URL 不能为空');
+    if (!/^(https?:\/\/|\/)/i.test(u)) throw new Error('Base URL 需要以 http://、https:// 或 / 开头');
     u = u.replace(/\/+$/, '');
     if (!u.endsWith('/v1')) u += '/v1';
     return u;
+  }
+
+  function requestUrl(baseUrl, path) {
+    return normalizeUrl(baseUrl) + path;
+  }
+
+  function describeNetworkError(err, url) {
+    const msg = err?.message || String(err);
+    if (!/Failed to fetch|NetworkError|Load failed|fetch/i.test(msg)) return err;
+    let target = url;
+    try { target = new URL(url, window.location.href).origin; } catch { /* keep raw url */ }
+    const hints = [`无法连接到 ${target}`];
+    try {
+      const parsed = new URL(url, window.location.href);
+      if (window.location.protocol === 'https:' && parsed.protocol === 'http:') {
+        hints.push('当前页面是 HTTPS，但接口是 HTTP，浏览器会拦截混合内容');
+      }
+      if (parsed.origin !== window.location.origin) {
+        hints.push('这是跨域请求，服务端必须允许 CORS；如果服务不支持，请改用同源代理地址');
+      }
+      if (/api\.openai\.com$/i.test(parsed.hostname)) {
+        hints.push('浏览器直连 OpenAI API 容易被 CORS 拦截，建议通过本地或服务端代理转发');
+      }
+    } catch { /* ignore */ }
+    if (window.location.protocol === 'file:') {
+      hints.push('当前是 file:// 打开页面，建议用本地静态服务访问页面');
+    }
+    return new Error(`网络请求失败：${hints.join('；')}。请检查 Base URL、代理服务和浏览器控制台 Network 面板。`);
+  }
+
+  async function apiFetch(url, options) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      throw describeNetworkError(err, url);
+    }
   }
 
   // ===== IndexedDB for large image history =====
@@ -698,10 +773,13 @@
     dom.messages.innerHTML = conv.messages.map((msg, i) => {
       const isUser = msg.role === 'user';
       const avatar = isUser ? SVG_PERSON : SVG_BOT;
+      const splitContent = !isUser && typeof msg.content === 'string' ? splitThinkTags(msg.content) : null;
+      const reasoningText = !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
+      const mainContent = splitContent?.reasoning ? splitContent.content : msg.content;
 
       // Build content: thinking block + main content
       let contentHtml = '';
-      if (!isUser && msg.reasoningContent) {
+      if (!isUser && reasoningText) {
         const thinkingTimeStr = msg.reasoningTimeMs != null
           ? (msg.reasoningTimeMs >= 1000 ? (msg.reasoningTimeMs / 1000).toFixed(1) + 's' : msg.reasoningTimeMs + 'ms')
           : '';
@@ -711,7 +789,7 @@
               <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
               <span>思考过程</span>${thinkingTimeStr ? ` · ${thinkingTimeStr}` : ''}
             </button>
-            <div class="thinking-content"><div class="msg-md">${renderMd(msg.reasoningContent)}</div></div>
+            <div class="thinking-content"><div class="msg-md">${renderMd(reasoningText)}</div></div>
           </div>
         `;
       }
@@ -729,7 +807,7 @@
           }
         }
       } else {
-        contentHtml += `<div class="msg-md">${renderMd(msg.content)}</div>`;
+        contentHtml += `<div class="msg-md">${renderMd(mainContent)}</div>`;
       }
 
       // Build meta row: timestamp + latency + tokens + model + actions
@@ -739,7 +817,7 @@
         const pad = n => String(n).padStart(2, '0');
         metaParts.push(`<span class="msg-meta-item">${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}</span>`);
       }
-      if (!isUser && msg.reasoningContent && msg.reasoningTimeMs != null) {
+      if (!isUser && reasoningText && msg.reasoningTimeMs != null) {
         metaParts.push(`<span class="msg-meta-item">思考 ${msg.reasoningTimeMs >= 1000 ? (msg.reasoningTimeMs / 1000).toFixed(1) + 's' : msg.reasoningTimeMs + 'ms'}</span>`);
       } else if (!isUser && msg.firstTokenMs !== undefined) {
         metaParts.push(`<span class="msg-meta-item">${msg.firstTokenMs >= 1000 ? (msg.firstTokenMs / 1000).toFixed(1) + 's' : msg.firstTokenMs + 'ms'}</span>`);
@@ -818,6 +896,17 @@
     dom.messages.scrollTop = dom.messages.scrollHeight;
   }
 
+  function updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime) {
+    if (streamEls.thinkingBlock.classList.contains('hidden')) {
+      streamEls.thinkingBlock.classList.remove('hidden');
+      streamEls.thinkingBlock.classList.add('expanded');
+    }
+    const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
+    streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+    streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
+    dom.messages.scrollTop = dom.messages.scrollHeight;
+  }
+
   // ===== Model Dropdown =====
   function renderModelDropdown() {
     const models = state.mode === 'image' ? state.imageModelsCache : state.modelsCache;
@@ -846,8 +935,8 @@
   // ===== Fetch Models =====
   async function fetchModels(baseUrl, apiKey) {
     try {
-      const url = normalizeUrl(baseUrl) + '/models';
-      const resp = await fetch(url, { headers: { 'Authorization': `Bearer ${apiKey}` } });
+      const url = requestUrl(baseUrl, '/models');
+      const resp = await apiFetch(url, { headers: { 'Authorization': `Bearer ${apiKey}` } });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
       return (data.data || []).map(m => m.id).sort();
@@ -964,7 +1053,7 @@
       reqBody.temperature = conv.temperature;
       reqBody.top_p = conv.topP;
       reqBody.max_tokens = conv.maxTokens;
-      const resp = await fetch(normalizeUrl(state.baseUrl) + '/chat/completions', {
+      const resp = await apiFetch(requestUrl(state.baseUrl, '/chat/completions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
         body: JSON.stringify(reqBody),
@@ -980,7 +1069,10 @@
 
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
+      let assistantRawContent = '';
       let assistantContent = '';
+      let apiReasoningContent = '';
+      let tagReasoningContent = '';
       let reasoningContent = '';
       let buffer = '';
       let firstTokenTime = null;
@@ -1008,24 +1100,28 @@
 
             if (reasoningDelta) {
               if (reasoningStartTime === null) reasoningStartTime = Date.now();
-              reasoningContent += reasoningDelta;
-              if (streamEls.thinkingBlock.classList.contains('hidden')) {
-                streamEls.thinkingBlock.classList.remove('hidden');
-                streamEls.thinkingBlock.classList.add('expanded');
-              }
-              streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
-              dom.messages.scrollTop = dom.messages.scrollHeight;
+              apiReasoningContent += reasoningDelta;
+              reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
+              updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
             }
 
             if (contentDelta) {
               if (firstTokenTime === null) firstTokenTime = Date.now() - streamStartTime;
-              if (reasoningContent && reasoningEndTime === null) {
+              assistantRawContent += contentDelta;
+              const splitContent = splitThinkTags(assistantRawContent);
+              assistantContent = splitContent.content;
+              tagReasoningContent = splitContent.reasoning;
+              reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
+              if (reasoningContent) {
+                if (reasoningStartTime === null) reasoningStartTime = Date.now();
+                updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
+              }
+              if (reasoningContent && !splitContent.openThink && reasoningEndTime === null) {
                 reasoningEndTime = Date.now();
                 streamEls.thinkingBlock.classList.remove('expanded');
                 const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
                 streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
               }
-              assistantContent += contentDelta;
               updateStream(streamEls.contentMd, assistantContent);
             }
           } catch { /* skip */ }
@@ -1349,20 +1445,21 @@
   }
 
   async function requestMappedImage(prompt, params, ref = null) {
+    const url = requestUrl(state.imageBaseUrl, '/responses');
     const body = {
       model: state.imageMapModel,
       input: mappedImageInput(prompt, ref),
       tools: [imageToolOptions(params)],
       tool_choice: 'required',
     };
-    let resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/responses', {
+    let resp = await apiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
       body: JSON.stringify(body),
     });
     if (!resp.ok) {
       body.tool_choice = { type: 'image_generation' };
-      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/responses', {
+      resp = await apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
         body: JSON.stringify(body),
@@ -1375,7 +1472,7 @@
         tools: [{ type: 'image_generation' }],
         tool_choice: 'required',
       };
-      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/responses', {
+      resp = await apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
         body: JSON.stringify(fallback),
@@ -1402,8 +1499,9 @@
   }
 
   async function requestOneImage(prompt, params) {
+    const url = requestUrl(state.imageBaseUrl, '/images/generations');
     let body = buildImageRequestBody(prompt, params);
-    let resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/generations', {
+    let resp = await apiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
       body: JSON.stringify(body),
@@ -1411,7 +1509,7 @@
     if (!resp.ok && (body.output_format || body.background || body.quality)) {
       body = { model: state.imageModel, prompt: prompt.trim(), n: 1 };
       if (params.size !== 'auto') body.size = params.size;
-      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/generations', {
+      resp = await apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
         body: JSON.stringify(body),
@@ -1440,6 +1538,7 @@
   }
 
   async function requestImageEdit(prompt, params, ref) {
+    const url = requestUrl(state.imageBaseUrl, '/images/edits');
     const form = new FormData();
     const refBlob = dataUrlToBlob(ref.base64);
     form.append('model', state.imageModel);
@@ -1450,7 +1549,7 @@
     if (params.outputFormat && !/^dall-e/i.test(state.imageModel)) form.append('output_format', params.outputFormat);
     if (params.background !== 'auto') form.append('background', params.background);
 
-    let resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/edits', {
+    let resp = await apiFetch(url, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
       body: form,
@@ -1461,7 +1560,7 @@
       fallback.append('prompt', prompt.trim());
       fallback.append('image', refBlob, filenameForBlob(ref.name, refBlob));
       if (params.size !== 'auto') fallback.append('size', params.size);
-      resp = await fetch(normalizeUrl(state.imageBaseUrl) + '/images/edits', {
+      resp = await apiFetch(url, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
         body: fallback,
