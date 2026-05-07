@@ -1174,6 +1174,9 @@
       dom.convList.innerHTML = imageJobs.map(j => `
         <div class="conv-item ${j.id === state.currentImageJobId ? 'active' : ''}" data-id="${j.id}">
           <span class="conv-item-title">${esc(j.title || j.prompt || '未命名绘画')}</span>
+          <button class="conv-item-rename" type="button" title="重命名">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+          </button>
           <button class="conv-item-delete" type="button" title="删除">&times;</button>
         </div>
       `).join('') || `<div class="sidebar-empty">没有匹配的绘画</div>`;
@@ -1340,6 +1343,30 @@
     return splitThinkTags(text).content.trim();
   }
 
+  function copyableMessagePlainText(msg) {
+    const text = copyableMessageText(msg);
+    if (!text) return '';
+    const tmp = document.createElement('div');
+    tmp.innerHTML = renderMd(text);
+    tmp.querySelectorAll('.code-header, .code-copy-btn').forEach(el => el.remove());
+    tmp.querySelectorAll('br').forEach(el => el.replaceWith('\n'));
+    tmp.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, tr').forEach(el => {
+      el.appendChild(document.createTextNode('\n'));
+    });
+    tmp.querySelectorAll('table, ul, ol, .code-block').forEach(el => {
+      el.appendChild(document.createTextNode('\n'));
+    });
+    return tmp.textContent
+      .replace(/\u2713/g, '✓ ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function closeCopyMenus() {
+    dom.messages?.querySelectorAll('.copy-menu.open').forEach(menu => menu.classList.remove('open'));
+  }
+
   function showToast(msg) {
     $('toast-el')?.remove();
     const el = document.createElement('div');
@@ -1465,9 +1492,17 @@
       }
       if (msg.tokens) metaParts.push(`<span class="msg-meta-item">~${msg.tokens} tokens</span>`);
       if (!isUser && msg.model) metaParts.push(`<span class="msg-meta-item msg-model-tag">${esc(msg.model)}</span>`);
-      metaParts.push(`<button class="msg-action-btn" data-action="copy" data-idx="${i}" title="复制">${SVG_COPY}</button>`);
-      if (isUser) metaParts.push(`<button class="msg-action-btn" data-action="edit" data-idx="${i}" title="继续提问">${SVG_EDIT}</button>`);
-      if (!isUser) metaParts.push(`<button class="msg-action-btn" data-action="retry" data-idx="${i}" title="重新生成">${SVG_REFRESH}</button>`);
+      metaParts.push(`
+        <span class="copy-menu">
+          <button class="msg-action-btn" data-action="copy-menu" data-idx="${i}" title="复制" data-tooltip="复制">${SVG_COPY}</button>
+          <span class="copy-menu-popover">
+            <button type="button" data-action="copy-md" data-idx="${i}">复制 Markdown</button>
+            <button type="button" data-action="copy-text" data-idx="${i}">复制纯文本</button>
+          </span>
+        </span>
+      `);
+      if (isUser) metaParts.push(`<button class="msg-action-btn" data-action="edit" data-idx="${i}" title="继续提问" data-tooltip="继续提问">${SVG_EDIT}</button>`);
+      if (!isUser) metaParts.push(`<button class="msg-action-btn" data-action="retry" data-idx="${i}" title="重新生成，会替换这条回复之后的内容" data-tooltip="重新生成，会替换后续内容">${SVG_REFRESH}</button>`);
       const metaRow = metaParts.length ? `<div class="msg-meta">${metaParts.join('')}</div>` : '';
 
       return `
@@ -2463,10 +2498,10 @@
           <img src="${esc(dataUrlForImage(out, job.params?.outputFormat))}" alt="${esc(job.prompt)}" loading="lazy" class="image-preview">
           <div class="image-result-meta">${outputMeta}</div>
           <div class="image-result-actions">
-            <button class="msg-action-btn image-action" data-action="view" data-job="${job.id}" data-index="${i}" title="放大查看">${SVG_MAXIMIZE}</button>
-            <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${job.id}" data-index="${i}" title="以图编辑">${SVG_EDIT}</button>
-            <button class="msg-action-btn image-action" data-action="copy-image" data-job="${job.id}" data-index="${i}" title="复制图片">${SVG_COPY}</button>
-            <button class="msg-action-btn image-action" data-action="download" data-job="${job.id}" data-index="${i}" title="下载">${SVG_DOWNLOAD}</button>
+            <button class="msg-action-btn image-action" data-action="view" data-job="${job.id}" data-index="${i}" title="放大查看" data-tooltip="放大查看">${SVG_MAXIMIZE}</button>
+            <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${job.id}" data-index="${i}" title="以图编辑" data-tooltip="以图编辑">${SVG_EDIT}</button>
+            <button class="msg-action-btn image-action" data-action="copy-image" data-job="${job.id}" data-index="${i}" title="复制图片" data-tooltip="复制图片">${SVG_COPY}</button>
+            <button class="msg-action-btn image-action" data-action="download" data-job="${job.id}" data-index="${i}" title="下载" data-tooltip="下载">${SVG_DOWNLOAD}</button>
           </div>
         </div>
       `;
@@ -3275,8 +3310,44 @@
     updateSendBtn();
   }
 
+  function startSidebarRename(item, currentTitle, onSave) {
+    const titleEl = item.querySelector('.conv-item-title');
+    titleEl.innerHTML = `<input class="conv-rename-input" type="text" value="${esc(currentTitle)}" maxlength="50">`;
+    const input = titleEl.querySelector('.conv-rename-input');
+    input.focus();
+    input.select();
+
+    const finishRename = () => {
+      const newTitle = input.value.trim() || currentTitle;
+      onSave(newTitle);
+    };
+
+    input.addEventListener('blur', finishRename, { once: true });
+    input.addEventListener('keydown', (ke) => {
+      if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
+      if (ke.key === 'Escape') { input.value = currentTitle; input.blur(); }
+    });
+  }
+
   dom.convList.addEventListener('click', (e) => {
     if (state.mode === 'image') {
+      const renameBtn = e.target.closest('.conv-item-rename');
+      if (renameBtn) {
+        const item = renameBtn.closest('.conv-item');
+        const id = item.dataset.id;
+        const job = state.imageJobs.find(j => j.id === id);
+        if (!job) return;
+        const currentTitle = job.title || job.prompt || '未命名绘画';
+        startSidebarRename(item, currentTitle, (newTitle) => {
+          job.title = newTitle;
+          persist();
+          imageDbPutJob(job);
+          updateSidebar();
+          if (id === state.currentImageJobId) renderImageWorkspace();
+        });
+        return;
+      }
+
       const delBtn = e.target.closest('.conv-item-delete');
       if (delBtn) {
         const item = delBtn.closest('.conv-item');
@@ -3306,23 +3377,12 @@
       const id = item.dataset.id;
       const conv = state.conversations.find(c => c.id === id);
       if (!conv) return;
-      const titleEl = item.querySelector('.conv-item-title');
       const currentTitle = conv.title;
-      titleEl.innerHTML = `<input class="conv-rename-input" type="text" value="${esc(currentTitle)}" maxlength="50">`;
-      const input = titleEl.querySelector('.conv-rename-input');
-      input.focus();
-      input.select();
-      const finishRename = () => {
-        const newTitle = input.value.trim() || currentTitle;
+      startSidebarRename(item, currentTitle, (newTitle) => {
         conv.title = newTitle;
         persist();
         updateSidebar();
         if (id === state.currentConvId) renderMessages();
-      };
-      input.addEventListener('blur', finishRename);
-      input.addEventListener('keydown', (ke) => {
-        if (ke.key === 'Enter') { ke.preventDefault(); input.blur(); }
-        if (ke.key === 'Escape') { input.value = currentTitle; input.blur(); }
       });
       return;
     }
@@ -3422,6 +3482,10 @@
     } catch (e) {
       alert(`导入配置失败: ${e.message}`);
     }
+  });
+
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.copy-menu')) closeCopyMenus();
   });
 
   dom.cfgSave.addEventListener('click', () => {
@@ -3544,12 +3608,14 @@
   dom.messages.addEventListener('click', (e) => {
     const thinkingToggle = e.target.closest('.thinking-toggle');
     if (thinkingToggle) {
+      closeCopyMenus();
       thinkingToggle.closest('.thinking-block').classList.toggle('expanded');
       return;
     }
 
     const codeCopyBtn = e.target.closest('.code-copy-btn');
     if (codeCopyBtn) {
+      closeCopyMenus();
       const codeBlock = codeCopyBtn.closest('.code-block');
       const code = codeBlock.querySelector('code')?.textContent || '';
       copyText(code);
@@ -3558,7 +3624,7 @@
       return;
     }
 
-    const btn = e.target.closest('.msg-action-btn');
+    const btn = e.target.closest('.msg-action-btn, .copy-menu-popover button');
     if (!btn) return;
     const conv = currentConv();
     if (!conv) return;
@@ -3566,11 +3632,22 @@
     const msg = conv.messages[idx];
     if (!msg) return;
 
-    if (btn.dataset.action === 'copy') {
+    if (btn.dataset.action === 'copy-menu') {
+      const menu = btn.closest('.copy-menu');
+      const isOpen = menu?.classList.contains('open');
+      closeCopyMenus();
+      if (menu && !isOpen) menu.classList.add('open');
+    } else if (btn.dataset.action === 'copy-md') {
+      closeCopyMenus();
       copyText(copyableMessageText(msg));
+    } else if (btn.dataset.action === 'copy-text') {
+      closeCopyMenus();
+      copyText(copyableMessagePlainText(msg));
     } else if (btn.dataset.action === 'retry') {
+      closeCopyMenus();
       retryMessage(idx);
     } else if (btn.dataset.action === 'edit') {
+      closeCopyMenus();
       const text = messageTextContent(msg);
       dom.userInput.value = text;
       dom.userInput.focus();
