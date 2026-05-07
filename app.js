@@ -47,16 +47,91 @@
   }
 
   // ===== Markdown Renderer =====
+  const mdCopyIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  const MarkdownIt = window.markdownit || (typeof markdownit !== 'undefined' ? markdownit : null);
+  const mdParser = MarkdownIt ? MarkdownIt({
+    html: false,
+    linkify: true,
+    typographer: false,
+    breaks: false,
+    highlight(code, lang) {
+      const safeLang = (lang || '').trim();
+      const highlighted = highlightCode(code.replace(/\n$/, ''), safeLang);
+      return `<div class="code-block">${codeHeader(safeLang)}<pre><code>${highlighted}</code></pre></div>`;
+    },
+  }) : null;
+
+  if (mdParser) {
+    mdParser.core.ruler.after('inline', 'ownchat-task-list', (state) => {
+      const tokens = state.tokens;
+      for (let i = 2; i < tokens.length; i++) {
+        if (tokens[i].type !== 'inline') continue;
+        if (tokens[i - 1]?.type !== 'paragraph_open' || tokens[i - 2]?.type !== 'list_item_open') continue;
+
+        const match = tokens[i].content.match(/^\[([ xX])\]\s+/);
+        if (!match) continue;
+
+        const checked = match[1].trim() !== '';
+        tokens[i - 2].attrJoin('class', checked ? 'task-item task-checked' : 'task-item task-unchecked');
+        tokens[i].content = tokens[i].content.slice(match[0].length);
+        tokens[i].children = tokens[i].children || [];
+        if (tokens[i].children[0]?.type === 'text') {
+          tokens[i].children[0].content = tokens[i].children[0].content.slice(match[0].length);
+        }
+
+        const marker = new state.Token('html_inline', '', 0);
+        marker.content = `<span class="task-box">${checked ? '✓' : ''}</span>`;
+        tokens[i].children.unshift(marker);
+      }
+    });
+
+    const defaultLinkOpen = mdParser.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    mdParser.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+      const token = tokens[idx];
+      const hrefIdx = token.attrIndex('href');
+      if (hrefIdx >= 0) {
+        token.attrs[hrefIdx][1] = sanitizeUrlValue(token.attrs[hrefIdx][1]);
+      }
+      token.attrSet('target', '_blank');
+      token.attrSet('rel', 'noopener noreferrer');
+      return defaultLinkOpen(tokens, idx, options, env, self);
+    };
+    mdParser.renderer.rules.image = (tokens, idx) => {
+      const token = tokens[idx];
+      const src = token.attrGet('src') || '';
+      const alt = token.content || '';
+      return `<img src="${sanitizeUrl(src, { image: true })}" alt="${esc(stripMd(alt))}" loading="lazy">`;
+    };
+    mdParser.renderer.rules.fence = (tokens, idx, options, env, self) => {
+      const token = tokens[idx];
+      const lang = token.info ? token.info.trim().split(/\s+/)[0] : '';
+      const highlighted = options.highlight ? options.highlight(token.content, lang, '') : esc(token.content);
+      return highlighted || `<pre><code>${esc(token.content)}</code></pre>`;
+    };
+  }
+
+  function codeHeader(lang) {
+    const langLabel = lang ? `<span class="code-lang">${esc(lang)}</span>` : '';
+    return `<div class="code-header">${langLabel}<button class="code-copy-btn" type="button" title="复制代码">${mdCopyIcon}</button></div>`;
+  }
+
   function renderMd(raw) {
     if (!raw) return '';
+    if (mdParser) return mdParser.render(raw);
+
     // Extract fenced code blocks first to protect their content
     const codeBlocks = [];
     let html = raw.replace(/```([\w#+.\-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
       const idx = codeBlocks.length;
       const highlighted = highlightCode(code.trimEnd(), lang);
-      const langLabel = lang ? `<span class="code-lang">${esc(lang)}</span>` : '';
-      const headerBar = langLabel ? `<div class="code-header">${langLabel}<button class="code-copy-btn" type="button" title="复制代码"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>` : `<div class="code-header"><button class="code-copy-btn" type="button" title="复制代码"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div>`;
-      codeBlocks.push(`<div class="code-block">${headerBar}<pre><code>${highlighted}</code></pre></div>`);
+      codeBlocks.push(`<div class="code-block">${codeHeader(lang)}<pre><code>${highlighted}</code></pre></div>`);
+      return `\x00CODE${idx}\x00`;
+    });
+    // Also support tilde-fenced code blocks (~~~)
+    html = html.replace(/~~~([\w#+.\-]*)\n([\s\S]*?)~~~/g, (_, lang, code) => {
+      const idx = codeBlocks.length;
+      const highlighted = highlightCode(code.trimEnd(), lang);
+      codeBlocks.push(`<div class="code-block">${codeHeader(lang)}<pre><code>${highlighted}</code></pre></div>`);
       return `\x00CODE${idx}\x00`;
     });
 
@@ -81,13 +156,15 @@
     });
 
     // Headings (with inline rendering)
+    html = html.replace(/^###### (.+)$/gm, (_, t) => `<h6>${renderInline(t)}</h6>`);
+    html = html.replace(/^##### (.+)$/gm, (_, t) => `<h5>${renderInline(t)}</h5>`);
     html = html.replace(/^#### (.+)$/gm, (_, t) => `<h4>${renderInline(t)}</h4>`);
     html = html.replace(/^### (.+)$/gm, (_, t) => `<h3>${renderInline(t)}</h3>`);
     html = html.replace(/^## (.+)$/gm, (_, t) => `<h2>${renderInline(t)}</h2>`);
     html = html.replace(/^# (.+)$/gm, (_, t) => `<h1>${renderInline(t)}</h1>`);
 
-    // Horizontal rules
-    html = html.replace(/^---+$/gm, '<hr>');
+    // Horizontal rules — support -, *, _ with optional spaces between
+    html = html.replace(/^[-*_](?:\s*[-*_]){2,}\s*$/gm, '<hr>');
 
     // Blockquotes (support nested > and multi-line)
     html = html.replace(/^(&gt;.*)$/gm, (_, line) => {
@@ -124,13 +201,19 @@
       return `<ol>${items.join('')}</ol>`;
     });
 
-    // Paragraphs — split by double newline
+    // Paragraphs — split by double newline; single newlines are soft breaks
     html = html.split(/\n{2,}/).map(p => {
       p = p.trim();
       if (!p) return '';
-      if (/^<(div|pre|table|h[1-4]|ul|ol|blockquote|hr|p)/.test(p)) return p;
+      if (/^<(div|pre|table|h[1-6]|ul|ol|blockquote|hr|p)/.test(p)) return p;
       if (p.startsWith('\x00CODE')) return p;
-      p = p.replace(/\n/g, '<br>');
+      // Soft line breaks: single \n → space (CommonMark behavior)
+      // Hard line breaks: two trailing spaces or trailing \ → <br>
+      p = p.replace(/  \n|\n/g, (m, offset, str) => {
+        // Check for trailing \ before newline
+        if (offset > 0 && str[offset - 1] === '\\') return '<br>';
+        return m === '  \n' ? '<br>' : ' ';
+      });
       return `<p>${renderInline(p)}</p>`;
     }).join('\n');
 
@@ -143,6 +226,8 @@
   }
 
   // Inline rendering (links/images before emphasis, protected by placeholders)
+  // Note: `text` is already HTML-entity-encoded (via esc()). We need to unescape
+  // before splicing into HTML tags so the browser renders special chars correctly.
   function renderInline(text) {
     const inlineParts = [];
     const stash = html => {
@@ -153,22 +238,29 @@
 
     text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
       const safeUrl = sanitizeUrl(url, { image: true });
-      return stash(`<img src="${safeUrl}" alt="${esc(stripMd(alt))}" loading="lazy">`);
+      return stash(`<img src="${safeUrl}" alt="${esc(unesc(stripMd(alt)))}" loading="lazy">`);
     });
     text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
       const safeUrl = sanitizeUrl(url);
-      return stash(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${esc(stripMd(label))}</a>`);
+      return stash(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${esc(unesc(stripMd(label)))}</a>`);
     });
     text = text.replace(/&lt;code&gt;([\s\S]*?)&lt;\/code&gt;/g, (_, code) => stash(`<code>${esc(code)}</code>`));
-    text = text.replace(/~~(.+?)~~/g, '<del>$1</del>');
-    text = text.replace(/\*\*([^\n*](?:[^\n]*?[^\n*])?)\*\*/g, '<strong>$1</strong>');
+    // Unescape before wrapping in HTML tags so entities render correctly
+    text = text.replace(/~~(.+?)~~/g, (_, c) => `<del>${unesc(c)}</del>`);
+    text = text.replace(/\*\*([^\n*](?:[^\n]*?[^\n*])?)\*\*/g, (_, c) => `<strong>${unesc(c)}</strong>`);
     // Italic: avoid lookbehind for broader browser compatibility.
-    text = text.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
-    text = text.replace(/\*\*([^*\n]{1,80})$/g, '$1');
-    text = text.replace(/(^|[\s([])\*([^\s*\n][^*\n]{0,79})$/g, '$1$2');
+    text = text.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, (_, pre, c) => `${pre}<em>${unesc(c)}</em>`);
+    text = text.replace(/\*\*([^*\n]{1,80})$/g, (_, c) => unesc(c));
+    text = text.replace(/(^|[\s([])\*([^\s*\n][^*\n]{0,79})$/g, (_, pre, c) => `${pre}${unesc(c)}`);
+    // Autolinks: bare URLs become clickable
+    text = text.replace(/(^|[^=&\x00])((?:https?:\/\/)[^\s<\x00]+[^\s<\x00.,;:!?)'"`\]}])/gim, (_, pre, url) => {
+      return `${pre}${stash(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`)}`;
+    });
     text = text.replace(/\x00PART(\d+)\x00/g, (_, idx) => inlineParts[idx]);
     return text;
   }
+
+  function unesc(t) { return t.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'"); }
 
   function esc(t) { return t.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
 
@@ -177,15 +269,19 @@
   }
 
   function sanitizeUrl(rawUrl, opts = {}) {
+    return esc(sanitizeUrlValue(rawUrl, opts));
+  }
+
+  function sanitizeUrlValue(rawUrl, opts = {}) {
     const url = rawUrl.trim().replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
     if (!url) return '#';
-    if (opts.image && /^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) return esc(url);
+    if (opts.image && /^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) return url;
     try {
       const parsed = new URL(url, window.location.href);
       const allowed = opts.image ? ['http:', 'https:'] : ['http:', 'https:', 'mailto:', 'tel:'];
-      if (allowed.includes(parsed.protocol)) return esc(url);
+      if (allowed.includes(parsed.protocol)) return url;
     } catch {
-      if (!opts.image && /^(#|\/(?!\/)|\.{1,2}\/)/.test(url)) return esc(url);
+      if (!opts.image && /^(#|\/(?!\/)|\.{1,2}\/)/.test(url)) return url;
     }
     return '#';
   }
@@ -227,21 +323,29 @@
   }
 
   function highlightCode(code, lang) {
-    // Collect all highlight regions first, then build output in one pass (no placeholders)
+    // Collect all highlight regions first, then build output in one pass
     const regions = [];
     const add = (start, end, cls) => regions.push({ start, end, cls });
 
-    // Multi-line comments
-    for (const m of code.matchAll(/\/\*[\s\S]*?\*\//g)) add(m.index, m.index + m[0].length, 'hl-comment');
-    // Single-line // comments
-    for (const m of code.matchAll(/\/\/.*$/gm)) add(m.index, m.index + m[0].length, 'hl-comment');
-    // # comments (Python/Ruby/Shell only)
-    if (/^(py|python|rb|ruby|sh|bash|yaml|yml|toml|r|perl|pl)/i.test(lang)) {
-      for (const m of code.matchAll(/#.*$/gm)) add(m.index, m.index + m[0].length, 'hl-comment');
+    // Collect string regions first (strings take priority over comments)
+    const stringRegions = [];
+    for (const m of code.matchAll(/"(?:[^"\\]|\\.)*"/g)) { add(m.index, m.index + m[0].length, 'hl-string'); stringRegions.push([m.index, m.index + m[0].length]); }
+    for (const m of code.matchAll(/'(?:[^'\\]|\\.)*'/g)) { add(m.index, m.index + m[0].length, 'hl-string'); stringRegions.push([m.index, m.index + m[0].length]); }
+
+    const inString = idx => stringRegions.some(([s, e]) => idx >= s && idx < e);
+
+    // Comments — skip if inside a string
+    for (const m of code.matchAll(/\/\*[\s\S]*?\*\//g)) {
+      if (!inString(m.index)) add(m.index, m.index + m[0].length, 'hl-comment');
     }
-    // Strings
-    for (const m of code.matchAll(/"(?:[^"\\]|\\.)*"/g)) add(m.index, m.index + m[0].length, 'hl-string');
-    for (const m of code.matchAll(/'(?:[^'\\]|\\.)*'/g)) add(m.index, m.index + m[0].length, 'hl-string');
+    for (const m of code.matchAll(/\/\/.*$/gm)) {
+      if (!inString(m.index)) add(m.index, m.index + m[0].length, 'hl-comment');
+    }
+    if (/^(py|python|rb|ruby|sh|bash|yaml|yml|toml|r|perl|pl)/i.test(lang)) {
+      for (const m of code.matchAll(/#.*$/gm)) {
+        if (!inString(m.index)) add(m.index, m.index + m[0].length, 'hl-comment');
+      }
+    }
     // Keywords
     const kwSet = new Set(['function','return','if','else','for','while','do','switch','case','break','continue','class','extends','new','this','super','import','export','from','default','async','await','try','catch','finally','throw','const','let','var','def','elif','lambda','with','as','in','not','is','True','False','None','print','self','yield','raise','except','pass','assert','struct','enum','interface','type','namespace','using','public','private','protected','static','final','void','int','float','double','string','bool','char','long','short','byte','sizeof','null','undefined','true','false','typeof','instanceof']);
     for (const m of code.matchAll(/\b([a-zA-Z_]\w*)\b/g)) {
@@ -1194,7 +1298,6 @@
 
   // ===== SVG Icons =====
   const SVG_PERSON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>';
-  const SVG_BOT = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2a2 2 0 0 1 .9 3.73L13 7h1a7 7 0 0 1 7 7h1a1 1 0 0 1 0 2h-1v1a7 7 0 0 1-7 7H7a7 7 0 0 1-7-7v-1H-1a1 1 0 0 1 0-2h1a7 7 0 0 1 7-7h1l.1-1.27A2 2 0 0 1 12 2zM8 15a1 1 0 1 0 2 0 1 1 0 0 0-2 0zm6 0a1 1 0 1 0 2 0 1 1 0 0 0-2 0z"/></svg>';
   const SVG_COPY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
   const SVG_REFRESH = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-8.36L23 10"/></svg>';
   const SVG_EDIT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
@@ -1310,7 +1413,7 @@
 
     dom.messages.innerHTML = conv.messages.map((msg, i) => {
       const isUser = msg.role === 'user';
-      const avatar = isUser ? SVG_PERSON : SVG_BOT;
+      const avatar = isUser ? SVG_PERSON : `<img src="icon.png" width="20" height="20" alt="AI" class="avatar-img">`;
       const splitContent = !isUser && typeof msg.content === 'string' ? splitThinkTags(msg.content) : null;
       const reasoningText = !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
       const mainContent = splitContent?.reasoning ? splitContent.content : msg.content;
@@ -1386,7 +1489,7 @@
     el.id = 'typing-el';
     el.innerHTML = `
       <div class="chat-msg-inner">
-        <div class="chat-msg-avatar">${SVG_BOT}</div>
+        <div class="chat-msg-avatar"><img src="icon.png" width="20" height="20" alt="AI" class="avatar-img"></div>
         <div class="chat-msg-body">
           <div class="typing-dots"><span></span><span></span><span></span></div>
         </div>
@@ -1406,7 +1509,7 @@
     el.id = 'stream-el';
     el.innerHTML = `
       <div class="chat-msg-inner">
-        <div class="chat-msg-avatar">${SVG_BOT}</div>
+        <div class="chat-msg-avatar"><img src="icon.png" width="20" height="20" alt="AI" class="avatar-img"></div>
         <div class="chat-msg-body">
           <div class="thinking-block hidden">
             <button class="thinking-toggle" type="button">
@@ -3856,7 +3959,7 @@
       const hasReasoning = !!msg.reasoningContent;
       el.innerHTML = `
         <div class="chat-msg-inner">
-          <div class="chat-msg-avatar">${SVG_BOT}</div>
+          <div class="chat-msg-avatar"><img src="icon.png" width="20" height="20" alt="AI" class="avatar-img"></div>
           <div class="chat-msg-body">
             ${hasReasoning ? `<div class="thinking-block expanded">
               <button class="thinking-toggle" type="button">

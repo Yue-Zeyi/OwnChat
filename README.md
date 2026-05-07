@@ -1,12 +1,16 @@
 # OwnChat
 
+<div align="center">
+  <img src="icon.png" width="96" height="96" alt="OwnChat">
+</div>
+
 OwnChat 是一款纯前端的自用 AI 客户端，支持对话和绘画两种模式。项目不依赖后端服务，配置、会话和绘画历史都保存在当前浏览器本地。
 
 ## 特性
 
 - **纯前端运行**：原生 HTML / CSS / JavaScript 实现，无框架、无构建步骤。
 - **Service Worker 代理**：SW 作为唯一 API 代理，页面刷新不中断流式回复和图片生成。
-- **对话模式**：兼容 OpenAI Chat Completions 格式，支持角色设定、流式输出、reasoning 展示、多会话管理和 Markdown 渲染。
+- **对话模式**：兼容 OpenAI Chat Completions 格式，支持角色设定、流式输出、reasoning 展示、多会话管理和基于 `markdown-it` 的 Markdown 渲染。
 - **绘画模式**：兼容 OpenAI Images API，支持文生图、参考图编辑、提示词优化、生成历史、大图查看、复制和下载。
 - **映射模式**：绘画可选映射模型，通过 Responses API 强制调用 `image_generation` 工具生成图片。
 - **配置隔离**：对话和绘画使用独立的 Base URL、API Key、模型列表和当前模型，互不污染。
@@ -34,7 +38,7 @@ OwnChat 是一款纯前端的自用 AI 客户端，支持对话和绘画两种�
 3. 刷新或手动填写对话模型。
 4. 保存后即可对话。
 
-如果要使用绘画模式，进入「设置 -> 绘画」单独配置：
+如果要使用绘画模式，进入「设置 → 绘画」单独配置：
 
 1. 填写 **Image Base URL**。
 2. 填写 **Image API Key**。
@@ -61,16 +65,16 @@ OwnChat 是一款纯前端的自用 AI 客户端，支持对话和绘画两种�
   "chat": {
     "baseUrl": "https://api.openai.com/v1",
     "apiKey": "sk-...",
-    "model": "gpt-5.5",
-    "models": ["gpt-5.5", "gpt-5.4"]
+    "model": "gpt-4o",
+    "models": ["gpt-4o", "gpt-4o-mini"]
   },
   "image": {
     "baseUrl": "https://api.openai.com/v1",
     "apiKey": "sk-...",
     "model": "gpt-image-2",
     "mapModel": "",
-    "promptModel": "gpt-5.5",
-    "models": ["gpt-image-2", "gpt-5.5"],
+    "promptModel": "gpt-4o-mini",
+    "models": ["gpt-image-2", "gpt-4o-mini"],
     "defaults": {
       "size": "1024x1024",
       "quality": "auto",
@@ -86,16 +90,16 @@ OwnChat 是一款纯前端的自用 AI 客户端，支持对话和绘画两种�
 URL 形式：
 
 ```text
-index.html?config=%7B%22chat%22%3A%7B%22baseUrl%22%3A%22https%3A%2F%2Fapi.openai.com%2Fv1%22%2C%22apiKey%22%3A%22sk-...%22%2C%22model%22%3A%22gpt-5.5%22%7D%7D
+index.html?config=%7B%22chat%22%3A%7B%22baseUrl%22%3A%22https%3A%2F%2Fapi.openai.com%2Fv1%22%2C%22apiKey%22%3A%22sk-...%22%2C%22model%22%3A%22gpt-4o%22%7D%7D
 ```
 
 识别到 URL 配置后，OwnChat 会先弹出确认预览，并对 API Key 做脱敏显示。确认导入后才会写入浏览器本地存储，并自动从地址栏移除配置参数。
 
-注意：GET URL 可能被浏览器历史、代理或服务器访问日志记录，不建议在公共环境传递长期有效的 API Key。更安全的方式是在「设置 -> 对话」里使用「导入配置」从本地 JSON 文件恢复。
+注意：GET URL 可能被浏览器历史、代理或服务器访问日志记录，不建议在公共环境传递长期有效的 API Key。更安全的方式是在「设置 → 对话」里使用「导入配置」从本地 JSON 文件恢复。
 
 ### 配置备份和恢复
 
-「设置 -> 对话」提供三个配置工具：
+「设置 → 对话」提供三个配置工具：
 
 - **导出配置**：导出不包含 API Key 的配置，适合备份和分享。
 - **含密钥导出**：导出包含 API Key 的完整配置，适合私人设备迁移。
@@ -112,22 +116,22 @@ OwnChat 使用 Service Worker (`sw.js`) 作为唯一 API 代理，页面本身�
 - **切换对话不中断生成**：切换到其他对话时，原对话的流式回复在 SW 中继续。切换回来时自动恢复 UI 显示。
 - **仅一次 API 调用**：SW 作为唯一代理，不会出现页面和 SW 重复请求导致双倍 token 消耗。
 
-如果浏览器不支持 Service Worker 或 SW 未注册，会自动回退到页面直接 `fetch` 模式，仍可正常使用，但失去上述恢复能力。
+如果浏览器不支持 Service Worker 或 SW 未注册，会自动回退到页面直接 `fetch` 模式，仍可正常使用，但失去上述恢复能力。回退模式下每 2 秒将部分内容写入 `localStorage` 用于崩溃恢复。
 
 ### 流式回复恢复流程
 
 ```text
-发送消息 -> SW 发起 /chat/completions -> SW 每隔 300ms 写入 IndexedDB
-页面每 100ms 读取 IndexedDB -> 更新 DOM（requestAnimationFrame 节流）
+发送消息 → SW 发起 /chat/completions → SW 每隔 300ms 写入 IndexedDB
+页面每 100ms 读取 IndexedDB → 更新 DOM（requestAnimationFrame 节流）
 ```
 
 页面刷新时的恢复：
 
 ```text
-页面加载 -> 检查 IndexedDB 会话 -> 状态为 complete：直接插入完整回复
-                                    -> 状态为 streaming：启动恢复轮询，实时显示
-                                    -> 状态为 stopped/error：显示中断标记
-                                    -> 超过 60s 无更新：标记为中断
+页面加载 → 检查 IndexedDB 会话 → 状态为 complete：直接插入完整回复
+                                    → 状态为 streaming：启动恢复轮询，实时显示
+                                    → 状态为 stopped/error：显示中断标记
+                                    → 超过 60s 无更新：标记为中断
 ```
 
 ### 图片生成恢复流程
@@ -145,12 +149,12 @@ OwnChat 使用 Service Worker (`sw.js`) 作为唯一 API 代理，页面本身�
 切换对话时：
 
 ```text
-pauseActivePolls() -> 仅清除 UI 轮询定时器，SW 继续生成
-切换到新对话 -> resumeStreamPollIfNeeded() 检查新对话是否有流式占位符
-  -> 有且 SW 会话匹配：恢复 UI 轮询
-  -> 有但 SW 会话已完成：直接结束消息
-  -> 有但 SW 会话不匹配：标记为已停止
-  -> 无占位符：正常显示对话
+pauseActivePolls() → 仅清除 UI 轮询定时器，SW 继续生成
+切换到新对话 → resumeStreamPollIfNeeded() 检查新对话是否有流式占位符
+  → 有且 SW 会话匹配：恢复 UI 轮询
+  → 有但 SW 会话已完成：直接结束消息
+  → 有但 SW 会话不匹配：标记为已停止
+  → 无占位符：正常显示对话
 ```
 
 在旧对话流式进行中发送新消息时，会先中止旧对话的流并标记为"已停止生成"，再开始新请求。
@@ -164,7 +168,8 @@ pauseActivePolls() -> 仅清除 UI 轮询定时器，SW 继续生成
 - 每个对话独立角色设定，会作为 `system` 消息发送
 - 流式回复，刷新或切换对话不中断生成
 - reasoning / thinking 内容折叠展示（支持 API `reasoning_content` 字段和 `<think>` 标签）
-- Markdown 渲染、代码语法高亮和复制、表格、任务列表、图片链接
+- 基于本地 `markdown-it` 的 Markdown 渲染，支持加粗、列表、表格、代码块、任务列表、图片链接等常见语法
+- 代码语法高亮和复制按钮由应用内置实现；`markdown-it` 加载失败时会回退到内置简化渲染器
 - 上下文自动裁剪（每个对话可配置上限，默认 128K；超出时从前面裁剪，保留 system 消息和最后一轮对话；设为 0 则不裁剪）
 - 上传图片、PDF、文本、代码等文件作为上下文（base64 存储在 IndexedDB，不占 localStorage）
 - 每个会话独立设置 Temperature、Top P、Max Tokens、上下文上限
@@ -208,7 +213,7 @@ GET  /v1/models
 
 ### 提示词优化
 
-绘画输入框左侧的闪光按钮用于优化当前提示词。该功能使用「设置 -> 绘画」里的提示词优化模型，请选择一个支持 `/v1/chat/completions` 的对话模型。
+绘画输入框左侧的闪光按钮用于优化当前提示词。该功能使用「设置 → 绘画」里的提示词优化模型，请选择一个支持 `/v1/chat/completions` 的对话模型。
 
 提示词优化和实际生图是隔离的：
 
@@ -225,10 +230,10 @@ GET  /v1/models
 
 ```text
 用户提示词 / 参考图
-  -> 映射模型
-  -> tool_choice: required
-  -> image_generation 工具
-  -> 返回图片
+  → 映射模型
+  → tool_choice: required
+  → image_generation 工具
+  → 返回图片
 ```
 
 注意：
@@ -276,6 +281,8 @@ index.html   # 页面结构
 style.css    # 样式和响应式布局
 app.js       # 应用逻辑、API 请求、本地存储
 sw.js        # Service Worker，唯一 API 代理
+icon.png     # 品牌 Logo、对话头像和 favicon
+vendor/      # 前端第三方依赖，目前包含 markdown-it
 ```
 
 可以直接放到任意静态托管服务、Nginx、Apache、GitHub Pages 或本地静态服务器中。
@@ -292,10 +299,15 @@ sw.js        # Service Worker，唯一 API 代理
 ├── style.css    # 样式和响应式布局
 ├── app.js       # 应用逻辑、API 请求、本地存储
 ├── sw.js        # Service Worker，唯一 API 代理
+├── icon.png     # 品牌 Logo、对话头像和 favicon
+├── vendor/
+│   └── markdown-it.min.js
 └── README.md    # 项目说明
 ```
 
-本项目没有构建步骤。修改文件后刷新浏览器即可。修改 `sw.js` 后需要关闭所有标签页再重新打开，或者在 DevTools -> Application -> Service Workers 中手动更新。
+本项目没有构建步骤。修改文件后刷新浏览器即可。修改 `sw.js` 后需要关闭所有标签页再重新打开，或者在 DevTools → Application → Service Workers 中手动更新。
+
+`vendor/markdown-it.min.js` 是浏览器端 Markdown 解析器的本地构建文件，用于避免运行时依赖 CDN。升级时替换该文件，并确认 `index.html` 的加载路径不变。
 
 如果需要本地服务，可以在项目目录运行任意静态服务器，例如：
 

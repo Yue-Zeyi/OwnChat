@@ -487,11 +487,18 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
 }
 
 .chat-msg.user .chat-msg-avatar { background: var(--accent); color: #fff; }
-.chat-msg.ai .chat-msg-avatar { background: var(--border); color: var(--text-2); }
-[data-theme="light"] .chat-msg.ai .chat-msg-avatar { background: #e5e5e5; color: var(--text-3); }
+.chat-msg.ai .chat-msg-avatar { background: transparent; }
+
+.avatar-img {
+  width: 34px;
+  height: 34px;
+  object-fit: contain;
+  border-radius: 50%;
+}
 
 .chat-msg-body {
   max-width: 85%;
@@ -635,6 +642,8 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
 .msg-md h2 { font-size: 18px; font-weight: 700; margin: 16px 0 8px; }
 .msg-md h3 { font-size: 16px; font-weight: 600; margin: 14px 0 6px; }
 .msg-md h4 { font-size: 15px; font-weight: 600; margin: 12px 0 4px; }
+.msg-md h5 { font-size: 14px; font-weight: 600; margin: 10px 0 3px; }
+.msg-md h6 { font-size: 13px; font-weight: 600; margin: 8px 0 2px; color: var(--text-3); }
 
 .msg-md p { margin-bottom: 10px; line-height: 1.75; }
 .msg-md p:last-child { margin-bottom: 0; }
@@ -1972,6 +1981,7 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
   .chat-msg { padding: 10px 12px; }
   .chat-msg-inner { gap: 8px; }
   .chat-msg-avatar { width: 28px; height: 28px; }
+  .avatar-img { width: 28px; height: 28px; }
   .chat-msg-body { font-size: 14px; max-width: 88%; padding: 8px 12px; }
   .msg-meta { font-size: 11px; gap: 6px; }
   .msg-action-btn { min-width: 28px; min-height: 28px; }
