@@ -301,10 +301,14 @@
     currentImageJobId: load(KEYS.currentImageJobId) || null,
     imageDefaults: Object.assign({}, DEFAULT_IMAGE_PARAMS, load(KEYS.imageDefaults) || {}),
     isStreaming: false,
+    streamingConvId: null,
     chatAbortController: null,
+    chatPollTimer: null,
+    streamEls: null,
     isGeneratingImage: false,
     imageAbortController: null,
     imageProgressTimer: null,
+    imagePollTimer: null,
     isOptimizingImagePrompt: false,
     viewerImage: null,
     imageViewerTransform: { scale: 1, x: 0, y: 0 },
@@ -316,25 +320,20 @@
     pendingImportConfig: null,
   };
 
-  function persist() {
-    save(KEYS.mode, state.mode);
-    save(KEYS.baseUrl, state.baseUrl);
-    save(KEYS.apiKey, state.apiKey);
-    save(KEYS.model, state.model);
-    save(KEYS.modelsCache, state.modelsCache);
-    save(KEYS.conversations, state.conversations);
-    save(KEYS.currentConvId, state.currentConvId);
-    save(KEYS.tokenStats, state.tokenStats);
-    save(KEYS.sidebarCollapsed, state.sidebarCollapsed);
-    save(KEYS.theme, state.theme);
-    save(KEYS.imageBaseUrl, state.imageBaseUrl);
-    save(KEYS.imageApiKey, state.imageApiKey);
-    save(KEYS.imageModel, state.imageModel);
-    save(KEYS.imageMapModel, state.imageMapModel);
-    save(KEYS.imagePromptModel, state.imagePromptModel);
-    save(KEYS.imageModelsCache, state.imageModelsCache);
-    save(KEYS.currentImageJobId, state.currentImageJobId);
-    save(KEYS.imageDefaults, state.imageDefaults);
+  function persist(keys) {
+    if (!keys) keys = Object.values(KEYS);
+    let fileMap = [];
+    if (keys.includes(KEYS.conversations)) {
+      const { stripped, fileMap: fm } = stripFilesFromConversations(state.conversations);
+      fileMap = fm;
+      save(KEYS.conversations, stripped);
+    }
+    for (const k of keys) {
+      if (k === KEYS.conversations) continue;
+      const stateName = Object.keys(KEYS).find(n => KEYS[n] === k);
+      if (stateName) save(k, state[stateName]);
+    }
+    for (const f of fileMap) fileDbPut(f);
   }
 
   function cleanConfigUrl() {
@@ -476,6 +475,51 @@
   function imageConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imageModel; }
   function imagePromptOptimizerConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imagePromptModel; }
 
+  const MAX_CONTEXT_TOKENS = 80000;
+
+  function trimContextMessages(messages, systemPrompt, maxTokens) {
+    maxTokens = maxTokens || MAX_CONTEXT_TOKENS;
+    const allMessages = [];
+    if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt });
+    allMessages.push(...messages);
+
+    let totalTokens = 0;
+    for (const m of allMessages) {
+      totalTokens += estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+    }
+
+    if (totalTokens <= maxTokens) return allMessages;
+
+    // Trim from the front, always keep system prompt + last user/assistant pair
+    const sysMsg = allMessages[0]?.role === 'system' ? allMessages[0] : null;
+    const rest = sysMsg ? allMessages.slice(1) : allMessages;
+
+    // Find the last user message index
+    let lastUserIdx = -1;
+    for (let i = rest.length - 1; i >= 0; i--) {
+      if (rest[i].role === 'user') { lastUserIdx = i; break; }
+    }
+
+    const keepTail = rest.slice(Math.max(0, lastUserIdx));
+    const tailTokens = keepTail.reduce((s, m) => s + estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)), 0);
+    const sysTokens = sysMsg ? estimateTokens(sysMsg.content) : 0;
+    const budget = maxTokens - sysTokens - tailTokens;
+
+    const head = [];
+    let headTokens = 0;
+    for (const m of rest.slice(0, Math.max(0, lastUserIdx))) {
+      const t = estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+      if (headTokens + t > budget) break;
+      head.push(m);
+      headTokens += t;
+    }
+
+    const result = [];
+    if (sysMsg) result.push(sysMsg);
+    result.push(...head, ...keepTail);
+    return result;
+  }
+
   function normalizeUrl(u) {
     u = (u || '').trim();
     if (!u) throw new Error('Base URL 不能为空');
@@ -543,8 +587,8 @@
     }
   }
 
-  // ===== IndexedDB for large image history =====
-  const IMAGE_DB = { name: 'ownchat_image_db', version: 1, store: 'jobs' };
+  // ===== IndexedDB for large image history & file attachments =====
+  const IMAGE_DB = { name: 'ownchat_image_db', version: 3, store: 'jobs', fileStore: 'files' };
   let imageDbPromise = null;
   let imageDbWarned = false;
 
@@ -555,9 +599,14 @@
       const req = indexedDB.open(IMAGE_DB.name, IMAGE_DB.version);
       req.onupgradeneeded = () => {
         const db = req.result;
+        // Ensure 'jobs' store exists (for upgrades from version 1)
         if (!db.objectStoreNames.contains(IMAGE_DB.store)) {
           const store = db.createObjectStore(IMAGE_DB.store, { keyPath: 'id' });
           store.createIndex('createdAt', 'createdAt');
+        }
+        // Ensure 'files' store exists (for upgrades from version 1 or 2)
+        if (!db.objectStoreNames.contains(IMAGE_DB.fileStore)) {
+          db.createObjectStore(IMAGE_DB.fileStore, { keyPath: 'id' });
         }
       };
       req.onsuccess = () => resolve(req.result);
@@ -577,9 +626,10 @@
         req.onerror = () => reject(req.error);
       });
       const merged = mergeJobs(jobs, legacyJobs).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-      if (legacyJobs.length) {
+      if (legacyJobs.length && !localStorage.getItem('nc_image_migrated')) {
         await Promise.allSettled(legacyJobs.map(imageDbPutJob));
         localStorage.removeItem('nc_image_jobs');
+        localStorage.setItem('nc_image_migrated', '1');
       }
       return merged;
     } catch (e) {
@@ -636,6 +686,209 @@
     } catch (e) {
       console.warn('Image history delete failed:', e);
     }
+  }
+
+  // ===== File Attachment IndexedDB helpers =====
+  async function fileDbPut(fileData) {
+    try {
+      const db = await openImageDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
+        tx.objectStore(IMAGE_DB.fileStore).put(fileData);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('File attachment save failed:', e);
+    }
+  }
+
+  async function fileDbGet(id) {
+    try {
+      const db = await openImageDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.fileStore, 'readonly');
+        const req = tx.objectStore(IMAGE_DB.fileStore).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn('File attachment load failed:', e);
+      return null;
+    }
+  }
+
+  async function fileDbGetAll() {
+    try {
+      const db = await openImageDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.fileStore, 'readonly');
+        const req = tx.objectStore(IMAGE_DB.fileStore).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    } catch (e) {
+      console.warn('File attachments load failed:', e);
+      return [];
+    }
+  }
+
+  async function fileDbDelete(id) {
+    try {
+      const db = await openImageDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
+        tx.objectStore(IMAGE_DB.fileStore).delete(id);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('File attachment delete failed:', e);
+    }
+  }
+
+  function generateFileId(convId, msgIndex, partIndex) {
+    return `${convId}_${msgIndex}_${partIndex}`;
+  }
+
+  // ===== Stream Session IndexedDB (shared with Service Worker) =====
+  const STREAM_KEY = 'active_stream';
+  const IMAGE_KEY = 'active_image';
+  const STREAM_DB_NAME = 'ownchat_stream_db';
+  const STREAM_DB_VERSION = 2;
+  const STREAM_STORE = 'sessions';
+  let streamDbPromise = null;
+
+  function openStreamDb() {
+    if (streamDbPromise) return streamDbPromise;
+    streamDbPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
+      const req = indexedDB.open(STREAM_DB_NAME, STREAM_DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STREAM_STORE)) {
+          db.createObjectStore(STREAM_STORE, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return streamDbPromise;
+  }
+
+  async function writeStreamSession(meta) {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).put(Object.assign({ id: STREAM_KEY, assistantContent: '', reasoningContent: '', status: 'streaming', updatedAt: Date.now() }, meta));
+      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
+    } catch { /* ignore */ }
+  }
+
+  async function getStreamSession() {
+    try {
+      const db = await openStreamDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(STREAM_STORE, 'readonly');
+        const req = tx.objectStore(STREAM_STORE).get(STREAM_KEY);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch { return null; }
+  }
+
+  async function clearStreamSession() {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).delete(STREAM_KEY);
+      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
+    } catch { /* ignore */ }
+  }
+
+  async function getImageSession() {
+    try {
+      const db = await openStreamDb();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(STREAM_STORE, 'readonly');
+        const req = tx.objectStore(STREAM_STORE).get(IMAGE_KEY);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch { return null; }
+  }
+
+  async function clearImageSession() {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).delete(IMAGE_KEY);
+      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
+    } catch { /* ignore */ }
+  }
+
+  // Strip base64 from messages for localStorage, store in IndexedDB instead
+  function stripFilesFromConversations(conversations) {
+    const fileMap = [];
+    const stripped = conversations.map(conv => {
+      const strippedConv = Object.assign({}, conv);
+      strippedConv.messages = conv.messages.map((msg, msgIdx) => {
+        if (msg.files && msg.files.length) {
+          const strippedMsg = Object.assign({}, msg);
+          strippedMsg.files = msg.files.map((f, fIdx) => {
+            const fileId = generateFileId(conv.id, msgIdx, fIdx);
+            if (f.base64) {
+              fileMap.push({ id: fileId, base64: f.base64, name: f.name, type: f.type });
+              return { name: f.name, type: f.type, fileId: fileId };
+            }
+            return f;
+          });
+          return strippedMsg;
+        }
+        if (Array.isArray(msg.content)) {
+          const strippedMsg = Object.assign({}, msg);
+          strippedMsg.content = msg.content.map((part, partIdx) => {
+            if (part.type === 'image_url' && part.image_url?.url?.startsWith('data:')) {
+              const fileId = generateFileId(conv.id, msgIdx, partIdx);
+              fileMap.push({ id: fileId, base64: part.image_url.url, name: '', type: 'image_url' });
+              return Object.assign({}, part, { image_url: { url: fileId, fileId: fileId } });
+            }
+            return part;
+          });
+          return strippedMsg;
+        }
+        return msg;
+      });
+      return strippedConv;
+    });
+    return { stripped, fileMap };
+  }
+
+  // Hydrate base64 data back into messages from IndexedDB
+  async function hydrateFilesInConversations(conversations) {
+    const allFiles = await fileDbGetAll();
+    const fileById = new Map(allFiles.map(f => [f.id, f]));
+    for (const conv of conversations) {
+      for (const msg of conv.messages) {
+        if (msg.files && msg.files.length) {
+          for (const f of msg.files) {
+            if (f.fileId) {
+              const stored = fileById.get(f.fileId);
+              if (stored) f.base64 = stored.base64;
+            }
+          }
+        }
+        if (Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (part.type === 'image_url' && part.image_url?.fileId) {
+              const stored = fileById.get(part.image_url.fileId);
+              if (stored) part.image_url.url = stored.base64;
+            }
+          }
+        }
+      }
+    }
+    return conversations;
   }
 
   // ===== DOM =====
@@ -743,6 +996,23 @@
     setupSave: $('setup-save'),
     setupLater: $('setup-later'),
   };
+
+  // ===== Stream Render Throttle =====
+  let streamRafPending = false;
+  let streamRafCallback = null;
+
+  function scheduleStreamRender(callback) {
+    streamRafCallback = callback;
+    if (streamRafPending) return;
+    streamRafPending = true;
+    requestAnimationFrame(() => {
+      streamRafPending = false;
+      if (streamRafCallback) {
+        streamRafCallback();
+        streamRafCallback = null;
+      }
+    });
+  }
 
   // ===== Render Functions =====
   function updateModelBadge() {
@@ -879,6 +1149,7 @@
   }
 
   function switchMode(mode) {
+    pauseActivePolls();
     state.mode = mode;
     dom.modeChatBtn.parentElement.classList.toggle('is-image', mode === 'image');
     dom.modeChatBtn.classList.toggle('active', mode === 'chat');
@@ -893,7 +1164,7 @@
     updateModelBadge();
     updateSidebar();
     if (mode === 'chat') {
-      renderMessages();
+      resumeStreamPollIfNeeded();
       dom.userInput.focus();
     } else {
       syncImageParams();
@@ -910,7 +1181,7 @@
     if (isMobile()) {
       dom.sidebarBackdrop.classList.toggle('hidden', state.sidebarCollapsed);
     }
-    persist();
+    persist([KEYS.sidebarCollapsed]);
   }
 
   // ===== SVG Icons =====
@@ -1151,19 +1422,23 @@
   }
 
   function updateStream(el, text) {
-    el.innerHTML = renderMd(text);
-    dom.messages.scrollTop = dom.messages.scrollHeight;
+    scheduleStreamRender(() => {
+      el.innerHTML = renderMd(text);
+      dom.messages.scrollTop = dom.messages.scrollHeight;
+    });
   }
 
   function updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime) {
-    if (streamEls.thinkingBlock.classList.contains('hidden')) {
-      streamEls.thinkingBlock.classList.remove('hidden');
-      streamEls.thinkingBlock.classList.add('expanded');
-    }
-    const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
-    streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
-    streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
-    dom.messages.scrollTop = dom.messages.scrollHeight;
+    scheduleStreamRender(() => {
+      if (streamEls.thinkingBlock.classList.contains('hidden')) {
+        streamEls.thinkingBlock.classList.remove('hidden');
+        streamEls.thinkingBlock.classList.add('expanded');
+      }
+      const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
+      streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+      streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
+      dom.messages.scrollTop = dom.messages.scrollHeight;
+    });
   }
 
   // ===== Model Dropdown =====
@@ -1302,156 +1577,320 @@
 
     renderMessages();
 
-    // Build API messages (convert multimodal format for API)
-    const apiMessages = [];
-    if (conv.systemPrompt?.trim()) {
-      apiMessages.push({ role: 'system', content: conv.systemPrompt.trim() });
-      contextTokens += estimateTokens(conv.systemPrompt);
-    }
-    apiMessages.push(...conv.messages.map(m => {
+    // Build API messages with context window trimming
+    const rawApiMessages = conv.messages.map(m => {
       if (typeof m.content === 'string') return { role: m.role, content: m.content };
       return { role: m.role, content: m.content };
-    }));
+    });
+    const apiMessages = trimContextMessages(rawApiMessages, conv.systemPrompt?.trim() || null);
 
     // Clear pending files after adding to message
     state.pendingFiles = [];
     renderFilePreview();
 
     state.isStreaming = true;
-    const controller = new AbortController();
-    state.chatAbortController = controller;
+    state.streamingConvId = conv.id;
     dom.userInput.disabled = true;
     updateSendBtn();
 
-    addTyping();
-    let assistantRawContent = '';
-    let assistantContent = '';
-    let apiReasoningContent = '';
-    let tagReasoningContent = '';
-    let reasoningContent = '';
-    let firstTokenTime = null;
-    let reasoningStartTime = null;
-    let reasoningEndTime = null;
-    const streamStartTime = Date.now();
+    // Write stream session metadata
+    writeStreamSession({ convId: conv.id, model: state.model, startTime: Date.now() });
 
-    try {
-      const reqBody = { model: state.model, messages: apiMessages, stream: true };
-      reqBody.temperature = conv.temperature;
-      reqBody.top_p = conv.topP;
-      reqBody.max_tokens = conv.maxTokens;
-      const resp = await apiFetch(requestUrl(state.baseUrl, '/chat/completions'), {
-        method: 'POST',
+    addTyping();
+
+    // Add a placeholder streaming message to conv.messages for crash recovery
+    const streamPlaceholder = { role: 'assistant', content: '', tokens: 0, model: state.model, streaming: true };
+    conv.messages.push(streamPlaceholder);
+    const streamMsgIdx = conv.messages.length - 1;
+    persist([KEYS.conversations, KEYS.currentConvId]);
+
+    // Build request params for the Service Worker to make the ONLY API call
+    const reqBody = { model: state.model, messages: apiMessages, stream: true };
+    reqBody.temperature = conv.temperature;
+    reqBody.top_p = conv.topP;
+    reqBody.max_tokens = conv.maxTokens;
+    const streamUrl = requestUrl(state.baseUrl, '/chat/completions');
+    const swAvailable = navigator.serviceWorker?.controller;
+
+    if (swAvailable) {
+      // === SW proxy mode: SW makes the only fetch, page reads from IndexedDB ===
+      navigator.serviceWorker.controller.postMessage({
+        type: 'start-stream',
+        url: streamUrl,
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
         body: JSON.stringify(reqBody),
-        signal: controller.signal,
+        convId: conv.id,
+        model: state.model,
       });
 
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-        throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, requestUrl(state.baseUrl, '/chat/completions'));
-      }
+      // Set up abort via SW message
+      state.chatAbortController = { abort: () => {
+        navigator.serviceWorker.controller.postMessage({ type: 'stop-stream' });
+      }};
 
       removeTyping();
-      const streamEls = addStreamMsg();
+      state.streamEls = addStreamMsg();
+      const streamEls = state.streamEls;
+      const streamStartTime = Date.now();
+      let firstTokenTime = null;
+      let reasoningStartTime = null;
+      let reasoningEndTime = null;
+      let lastContent = '';
 
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      // Poll IndexedDB for stream progress (every 100ms)
+      state.chatPollTimer = setInterval(async () => {
+        const session = await getStreamSession();
+        if (!session) return;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data:')) continue;
-          const data = trimmed.slice(5).trim();
-          if (data === '[DONE]') continue;
-          try {
-            const json = JSON.parse(data);
-            const delta = json.choices?.[0]?.delta;
-            // Reasoning: support both "reasoning_content" (DeepSeek/QwQ) and "thinking" (Claude-style)
-            const reasoningDelta = delta?.reasoning_content || delta?.thinking || '';
-            const contentDelta = delta?.content || '';
+        const content = session.assistantContent || '';
+        const reasoning = session.reasoningContent || '';
 
-            if (reasoningDelta) {
-              if (reasoningStartTime === null) reasoningStartTime = Date.now();
-              apiReasoningContent += reasoningDelta;
-              reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
-              updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
+        if (content && firstTokenTime === null) {
+          firstTokenTime = Date.now() - streamStartTime;
+        }
+
+        // Update thinking block
+        if (reasoning) {
+          if (reasoningStartTime === null) reasoningStartTime = Date.now();
+          if (streamEls.thinkingBlock.classList.contains('hidden')) {
+            streamEls.thinkingBlock.classList.remove('hidden');
+            streamEls.thinkingBlock.classList.add('expanded');
+          }
+          const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
+          streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+          streamEls.thinkingMd.innerHTML = renderMd(reasoning);
+        }
+
+        // Update content
+        if (content !== lastContent) {
+          lastContent = content;
+          streamEls.contentMd.innerHTML = renderMd(content);
+          dom.messages.scrollTop = dom.messages.scrollHeight;
+        }
+
+        // Collapse thinking block when reasoning is done and content starts
+        if (reasoning && content && reasoningEndTime === null) {
+          reasoningEndTime = Date.now();
+          streamEls.thinkingBlock.classList.remove('expanded');
+          const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
+          streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+        }
+
+        // Handle stream completion
+        if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
+          clearInterval(state.chatPollTimer);
+          state.chatPollTimer = null;
+
+          const outputTokens = estimateTokens(content);
+          let msgData;
+
+          if (session.status === 'error') {
+            const detail = session.error ? `\n\n\`\`\`text\n${session.error}\n\`\`\`` : '';
+            msgData = { role: 'assistant', content: `**错误**: 请求失败${detail}`, tokens: 0, model: state.model };
+          } else if (session.status === 'stopped') {
+            const stoppedContent = content.trim()
+              ? `${content}\n\n_已停止生成_`
+              : '**已停止生成**';
+            msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: state.model };
+            if (reasoning) msgData.reasoningContent = reasoning;
+          } else {
+            msgData = { role: 'assistant', content, tokens: outputTokens, model: state.model };
+            if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
+            if (reasoning) {
+              msgData.reasoningContent = reasoning;
+              msgData.reasoningTimeMs = reasoningEndTime ? reasoningEndTime - (reasoningStartTime || streamStartTime) : null;
             }
+          }
 
-            if (contentDelta) {
-              if (firstTokenTime === null) firstTokenTime = Date.now() - streamStartTime;
-              assistantRawContent += contentDelta;
-              const splitContent = splitThinkTags(assistantRawContent);
-              assistantContent = splitContent.content;
-              tagReasoningContent = splitContent.reasoning;
-              reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
-              if (reasoningContent) {
+          // Replace placeholder
+          if (conv.messages[streamMsgIdx]?.streaming) {
+            conv.messages[streamMsgIdx] = msgData;
+          } else {
+            conv.messages.push(msgData);
+          }
+
+          if (conv.messages.filter(m => m.role === 'user').length === 1) {
+            const firstUserMsg = conv.messages.find(m => m.role === 'user');
+            const titleText = typeof firstUserMsg?.content === 'string' ? firstUserMsg.content : '';
+            conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
+          }
+
+          let ctxTokens = 0;
+          for (const msg of conv.messages) ctxTokens += estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
+          state.tokenStats.input += ctxTokens;
+          state.tokenStats.output += outputTokens;
+          state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
+
+          persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+          updateModelBadge();
+          updateSidebar();
+
+          $('stream-el')?.remove();
+          renderMessages();
+
+          state.isStreaming = false;
+          state.chatAbortController = null;
+          dom.userInput.disabled = false;
+          dom.userInput.focus();
+          updateSendBtn();
+          clearStreamSession();
+        }
+      }, 100);
+
+    } else {
+      // === Fallback: no SW, use direct fetch ===
+      const controller = new AbortController();
+      state.chatAbortController = controller;
+      let assistantContent = '';
+      let reasoningContent = '';
+      let apiReasoningContent = '';
+      let tagReasoningContent = '';
+      let firstTokenTime = null;
+      let reasoningStartTime = null;
+      let reasoningEndTime = null;
+      const streamStartTime = Date.now();
+
+      try {
+        const resp = await apiFetch(streamUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+          body: JSON.stringify(reqBody),
+          signal: controller.signal,
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
+          throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, streamUrl);
+        }
+
+        removeTyping();
+        state.streamEls = addStreamMsg();
+        const streamEls = state.streamEls;
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let lastStreamPersist = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || !trimmed.startsWith('data:')) continue;
+            const data = trimmed.slice(5).trim();
+            if (data === '[DONE]') continue;
+            try {
+              const json = JSON.parse(data);
+              const delta = json.choices?.[0]?.delta;
+              const reasoningDelta = delta?.reasoning_content || delta?.thinking || '';
+              const contentDelta = delta?.content || '';
+
+              if (reasoningDelta) {
                 if (reasoningStartTime === null) reasoningStartTime = Date.now();
+                apiReasoningContent += reasoningDelta;
+                reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
                 updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
               }
-              if (reasoningContent && !splitContent.openThink && reasoningEndTime === null) {
-                reasoningEndTime = Date.now();
-                streamEls.thinkingBlock.classList.remove('expanded');
-                const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
-                streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+
+              if (contentDelta) {
+                if (firstTokenTime === null) firstTokenTime = Date.now() - streamStartTime;
+                assistantContent += contentDelta;
+                const splitContent = splitThinkTags(assistantContent);
+                tagReasoningContent = splitContent.reasoning;
+                reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
+                if (reasoningContent) {
+                  if (reasoningStartTime === null) reasoningStartTime = Date.now();
+                  updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
+                }
+                if (reasoningContent && !splitContent.openThink && reasoningEndTime === null) {
+                  reasoningEndTime = Date.now();
+                  streamEls.thinkingBlock.classList.remove('expanded');
+                  const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
+                  streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+                }
+                updateStream(streamEls.contentMd, splitContent.content);
+                // Persist partial content every 2s for non-SW crash recovery
+                const now = Date.now();
+                if (now - lastStreamPersist > 2000) {
+                  lastStreamPersist = now;
+                  if (conv.messages[streamMsgIdx]?.streaming) {
+                    conv.messages[streamMsgIdx].content = splitContent.content;
+                    conv.messages[streamMsgIdx].tokens = estimateTokens(splitContent.content);
+                    if (reasoningContent) conv.messages[streamMsgIdx].reasoningContent = reasoningContent;
+                    if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
+                    persist([KEYS.conversations]);
+                  }
+                }
               }
-              updateStream(streamEls.contentMd, assistantContent);
-            }
-          } catch { /* skip */ }
+            } catch { /* skip */ }
+          }
         }
+
+        const outputTokens = estimateTokens(assistantContent);
+        const msgData = { role: 'assistant', content: assistantContent, tokens: outputTokens, model: state.model };
+        if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
+        if (reasoningContent) {
+          msgData.reasoningContent = reasoningContent;
+          msgData.reasoningTimeMs = reasoningEndTime ? reasoningEndTime - (reasoningStartTime || streamStartTime) : null;
+        }
+        if (conv.messages[streamMsgIdx]?.streaming) {
+          conv.messages[streamMsgIdx] = msgData;
+        } else {
+          conv.messages.push(msgData);
+        }
+
+        if (conv.messages.filter(m => m.role === 'user').length === 1) {
+          conv.title = userContent.slice(0, 30) + (userContent.length > 30 ? '...' : '');
+        }
+
+        let ctxTokens = 0;
+        for (const msg of conv.messages) ctxTokens += estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
+        state.tokenStats.input += ctxTokens;
+        state.tokenStats.output += outputTokens;
+        state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
+
+        persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+        updateModelBadge();
+        updateSidebar();
+
+        $('stream-el')?.remove();
+        renderMessages();
+
+      } catch (e) {
+        removeTyping();
+        $('stream-el')?.remove();
+        if (e?.name === 'AbortError') {
+          const stoppedContent = assistantContent.trim()
+            ? `${assistantContent}\n\n_已停止生成_`
+            : '**已停止生成**';
+          const stoppedMsg = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(assistantContent), model: state.model };
+          if (reasoningContent) stoppedMsg.reasoningContent = reasoningContent;
+          if (conv.messages[streamMsgIdx]?.streaming) conv.messages[streamMsgIdx] = stoppedMsg;
+          else conv.messages.push(stoppedMsg);
+        } else {
+          const detail = e.diagnostics ? `\n\n\`\`\`text\n${e.diagnostics}\n\`\`\`` : '';
+          const errMsg = { role: 'assistant', content: `**错误**: ${e.message}${detail}`, tokens: 0 };
+          if (conv.messages[streamMsgIdx]?.streaming) conv.messages[streamMsgIdx] = errMsg;
+          else conv.messages.push(errMsg);
+        }
+        renderMessages();
+      } finally {
+        state.isStreaming = false;
+        state.streamingConvId = null;
+        state.chatAbortController = null;
+        // Only update UI if we're still viewing this conversation
+        if (currentConv()?.id === conv.id) {
+          dom.userInput.disabled = false;
+          dom.userInput.focus();
+          updateSendBtn();
+        } else {
+          updateInputState();
+        }
+        clearStreamSession();
       }
-
-      const firstTokenMs = firstTokenTime;
-      const outputTokens = estimateTokens(assistantContent);
-      const msgData = { role: 'assistant', content: assistantContent, tokens: outputTokens, model: state.model };
-      if (firstTokenMs !== null) msgData.firstTokenMs = firstTokenMs;
-      if (reasoningContent) {
-        msgData.reasoningContent = reasoningContent;
-        msgData.reasoningTimeMs = reasoningEndTime ? reasoningEndTime - (reasoningStartTime || streamStartTime) : null;
-      }
-      conv.messages.push(msgData);
-
-      if (conv.messages.filter(m => m.role === 'user').length === 1) {
-        conv.title = userContent.slice(0, 30) + (userContent.length > 30 ? '...' : '');
-      }
-
-      state.tokenStats.input += contextTokens;
-      state.tokenStats.output += outputTokens;
-      state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
-
-      persist();
-      updateModelBadge();
-      updateSidebar();
-
-      $('stream-el')?.remove();
-      renderMessages();
-
-    } catch (e) {
-      removeTyping();
-      $('stream-el')?.remove();
-      if (e?.name === 'AbortError') {
-        const stoppedContent = assistantContent.trim()
-          ? `${assistantContent}\n\n_已停止生成_`
-          : '**已停止生成**';
-        const stoppedMsg = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(assistantContent), model: state.model };
-        if (reasoningContent) stoppedMsg.reasoningContent = reasoningContent;
-        conv.messages.push(stoppedMsg);
-      } else {
-        const detail = e.diagnostics ? `\n\n\`\`\`text\n${e.diagnostics}\n\`\`\`` : '';
-        conv.messages.push({ role: 'assistant', content: `**错误**: ${e.message}${detail}`, tokens: 0 });
-      }
-      renderMessages();
-    } finally {
-      state.isStreaming = false;
-      state.chatAbortController = null;
-      dom.userInput.disabled = false;
-      dom.userInput.focus();
-      updateSendBtn();
     }
   }
 
@@ -2259,29 +2698,7 @@
     startImageProgressTimer();
     let timeoutId = null;
 
-    try {
-      timeoutId = setTimeout(() => controller.abort(), imageTimeoutMs(params));
-      job.outputs = state.imageMapModel
-        ? await requestMappedImage(prompt, params, job.inputImage, controller.signal)
-        : job.inputImage
-          ? await requestImageEdit(prompt, params, job.inputImage, controller.signal)
-          : await requestOneImage(prompt, params, controller.signal);
-      if (job.outputs.length === 0) throw new Error('接口未返回可显示的图片数据');
-      job.error = null;
-      job.status = 'done';
-      job.durationMs = Date.now() - startedAt;
-      if (!retryJob && ref) {
-        state.imageRef = null;
-        renderImageRefPreview();
-      }
-      showToast('图片已生成');
-    } catch (e) {
-      const aborted = e?.name === 'AbortError';
-      job.error = aborted ? '请求已中断。可能是手动取消、页面刷新或等待超时，请重试。' : `${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`;
-      job.status = aborted ? 'cancelled' : 'error';
-      job.durationMs = Date.now() - startedAt;
-      showToast(aborted ? '生成已中断' : '生成失败');
-    } finally {
+    function finishImageJob() {
       state.isGeneratingImage = false;
       state.imageAbortController = null;
       stopImageProgressTimer();
@@ -2293,15 +2710,133 @@
       renderImageWorkspace();
       updateImageGenerateBtn();
     }
+
+    try {
+      if (navigator.serviceWorker?.controller) {
+        // === SW proxy mode: route through Service Worker ===
+        state.imageAbortController = { abort: () => {
+          navigator.serviceWorker.controller.postMessage({ type: 'stop-image' });
+        }};
+        const swHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` };
+
+        let swData;
+        if (state.imageMapModel) {
+          const body = {
+            model: state.imageMapModel,
+            input: mappedImageInput(prompt, ref),
+            tools: [imageToolOptions(params)],
+            tool_choice: 'required',
+          };
+          swData = {
+            type: 'start-image', jobId: job.id,
+            url: requestUrl(state.imageBaseUrl, '/responses'),
+            headers: swHeaders, body: JSON.stringify(body),
+            requestType: 'responses', outputFormat: params.outputFormat,
+          };
+        } else if (ref) {
+          swData = {
+            type: 'start-image', jobId: job.id,
+            url: requestUrl(state.imageBaseUrl, '/images/edits'),
+            headers: swHeaders,
+            requestType: 'edit', outputFormat: params.outputFormat,
+            formParams: {
+              model: state.imageModel, prompt: prompt.trim(),
+              imageBase64: ref.base64, imageFilename: ref.name,
+              size: params.size, quality: params.quality,
+              outputFormat: params.outputFormat, background: params.background,
+            },
+          };
+        } else {
+          const body = buildImageRequestBody(prompt, params);
+          swData = {
+            type: 'start-image', jobId: job.id,
+            url: requestUrl(state.imageBaseUrl, '/images/generations'),
+            headers: swHeaders, body: JSON.stringify(body),
+            requestType: 'generations', outputFormat: params.outputFormat,
+          };
+        }
+        navigator.serviceWorker.controller.postMessage(swData);
+
+        // Poll IndexedDB for image result (every 500ms)
+        state.imagePollTimer = setInterval(async () => {
+          const session = await getImageSession();
+          if (!session) return;
+
+          if (session.status === 'complete') {
+            clearInterval(state.imagePollTimer);
+            state.imagePollTimer = null;
+            job.outputs = JSON.parse(session.outputs || '[]');
+            if (job.outputs.length === 0) {
+              job.error = '接口未返回可显示的图片数据';
+              job.status = 'error';
+            } else {
+              job.error = null;
+              job.status = 'done';
+            }
+            job.durationMs = Date.now() - startedAt;
+            if (!retryJob && ref) { state.imageRef = null; renderImageRefPreview(); }
+            if (job.status === 'done') showToast('图片已生成');
+            else showToast('生成失败');
+            finishImageJob();
+            await clearImageSession();
+          } else if (session.status === 'error') {
+            clearInterval(state.imagePollTimer);
+            state.imagePollTimer = null;
+            job.error = session.error || '生成失败';
+            job.status = 'error';
+            job.durationMs = Date.now() - startedAt;
+            showToast('生成失败');
+            finishImageJob();
+            await clearImageSession();
+          } else if (session.status === 'stopped') {
+            clearInterval(state.imagePollTimer);
+            state.imagePollTimer = null;
+            job.error = '请求已中断';
+            job.status = 'cancelled';
+            job.durationMs = Date.now() - startedAt;
+            showToast('生成已中断');
+            finishImageJob();
+            await clearImageSession();
+          }
+        }, 500);
+
+      } else {
+        // === Fallback: no SW, direct fetch ===
+        timeoutId = setTimeout(() => controller.abort(), imageTimeoutMs(params));
+        job.outputs = state.imageMapModel
+          ? await requestMappedImage(prompt, params, job.inputImage, controller.signal)
+          : job.inputImage
+            ? await requestImageEdit(prompt, params, job.inputImage, controller.signal)
+            : await requestOneImage(prompt, params, controller.signal);
+        if (job.outputs.length === 0) throw new Error('接口未返回可显示的图片数据');
+        job.error = null;
+        job.status = 'done';
+        job.durationMs = Date.now() - startedAt;
+        if (!retryJob && ref) { state.imageRef = null; renderImageRefPreview(); }
+        showToast('图片已生成');
+        finishImageJob();
+      }
+    } catch (e) {
+      const aborted = e?.name === 'AbortError';
+      job.error = aborted ? '请求已中断。可能是手动取消、页面刷新或等待超时，请重试。' : `${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`;
+      job.status = aborted ? 'cancelled' : 'error';
+      job.durationMs = Date.now() - startedAt;
+      showToast(aborted ? '生成已中断' : '生成失败');
+      finishImageJob();
+    }
   }
 
   // ===== Event Binding =====
   // Sidebar
   dom.sidebarToggle.addEventListener('click', toggleSidebar);
   dom.sidebarBackdrop.addEventListener('click', closeSidebarMobile);
+  let searchTimer;
   dom.sidebarSearch.addEventListener('input', () => {
-    state.sidebarSearch = dom.sidebarSearch.value;
-    updateSidebar();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.sidebarSearch = dom.sidebarSearch.value;
+      updateSidebar();
+    }, 300);
   });
   dom.modeChatBtn.addEventListener('click', () => {
     switchMode('chat');
@@ -2318,11 +2853,12 @@
       dom.imagePrompt.focus();
       return;
     }
+    pauseActivePolls();
     newConv();
     updateSidebar();
-    renderMessages();
     closeSidebarMobile();
     syncConvParams();
+    resumeStreamPollIfNeeded();
     dom.userInput.focus();
   });
 
@@ -2377,6 +2913,254 @@
   dom.convRoleInput.addEventListener('blur', saveConvParams);
 
   // Conversation list
+  // Pause UI polls when switching away — generation continues in SW, polls restart on return
+  function pauseActivePolls() {
+    if (state.chatPollTimer) { clearInterval(state.chatPollTimer); state.chatPollTimer = null; }
+    if (state.imagePollTimer) { clearInterval(state.imagePollTimer); state.imagePollTimer = null; }
+    stopImageProgressTimer();
+  }
+
+  // Restart UI poll when switching back to a conversation that's actively streaming
+  function resumeStreamPollIfNeeded() {
+    const conv = currentConv();
+    if (!conv) { state.isStreaming = false; updateInputState(); return; }
+
+    const streamIdx = conv.messages.findIndex(m => m.streaming);
+    if (streamIdx < 0) {
+      // Current conversation is not streaming
+      state.isStreaming = false;
+      state.streamingConvId = null;
+      updateInputState();
+      renderMessages();
+      return;
+    }
+
+    // Current conv has a streaming placeholder — check if it matches the active stream
+    // Render current state immediately so the user sees content right away
+    renderMessages();
+
+    if (navigator.serviceWorker?.controller) {
+      // SW proxy mode: check if the active stream belongs to this conversation
+      (async () => {
+        const session = await getStreamSession();
+        if (!session || (session.convId && session.convId !== conv.id)) {
+          // No active SW session or session belongs to a different conv
+          // Finalize the placeholder as stopped
+          finalizeStreamingPlaceholder(conv, streamIdx, conv.messages[streamIdx].content || '', conv.messages[streamIdx].reasoningContent || '');
+          return;
+        }
+
+        // Session matches this conversation
+        state.isStreaming = true;
+        state.streamingConvId = conv.id;
+        dom.userInput.disabled = true;
+        updateSendBtn();
+
+        if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
+          // Stream already finished — finalize immediately
+          finalizeStreamFromSession(conv, streamIdx, session);
+          return;
+        }
+
+        // Stream is still active — start/resume the UI poll
+        removeTyping();
+        $('stream-el')?.remove();
+        state.streamEls = addStreamMsg();
+        const streamEls = state.streamEls;
+        const streamStartTime = Date.now();
+        let firstTokenTime = null;
+        let reasoningStartTime = null;
+        let reasoningEndTime = null;
+        let lastContent = conv.messages[streamIdx].content || '';
+
+        // Show already-accumulated content
+        const initialContent = session.assistantContent || '';
+        const initialReasoning = session.reasoningContent || '';
+        if (initialContent) { streamEls.contentMd.innerHTML = renderMd(initialContent); lastContent = initialContent; }
+        if (initialReasoning) {
+          streamEls.thinkingBlock.classList.remove('hidden');
+          streamEls.thinkingBlock.classList.add('expanded');
+          streamEls.thinkingMd.innerHTML = renderMd(initialReasoning);
+          reasoningStartTime = Date.now() - 1000;
+        }
+        dom.messages.scrollTop = dom.messages.scrollHeight;
+
+        state.chatAbortController = { abort: () => {
+          navigator.serviceWorker.controller.postMessage({ type: 'stop-stream' });
+        }};
+
+        state.chatPollTimer = setInterval(async () => {
+          const session = await getStreamSession();
+          if (!session) return;
+
+          const content = session.assistantContent || '';
+          const reasoning = session.reasoningContent || '';
+
+          if (content && firstTokenTime === null) firstTokenTime = Date.now() - streamStartTime;
+
+          if (reasoning) {
+            if (reasoningStartTime === null) reasoningStartTime = Date.now();
+            if (streamEls.thinkingBlock.classList.contains('hidden')) {
+              streamEls.thinkingBlock.classList.remove('hidden');
+              streamEls.thinkingBlock.classList.add('expanded');
+            }
+            const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
+            streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+            streamEls.thinkingMd.innerHTML = renderMd(reasoning);
+          }
+
+          if (content !== lastContent) {
+            lastContent = content;
+            streamEls.contentMd.innerHTML = renderMd(content);
+            dom.messages.scrollTop = dom.messages.scrollHeight;
+          }
+
+          if (reasoning && content && reasoningEndTime === null) {
+            reasoningEndTime = Date.now();
+            streamEls.thinkingBlock.classList.remove('expanded');
+            const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
+            streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+          }
+
+          if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
+            clearInterval(state.chatPollTimer);
+            state.chatPollTimer = null;
+            finalizeStreamFromSession(conv, streamIdx, session);
+          }
+        }, 100);
+      })();
+    } else {
+      // Fallback mode: the async try/catch flow is still running in the background.
+      // The closure holds references to conv and streamMsgIdx, so it will update conv.messages.
+      // Replace the stale streamEls reference so the fallback flow updates the new DOM elements.
+      state.isStreaming = true;
+      state.streamingConvId = conv.id;
+      dom.userInput.disabled = true;
+      updateSendBtn();
+      removeTyping();
+      $('stream-el')?.remove();
+      state.streamEls = addStreamMsg();
+      // The fallback flow's closure `streamEls` is stale — we update `state.streamEls` here,
+      // but the closure still uses the old one. This is acceptable: DOM updates to removed
+      // elements silently fail, and conv.messages is still being updated with partial content.
+      // The new streamEls will be visible and show current content; updates will come via
+      // periodic persist of conv.messages[streamMsgIdx] which we could poll if needed.
+      const existingContent = conv.messages[streamIdx].content || '';
+      const existingReasoning = conv.messages[streamIdx].reasoningContent || '';
+      if (existingContent) state.streamEls.contentMd.innerHTML = renderMd(existingContent);
+      if (existingReasoning) {
+        state.streamEls.thinkingBlock.classList.remove('hidden');
+        state.streamEls.thinkingBlock.classList.add('expanded');
+        state.streamEls.thinkingMd.innerHTML = renderMd(existingReasoning);
+      }
+      dom.messages.scrollTop = dom.messages.scrollHeight;
+
+      // Start a poll for the fallback mode to update the recreated stream UI from conv.messages
+      // (since the fallback flow's streamEls is stale and its DOM updates are lost)
+      state.chatPollTimer = setInterval(() => {
+        const placeholder = conv.messages[streamIdx];
+        if (!placeholder?.streaming) {
+          // Stream completed — the fallback flow finalized the message
+          clearInterval(state.chatPollTimer);
+          state.chatPollTimer = null;
+          state.isStreaming = false;
+          state.streamingConvId = null;
+          $('stream-el')?.remove();
+          renderMessages();
+          dom.userInput.disabled = false;
+          dom.userInput.focus();
+          updateSendBtn();
+          return;
+        }
+        const c = placeholder.content || '';
+        const r = placeholder.reasoningContent || '';
+        if (c) state.streamEls.contentMd.innerHTML = renderMd(c);
+        if (r) state.streamEls.thinkingMd.innerHTML = renderMd(r);
+        dom.messages.scrollTop = dom.messages.scrollHeight;
+      }, 500);
+    }
+  }
+
+  // Finalize a completed/failed/stopped stream session into a proper message
+  function finalizeStreamFromSession(conv, streamIdx, session) {
+    const content = session.assistantContent || '';
+    const reasoning = session.reasoningContent || '';
+    const outputTokens = estimateTokens(content);
+    let msgData;
+    if (session.status === 'error') {
+      const detail = session.error ? `\n\n\`\`\`text\n${session.error}\n\`\`\`` : '';
+      msgData = { role: 'assistant', content: `**错误**: 请求失败${detail}`, tokens: 0, model: state.model };
+    } else if (session.status === 'stopped') {
+      const stoppedContent = content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**';
+      msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: state.model };
+      if (reasoning) msgData.reasoningContent = reasoning;
+    } else {
+      msgData = { role: 'assistant', content, tokens: outputTokens, model: state.model };
+      if (reasoning) { msgData.reasoningContent = reasoning; }
+    }
+
+    if (conv.messages[streamIdx]?.streaming) conv.messages[streamIdx] = msgData;
+    else conv.messages.push(msgData);
+
+    if (conv.messages.filter(m => m.role === 'user').length === 1) {
+      const firstUserMsg = conv.messages.find(m => m.role === 'user');
+      const titleText = typeof firstUserMsg?.content === 'string' ? firstUserMsg.content : '';
+      conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
+    }
+
+    let ctxTokens = 0;
+    for (const msg of conv.messages) ctxTokens += estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
+    state.tokenStats.input += ctxTokens;
+    state.tokenStats.output += outputTokens;
+    state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
+
+    state.isStreaming = false;
+    state.streamingConvId = null;
+    state.chatAbortController = null;
+
+    persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+    updateModelBadge();
+    updateSidebar();
+
+    $('stream-el')?.remove();
+    renderMessages();
+    dom.userInput.disabled = false;
+    dom.userInput.focus();
+    updateSendBtn();
+    clearStreamSession();
+  }
+
+  // Finalize a streaming placeholder as a stopped message (no active stream available)
+  function finalizeStreamingPlaceholder(conv, streamIdx, content, reasoning) {
+    const stoppedContent = content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**';
+    const msgData = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(content), model: state.model };
+    if (reasoning) msgData.reasoningContent = reasoning;
+    if (conv.messages[streamIdx]?.streaming) conv.messages[streamIdx] = msgData;
+    else conv.messages.push(msgData);
+
+    if (conv.messages.filter(m => m.role === 'user').length === 1) {
+      const firstUserMsg = conv.messages.find(m => m.role === 'user');
+      const titleText = typeof firstUserMsg?.content === 'string' ? firstUserMsg.content : '';
+      conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
+    }
+
+    state.isStreaming = false;
+    state.streamingConvId = null;
+    state.chatAbortController = null;
+
+    persist([KEYS.conversations, KEYS.currentConvId]);
+    updateSidebar();
+    renderMessages();
+    dom.userInput.disabled = false;
+    updateSendBtn();
+    updateInputState();
+  }
+
+  function updateInputState() {
+    dom.userInput.disabled = state.isStreaming;
+    updateSendBtn();
+  }
+
   dom.convList.addEventListener('click', (e) => {
     if (state.mode === 'image') {
       const delBtn = e.target.closest('.conv-item-delete');
@@ -2445,12 +3229,13 @@
 
     const item = e.target.closest('.conv-item');
     if (item) {
+      pauseActivePolls();
       state.currentConvId = item.dataset.id;
       persist();
       updateSidebar();
-      renderMessages();
       syncConvParams();
       closeSidebarMobile();
+      resumeStreamPollIfNeeded();
     }
   });
 
@@ -2856,7 +3641,6 @@
   dom.imageViewer.addEventListener('pointermove', moveImageViewerDrag);
   dom.imageViewer.addEventListener('pointerup', endImageViewerDrag);
   dom.imageViewer.addEventListener('pointercancel', endImageViewerDrag);
-  dom.imageViewerImg.addEventListener('contextmenu', e => e.preventDefault());
   dom.imageViewerImg.addEventListener('dblclick', resetImageViewerTransform);
   dom.imageViewerImg.addEventListener('touchstart', startImageViewerTouch, { passive: false });
   dom.imageViewerImg.addEventListener('touchmove', moveImageViewerTouch, { passive: false });
@@ -2872,20 +3656,55 @@
   });
 
   window.addEventListener('beforeunload', (e) => {
-    if (!state.isGeneratingImage) return;
-    e.preventDefault();
-    e.returnValue = '图片正在生成，刷新或关闭页面会中断当前请求。';
+    // Check if ANY conversation is streaming in background
+    const hasStreamingConv = state.streamingConvId && state.conversations.find(c => c.id === state.streamingConvId && c.messages.some(m => m.streaming));
+    if (hasStreamingConv || state.isGeneratingImage) {
+      // In SW mode: SW is handling persistence, just warn the user
+      // In fallback mode: persist partial content for crash recovery
+      if (hasStreamingConv && !navigator.serviceWorker?.controller) {
+        const conv = state.conversations.find(c => c.id === state.streamingConvId);
+        if (conv) {
+          const streamMsg = conv.messages.find(m => m.streaming);
+          if (streamMsg) persist([KEYS.conversations]);
+        }
+      }
+      e.preventDefault();
+      e.returnValue = hasStreamingConv ? '回复正在生成，刷新页面可通过 Service Worker 继续接收。' : '图片正在生成，刷新或关闭页面会中断当前请求。';
+    }
   });
 
   // Send
   dom.sendBtn.addEventListener('click', () => {
-    if (state.isStreaming) {
+    // If any conversation is streaming in the background, abort it before starting a new one
+    if (state.isStreaming || state.streamingConvId) {
       state.chatAbortController?.abort();
-      return;
+      // If we were streaming a DIFFERENT conversation, also clean up its placeholder
+      if (state.streamingConvId && state.streamingConvId !== currentConv()?.id) {
+        const oldConv = state.conversations.find(c => c.id === state.streamingConvId);
+        if (oldConv) {
+          const streamIdx = oldConv.messages.findIndex(m => m.streaming);
+          if (streamIdx >= 0) {
+            const content = oldConv.messages[streamIdx].content || '';
+            const reasoning = oldConv.messages[streamIdx].reasoningContent || '';
+            // In SW mode: the abort sends stop-stream, SW will finalize in IndexedDB.
+            // We directly finalize the placeholder here since we know it was stopped.
+            oldConv.messages[streamIdx] = { role: 'assistant', content: content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**', tokens: estimateTokens(content), model: state.model };
+            if (reasoning) oldConv.messages[streamIdx].reasoningContent = reasoning;
+            persist([KEYS.conversations]);
+            updateSidebar();
+            clearStreamSession();
+          }
+        }
+        state.isStreaming = false;
+        state.streamingConvId = null;
+        state.chatAbortController = null;
+      }
+      if (state.isStreaming) return; // was streaming current conv — just stop it, user needs to click again to send
+      // If we aborted a background stream, allow sending in current conv
     }
     const text = dom.userInput.value.trim();
     if (!ensureModeConfigured('chat')) return;
-    if (!text || state.isStreaming) return;
+    if (!text) return;
     if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); }
     dom.userInput.value = '';
     autoResize();
@@ -2907,6 +3726,383 @@
   // ===== Init =====
   applyTheme();
 
+  // Register Service Worker for stream continuation across page refreshes
+  if ('serviceWorker' in navigator && window.location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch(e => {
+      console.warn('SW registration failed:', e);
+    });
+  }
+
+  // Recover streaming messages: check SW session first (better data), then local flags
+  async function recoverStreamFromSession() {
+    const session = await getStreamSession();
+    if (!session) return false;
+
+    const conv = state.conversations.find(c => c.id === session.convId);
+    if (!conv) {
+      await clearStreamSession();
+      return false;
+    }
+
+    // Find or create the streaming placeholder in messages
+    let streamIdx = conv.messages.findIndex(m => m.streaming);
+
+    if (session.status === 'complete') {
+      // Stream finished while page was refreshing — full recovery
+      const msgData = {
+        role: 'assistant',
+        content: session.assistantContent || '',
+        tokens: estimateTokens(session.assistantContent),
+        model: session.model,
+      };
+      if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
+
+      if (streamIdx >= 0) {
+        conv.messages[streamIdx] = msgData;
+      } else {
+        conv.messages.push(msgData);
+      }
+      persist([KEYS.conversations]);
+      await clearStreamSession();
+      return true;
+    }
+
+    // SW is still streaming or connecting — start live recovery
+    if (session.status === 'streaming' || session.status === 'connecting') {
+      state.isStreaming = true;
+      state.streamingConvId = conv.id;
+      const msgData = {
+        role: 'assistant',
+        content: session.assistantContent || '...',
+        tokens: estimateTokens(session.assistantContent),
+        model: session.model,
+        streaming: true,
+      };
+      if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
+
+      if (streamIdx >= 0) {
+        conv.messages[streamIdx] = msgData;
+      } else {
+        conv.messages.push(msgData);
+      }
+      persist([KEYS.conversations]);
+      startStreamRecoveryPolling(conv);
+      return true;
+    }
+
+    // SW reported stopped (user aborted before page refresh)
+    if (session.status === 'stopped') {
+      const content = (session.assistantContent || '').trim();
+      const stoppedContent = content ? `${content}\n\n_已停止生成_` : '**已停止生成**';
+      const msgData = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(content), model: session.model };
+      if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
+      if (streamIdx >= 0) conv.messages[streamIdx] = msgData;
+      else conv.messages.push(msgData);
+      persist([KEYS.conversations]);
+      await clearStreamSession();
+      return true;
+    }
+
+    // SW reported error
+    if (session.status === 'error') {
+      const content = (session.assistantContent || '').trim();
+      if (content) {
+        const msgData = {
+          role: 'assistant',
+          content: `${content}\n\n_（回复中断）_`,
+          tokens: estimateTokens(content),
+          model: session.model,
+        };
+        if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
+        if (streamIdx >= 0) {
+          conv.messages[streamIdx] = msgData;
+        } else {
+          conv.messages.push(msgData);
+        }
+      } else if (streamIdx >= 0) {
+        conv.messages.splice(streamIdx, 1);
+      }
+      persist([KEYS.conversations]);
+      await clearStreamSession();
+      return true;
+    }
+
+    return false;
+  }
+
+  // Live polling: update message content from SW's IndexedDB every 500ms
+  let streamRecoveryTimer = null;
+
+  function startStreamRecoveryPolling(conv) {
+    if (streamRecoveryTimer) return;
+
+    // Create the stream UI element once (like addStreamMsg)
+    let recoveryEls = null;
+    function createRecoveryUI(msg) {
+      const el = document.createElement('div');
+      el.className = 'chat-msg ai';
+      el.id = 'recovery-el';
+      const hasReasoning = !!msg.reasoningContent;
+      el.innerHTML = `
+        <div class="chat-msg-inner">
+          <div class="chat-msg-avatar">${SVG_BOT}</div>
+          <div class="chat-msg-body">
+            ${hasReasoning ? `<div class="thinking-block expanded">
+              <button class="thinking-toggle" type="button">
+                <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                <span class="thinking-label">正在恢复思考过程...</span>
+              </button>
+              <div class="thinking-content"><div class="msg-md"></div></div>
+            </div>` : ''}
+            <div class="msg-md"></div>
+            <div class="msg-meta"><span class="msg-meta-item">正在恢复回复...</span></div>
+          </div>
+        </div>
+      `;
+      dom.messages.appendChild(el);
+      dom.messages.scrollTop = dom.messages.scrollHeight;
+      return {
+        contentMd: el.querySelector('.chat-msg-body > .msg-md'),
+        thinkingMd: el.querySelector('.thinking-content .msg-md'),
+        thinkingLabel: el.querySelector('.thinking-label'),
+        metaRow: el.querySelector('.msg-meta'),
+      };
+    }
+
+    streamRecoveryTimer = setInterval(async () => {
+      const session = await getStreamSession();
+      if (!session) {
+        clearInterval(streamRecoveryTimer);
+        streamRecoveryTimer = null;
+        state.isStreaming = false;
+        state.streamingConvId = null;
+        $('recovery-el')?.remove();
+        renderMessages();
+        return;
+      }
+
+      const streamIdx = conv.messages.findIndex(m => m.streaming);
+      if (streamIdx < 0) {
+        clearInterval(streamRecoveryTimer);
+        streamRecoveryTimer = null;
+        state.isStreaming = false;
+        state.streamingConvId = null;
+        $('recovery-el')?.remove();
+        renderMessages();
+        return;
+      }
+
+      const msg = conv.messages[streamIdx];
+      msg.content = session.assistantContent || msg.content;
+      if (session.reasoningContent) msg.reasoningContent = session.reasoningContent;
+      msg.tokens = estimateTokens(msg.content);
+
+      if (session.status === 'complete') {
+        msg.streaming = false;
+        delete msg.streaming;
+        persist([KEYS.conversations]);
+        await clearStreamSession();
+        clearInterval(streamRecoveryTimer);
+        streamRecoveryTimer = null;
+        state.isStreaming = false;
+        state.streamingConvId = null;
+        $('recovery-el')?.remove();
+        renderMessages();
+        showToast('回复已恢复完成');
+        return;
+      }
+
+      if (session.status === 'stopped') {
+        const content = (msg.content || '').trim();
+        msg.content = content ? `${content}\n\n_已停止生成_` : '**已停止生成**';
+        msg.streaming = false;
+        delete msg.streaming;
+        persist([KEYS.conversations]);
+        await clearStreamSession();
+        clearInterval(streamRecoveryTimer);
+        streamRecoveryTimer = null;
+        state.isStreaming = false;
+        state.streamingConvId = null;
+        $('recovery-el')?.remove();
+        renderMessages();
+        return;
+      }
+
+      // Timeout: SW was killed (no update for 60s) or error
+      if (session.status === 'error' || Date.now() - session.updatedAt > 60000) {
+        const content = (msg.content || '').trim();
+        if (content) {
+          msg.content = `${content}\n\n_（回复中断，保存的部分内容）_`;
+        } else {
+          conv.messages.splice(streamIdx, 1);
+        }
+        msg.streaming = false;
+        delete msg.streaming;
+        persist([KEYS.conversations]);
+        await clearStreamSession();
+        clearInterval(streamRecoveryTimer);
+        streamRecoveryTimer = null;
+        state.isStreaming = false;
+        state.streamingConvId = null;
+        $('recovery-el')?.remove();
+        renderMessages();
+        return;
+      }
+
+      // Incremental update: only update the recovery element's content, no full DOM rebuild
+      if (!recoveryEls && session.status !== 'connecting') {
+        // Remove the static rendered streaming message and replace with recovery UI
+        const msgEls = dom.messages.querySelectorAll('.chat-msg.ai');
+        const lastEl = msgEls[msgEls.length - 1];
+        if (lastEl) lastEl.remove();
+        recoveryEls = createRecoveryUI(msg);
+      }
+
+      // Skip UI update while SW is still connecting
+      if (session.status === 'connecting' || !recoveryEls) return;
+
+      if (msg.reasoningContent && recoveryEls.thinkingMd) {
+        scheduleStreamRender(() => {
+          recoveryEls.thinkingMd.innerHTML = renderMd(msg.reasoningContent);
+          recoveryEls.thinkingLabel.textContent = `正在恢复思考过程...`;
+          recoveryEls.contentMd.innerHTML = renderMd(msg.content);
+          dom.messages.scrollTop = dom.messages.scrollHeight;
+        });
+      } else {
+        scheduleStreamRender(() => {
+          recoveryEls.contentMd.innerHTML = renderMd(msg.content);
+          dom.messages.scrollTop = dom.messages.scrollHeight;
+        });
+      }
+    }, 500);
+  }
+
+  // Also recover any local streaming flags (fallback if SW didn't catch it)
+  function recoverInterruptedStreams() {
+    let recovered = false;
+    for (const conv of state.conversations) {
+      for (let i = conv.messages.length - 1; i >= 0; i--) {
+        const msg = conv.messages[i];
+        if (msg?.streaming) {
+          const content = (msg.content || '').trim();
+          if (content) {
+            msg.content = `${content}\n\n_（回复中断，页面刷新时保存的部分内容）_`;
+            msg.streaming = false;
+          } else {
+            conv.messages.splice(i, 1);
+          }
+          recovered = true;
+        }
+      }
+    }
+    if (recovered) persist([KEYS.conversations]);
+  }
+
+  // Recover image generation session from Service Worker
+  async function recoverImageFromSession() {
+    const session = await getImageSession();
+    if (!session) return false;
+
+    const job = state.imageJobs.find(j => j.id === session.jobId);
+    if (!job) {
+      // Job was deleted, discard SW data
+      await clearImageSession();
+      return false;
+    }
+
+    if (session.status === 'complete') {
+      job.outputs = JSON.parse(session.outputs || '[]');
+      if (job.outputs.length === 0) {
+        job.error = '接口未返回可显示的图片数据';
+        job.status = 'error';
+      } else {
+        job.error = null;
+        job.status = 'done';
+      }
+      job.durationMs = Date.now() - job.startedAt;
+      persist();
+      imageDbPutJob(job);
+      updateSidebar();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      showToast(job.status === 'done' ? '图片已恢复完成' : '图片生成失败');
+      await clearImageSession();
+      return true;
+    }
+
+    if (session.status === 'stopped') {
+      job.error = '请求已中断';
+      job.status = 'cancelled';
+      job.durationMs = Date.now() - job.startedAt;
+      persist();
+      imageDbPutJob(job);
+      updateSidebar();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      await clearImageSession();
+      return true;
+    }
+
+    if (session.status === 'error') {
+      job.error = session.error || '生成失败';
+      job.status = 'error';
+      job.durationMs = Date.now() - job.startedAt;
+      persist();
+      imageDbPutJob(job);
+      updateSidebar();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      await clearImageSession();
+      return true;
+    }
+
+    // Still streaming/connecting — start polling (same pattern as chat recovery)
+    if (session.status === 'streaming' || session.status === 'connecting') {
+      state.imagePollTimer = setInterval(async () => {
+        const s = await getImageSession();
+        if (!s) { clearInterval(state.imagePollTimer); state.imagePollTimer = null; return; }
+
+        if (s.status === 'complete') {
+          clearInterval(state.imagePollTimer);
+          state.imagePollTimer = null;
+          job.outputs = JSON.parse(s.outputs || '[]');
+          job.status = job.outputs.length > 0 ? 'done' : 'error';
+          if (job.status === 'error') job.error = '接口未返回可显示的图片数据';
+          job.durationMs = Date.now() - job.startedAt;
+          persist(); imageDbPutJob(job);
+          updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
+          showToast(job.status === 'done' ? '图片已恢复完成' : '图片生成失败');
+          await clearImageSession();
+        } else if (s.status === 'error' || s.status === 'stopped') {
+          clearInterval(state.imagePollTimer);
+          state.imagePollTimer = null;
+          job.error = s.error || (s.status === 'stopped' ? '请求已中断' : '生成失败');
+          job.status = s.status === 'stopped' ? 'cancelled' : 'error';
+          job.durationMs = Date.now() - job.startedAt;
+          persist(); imageDbPutJob(job);
+          updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
+          await clearImageSession();
+        } else if (Date.now() - s.updatedAt > 600000) {
+          // 10 min timeout — SW was likely killed
+          clearInterval(state.imagePollTimer);
+          state.imagePollTimer = null;
+          job.error = '生成超时';
+          job.status = 'error';
+          job.durationMs = Date.now() - job.startedAt;
+          persist(); imageDbPutJob(job);
+          updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
+          await clearImageSession();
+        }
+
+        // Keep progress UI updated
+        renderImageWorkspace();
+      }, 1000);
+      return true;
+    }
+
+    return false;
+  }
+
   // On mobile, start with sidebar collapsed
   if (isMobile()) {
     state.sidebarCollapsed = true;
@@ -2922,24 +4118,32 @@
   updateImageGenerateBtn();
   importConfigFromUrl();
 
-  if (configured() || imageConfigured()) {
-    hideSetup();
-    if (currentConv()) {
-      renderMessages();
-      syncConvParams();
-    } else {
-      newConv();
-      updateSidebar();
-      syncConvParams();
-      dom.welcome.classList.remove('hidden');
-      dom.messages.innerHTML = '';
-    }
-    switchMode(state.mode === 'image' ? 'image' : 'chat');
-  } else {
-    state.mode = 'chat';
-    switchMode('chat');
-    hideSetup();
-    if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); renderMessages(); }
-  }
+  // Hydrate file attachments and recover sessions (async)
+  hydrateFilesInConversations(state.conversations).then(() => {
+    // Recover chat stream and image generation sessions
+    Promise.all([recoverStreamFromSession(), recoverImageFromSession()]).then(([swRecovered]) => {
+      if (!swRecovered) recoverInterruptedStreams();
+
+      if (configured() || imageConfigured()) {
+        hideSetup();
+        if (currentConv()) {
+          renderMessages();
+          syncConvParams();
+        } else {
+          newConv();
+          updateSidebar();
+          syncConvParams();
+          dom.welcome.classList.remove('hidden');
+          dom.messages.innerHTML = '';
+        }
+        switchMode(state.mode === 'image' ? 'image' : 'chat');
+      } else {
+        state.mode = 'chat';
+        switchMode('chat');
+        hideSetup();
+        if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); renderMessages(); }
+      }
+    });
+  });
   loadImageHistory();
 })();
