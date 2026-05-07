@@ -183,6 +183,11 @@
               <input type="number" id="param-max-tokens" min="1" max="128000" step="1" value="4096" title="Max Tokens">
               <span class="param-hint">回复最大长度</span>
             </div>
+            <div class="conv-settings-row">
+              <label>上下文上限</label>
+              <input type="number" id="param-context-limit" min="0" max="512000" step="1000" value="128000" title="上下文 Token 上限">
+              <span class="param-hint">超出时自动裁剪旧消息，0=不裁剪</span>
+            </div>
           </div>
         </div>
         <div class="input-disclaimer">AI 生成的内容可能不准确。请核实重要信息。</div>

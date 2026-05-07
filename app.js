@@ -464,7 +464,7 @@
   }
 
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: 4096, systemPrompt: '' };
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: 4096, contextLimit: 128000, systemPrompt: '' };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -475,10 +475,17 @@
   function imageConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imageModel; }
   function imagePromptOptimizerConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imagePromptModel; }
 
-  const MAX_CONTEXT_TOKENS = 80000;
+  const DEFAULT_CONTEXT_LIMIT = 128000;
 
   function trimContextMessages(messages, systemPrompt, maxTokens) {
-    maxTokens = maxTokens || MAX_CONTEXT_TOKENS;
+    if (maxTokens === 0) {
+      // 0 means no trimming
+      const allMessages = [];
+      if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt });
+      allMessages.push(...messages);
+      return allMessages;
+    }
+    maxTokens = maxTokens || DEFAULT_CONTEXT_LIMIT;
     const allMessages = [];
     if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt });
     allMessages.push(...messages);
@@ -979,6 +986,7 @@
     paramTemperature: $('param-temperature'),
     paramTopP: $('param-top-p'),
     paramMaxTokens: $('param-max-tokens'),
+    paramContextLimit: $('param-context-limit'),
     convSettingsBtn: $('conv-settings-btn'),
     convSettingsPanel: $('conv-settings-panel'),
     convRenameInput: $('conv-rename-input'),
@@ -1582,7 +1590,7 @@
       if (typeof m.content === 'string') return { role: m.role, content: m.content };
       return { role: m.role, content: m.content };
     });
-    const apiMessages = trimContextMessages(rawApiMessages, conv.systemPrompt?.trim() || null);
+    const apiMessages = trimContextMessages(rawApiMessages, conv.systemPrompt?.trim() || null, conv.contextLimit);
 
     // Clear pending files after adding to message
     state.pendingFiles = [];
@@ -2869,6 +2877,7 @@
       dom.paramTemperature.value = conv.temperature;
       dom.paramTopP.value = conv.topP;
       dom.paramMaxTokens.value = conv.maxTokens;
+      dom.paramContextLimit.value = conv.contextLimit || DEFAULT_CONTEXT_LIMIT;
       dom.convRenameInput.value = conv.title;
       dom.convRoleInput.value = conv.systemPrompt || '';
     }
@@ -2880,6 +2889,7 @@
     conv.temperature = parseFloat(dom.paramTemperature.value) || 0.7;
     conv.topP = parseFloat(dom.paramTopP.value) || 1;
     conv.maxTokens = parseInt(dom.paramMaxTokens.value) || 4096;
+    conv.contextLimit = parseInt(dom.paramContextLimit.value) || DEFAULT_CONTEXT_LIMIT;
     conv.systemPrompt = dom.convRoleInput.value.trim();
     const newName = dom.convRenameInput.value.trim();
     if (newName) conv.title = newName;
@@ -2908,6 +2918,7 @@
   dom.paramTemperature.addEventListener('change', saveConvParams);
   dom.paramTopP.addEventListener('change', saveConvParams);
   dom.paramMaxTokens.addEventListener('change', saveConvParams);
+  dom.paramContextLimit.addEventListener('change', saveConvParams);
   dom.convRenameInput.addEventListener('change', saveConvParams);
   dom.convRoleInput.addEventListener('change', saveConvParams);
   dom.convRoleInput.addEventListener('blur', saveConvParams);
