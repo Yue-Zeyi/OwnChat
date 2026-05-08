@@ -10,6 +10,7 @@
     conversations: 'nc_conversations',
     currentConvId: 'nc_current_conv_id',
     tokenStats: 'nc_token_stats',
+    showThinking: 'nc_show_thinking',
     sidebarCollapsed: 'nc_sidebar_collapsed',
     theme: 'nc_theme',
     mode: 'nc_mode',
@@ -393,6 +394,7 @@
     conversations: load(KEYS.conversations) || [],
     currentConvId: load(KEYS.currentConvId) || null,
     tokenStats: load(KEYS.tokenStats) || { input: 0, output: 0, total: 0 },
+    showThinking: load(KEYS.showThinking) !== false,
     sidebarCollapsed: load(KEYS.sidebarCollapsed) || false,
     theme: load(KEYS.theme) || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
     imageBaseUrl: load(KEYS.imageBaseUrl) || '',
@@ -1101,6 +1103,7 @@
     convRoleInput: $('conv-role-input'),
     // File upload
     attachBtn: $('attach-btn'),
+    thinkingToggleBtn: $('thinking-toggle-btn'),
     fileInput: $('file-input'),
     filePreview: $('file-preview'),
     // Setup overlay
@@ -1221,15 +1224,25 @@
     dom.sendBtn.classList.toggle('is-stopping', state.isStreaming);
     dom.sendBtn.title = state.isStreaming ? '停止生成' : '发送';
     dom.sendBtn.setAttribute('aria-label', state.isStreaming ? '停止生成' : '发送');
+    dom.sendBtn.dataset.tooltip = state.isStreaming ? '停止生成' : '发送';
+  }
+
+  function updateThinkingToggleBtn() {
+    dom.thinkingToggleBtn.classList.toggle('active', state.showThinking);
+    dom.thinkingToggleBtn.title = state.showThinking ? '隐藏思考过程' : '显示思考过程';
+    dom.thinkingToggleBtn.setAttribute('aria-label', state.showThinking ? '隐藏思考过程' : '显示思考过程');
+    dom.thinkingToggleBtn.dataset.tooltip = state.showThinking ? '隐藏思考过程' : '显示思考过程';
   }
 
   function updateImageGenerateBtn() {
     dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage;
     dom.imageGenerateBtn.title = state.imageRef ? '编辑图片' : '生成图片';
     dom.imageGenerateBtn.setAttribute('aria-label', state.imageRef ? '编辑图片' : '生成图片');
+    dom.imageGenerateBtn.dataset.tooltip = state.imageRef ? '编辑图片' : '生成图片';
     dom.imageOptimizeBtn.disabled = !dom.imagePrompt.value.trim() || state.isOptimizingImagePrompt || state.isGeneratingImage;
     dom.imageOptimizeBtn.title = state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词';
     dom.imageOptimizeBtn.setAttribute('aria-label', state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词');
+    dom.imageOptimizeBtn.dataset.tooltip = state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词';
     dom.imageOptimizeBtn.classList.toggle('active', state.isOptimizingImagePrompt);
   }
 
@@ -1522,7 +1535,7 @@
       const isUser = msg.role === 'user';
       const avatar = isUser ? SVG_PERSON : AI_AVATAR;
       const splitContent = !isUser && typeof msg.content === 'string' ? splitThinkTags(msg.content) : null;
-      const reasoningText = !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
+      const reasoningText = state.showThinking && !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
       const mainContent = splitContent?.reasoning ? splitContent.content : msg.content;
 
       // Build content: thinking block + main content
@@ -1565,7 +1578,7 @@
         const pad = n => String(n).padStart(2, '0');
         metaParts.push(`<span class="msg-meta-item">${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}</span>`);
       }
-      if (!isUser && reasoningText && msg.reasoningTimeMs != null) {
+      if (state.showThinking && !isUser && reasoningText && msg.reasoningTimeMs != null) {
         metaParts.push(`<span class="msg-meta-item">思考 ${msg.reasoningTimeMs >= 1000 ? (msg.reasoningTimeMs / 1000).toFixed(1) + 's' : msg.reasoningTimeMs + 'ms'}</span>`);
       } else if (!isUser && msg.firstTokenMs !== undefined) {
         metaParts.push(`<span class="msg-meta-item">${msg.firstTokenMs >= 1000 ? (msg.firstTokenMs / 1000).toFixed(1) + 's' : msg.firstTokenMs + 'ms'}</span>`);
@@ -1656,6 +1669,7 @@
   }
 
   function updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime) {
+    if (!state.showThinking) return;
     scheduleStreamRender(() => {
       if (streamEls.thinkingBlock.classList.contains('hidden')) {
         streamEls.thinkingBlock.classList.remove('hidden');
@@ -1670,7 +1684,9 @@
 
   // ===== Model Dropdown =====
   function renderModelDropdown() {
-    const models = state.mode === 'image' ? state.imageModelsCache : state.modelsCache;
+    const models = state.mode === 'image'
+      ? mergeUnique(state.imageModelsCache, state.modelsCache)
+      : state.modelsCache;
     const current = state.mode === 'image' ? (state.imageMapModel || state.imageModel) : state.model;
     dom.modelDropdownList.innerHTML = `
       <div class="model-dropdown-header">选择模型</div>
@@ -1824,7 +1840,7 @@
     updateSendBtn();
 
     // Write stream session metadata
-    writeStreamSession({ convId: conv.id, model: state.model, startTime: Date.now() });
+    await writeStreamSession({ convId: conv.id, model: state.model, startTime: Date.now() });
 
     addTyping();
 
@@ -1871,6 +1887,7 @@
       state.chatPollTimer = setInterval(async () => {
         const session = await getStreamSession();
         if (!session) return;
+        if (session.convId && session.convId !== conv.id) return;
 
         const content = session.assistantContent || '';
         const reasoning = session.reasoningContent || '';
@@ -1880,7 +1897,7 @@
         }
 
         // Update thinking block
-        if (reasoning) {
+        if (state.showThinking && reasoning) {
           if (reasoningStartTime === null) reasoningStartTime = Date.now();
           if (streamEls.thinkingBlock.classList.contains('hidden')) {
             streamEls.thinkingBlock.classList.remove('hidden');
@@ -1906,7 +1923,7 @@
         }
 
         // Collapse thinking block when reasoning is done and content starts
-        if (reasoning && content && reasoningEndTime === null) {
+        if (state.showThinking && reasoning && content && reasoningEndTime === null) {
           reasoningEndTime = Date.now();
           streamEls.thinkingBlock.classList.remove('expanded');
           const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
@@ -2067,8 +2084,14 @@
           }
         }
 
-        const outputTokens = estimateTokens(assistantContent);
-        const msgData = { role: 'assistant', content: assistantContent, tokens: outputTokens, model: state.model };
+        const finalSplitContent = splitThinkTags(assistantContent);
+        if (finalSplitContent.reasoning) {
+          tagReasoningContent = finalSplitContent.reasoning;
+          reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
+        }
+        const finalContent = finalSplitContent.content;
+        const outputTokens = estimateTokens(finalContent);
+        const msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: state.model };
         if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
         if (reasoningContent) {
           msgData.reasoningContent = reasoningContent;
@@ -2674,8 +2697,8 @@
 
   function renderImageWorkspace() {
     const selected = currentImageJob();
-    const jobs = selected ? [selected] : state.imageJobs;
-    dom.imageEmpty.classList.toggle('hidden', state.imageJobs.length > 0);
+    const jobs = selected ? [selected] : [];
+    dom.imageEmpty.classList.toggle('hidden', !!selected);
     dom.imageGallery.innerHTML = jobs.map(job => {
       const renderUserMessage = (prompt, inputImage, createdAt, params = job.params || DEFAULT_IMAGE_PARAMS, replyIndex = '') => {
         const inputRef = inputImage
@@ -2920,6 +2943,21 @@
     return '';
   }
 
+  function promptLanguageInstruction(prompt) {
+    const cjkCount = (prompt.match(/[\u3400-\u9fff]/g) || []).length;
+    const latinCount = (prompt.match(/[a-zA-Z]/g) || []).length;
+    if (cjkCount > 0 && cjkCount >= latinCount * 0.3) {
+      return {
+        label: '中文',
+        instruction: '用户原提示词主要是中文，优化结果必须使用中文输出。不要翻译成英文，不要中英混写，除非原文中的品牌名、专有名词或参数本身是英文。',
+      };
+    }
+    return {
+      label: '原文语言',
+      instruction: '优化结果必须使用用户原提示词的主要语言输出。不要擅自切换语言；只有原文是英文时才输出英文。',
+    };
+  }
+
   async function optimizeImagePrompt() {
     if (!imagePromptOptimizerConfigured()) {
       showSettings('image');
@@ -2933,6 +2971,7 @@
     updateImageGenerateBtn();
     showToast('正在优化提示词...');
     try {
+      const lang = promptLanguageInstruction(prompt);
       const resp = await apiFetch(requestUrl(state.imageBaseUrl, '/chat/completions'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
@@ -2942,11 +2981,11 @@
           messages: [
             {
               role: 'system',
-              content: '你是专业图像生成提示词编辑器。把用户的中文或英文需求优化成更适合图像生成模型的提示词。只输出优化后的提示词，不要解释，不要使用 Markdown。保留用户核心意图，补充主体、构图、风格、光线、色彩、细节、画面质量。不要加入违反安全或版权的内容。',
+              content: `你是专业图像生成提示词编辑器。把用户需求优化成更适合图像生成模型的提示词。${lang.instruction}只输出优化后的提示词，不要解释，不要使用 Markdown。保留用户核心意图，补充主体、构图、风格、光线、色彩、细节、画面质量。不要加入违反安全或版权的内容。`,
             },
             {
               role: 'user',
-              content: `优化这个绘画提示词：\n${prompt}`,
+              content: `请优化下面的绘画提示词。\n输出语言要求：${lang.label}。\n如果原文是中文，结果必须是中文。\n\n原提示词：\n${prompt}`,
             },
           ],
         }),
@@ -3049,7 +3088,7 @@
     return parseImageOutputs(await resp.json(), params.outputFormat);
   }
 
-  async function generateImage(prompt, params = state.imageDefaults, retryJob = null) {
+  async function generateImage(prompt, params = state.imageDefaults, retryJob = null, refOverride = undefined) {
     if (!ensureModeConfigured('image')) return;
     if (!prompt.trim() || state.isGeneratingImage) return;
 
@@ -3058,7 +3097,8 @@
     state.imageAbortController = controller;
     updateImageGenerateBtn();
     const startedAt = Date.now();
-    const ref = state.imageRef ? Object.assign({}, state.imageRef) : null;
+    const refSource = refOverride !== undefined ? refOverride : state.imageRef;
+    const ref = refSource ? Object.assign({}, refSource) : null;
     const estimatedSeconds = estimateImageSeconds(params);
     const job = retryJob || {
       id: startedAt.toString(),
@@ -3249,9 +3289,9 @@
         // === Fallback: no SW, direct fetch ===
         timeoutId = setTimeout(() => controller.abort(), imageTimeoutMs(params));
         const nextOutputs = state.imageMapModel
-          ? await requestMappedImage(prompt, params, job.inputImage, controller.signal)
-          : job.inputImage
-            ? await requestImageEdit(prompt, params, job.inputImage, controller.signal)
+          ? await requestMappedImage(prompt, params, ref, controller.signal)
+          : ref
+            ? await requestImageEdit(prompt, params, ref, controller.signal)
             : await requestOneImage(prompt, params, controller.signal);
         if (nextOutputs.length === 0) throw new Error('接口未返回可显示的图片数据');
         activeReply.outputs = nextOutputs;
@@ -3297,6 +3337,8 @@
     if (state.mode === 'image') {
       state.currentImageJobId = null;
       dom.imagePrompt.value = '';
+      state.imageRef = null;
+      renderImageRefPreview();
       persist();
       updateSidebar();
       renderImageWorkspace();
@@ -3359,6 +3401,36 @@
   }
 
   dom.convSettingsBtn.addEventListener('click', toggleConvSettings);
+  dom.thinkingToggleBtn.addEventListener('click', () => {
+    state.showThinking = !state.showThinking;
+    persist([KEYS.showThinking]);
+    updateThinkingToggleBtn();
+    if (state.isStreaming) {
+      if (state.showThinking) {
+        dom.messages.querySelectorAll('.thinking-block.hidden').forEach(el => el.classList.remove('hidden'));
+        const streamingMsg = currentConv()?.messages.find(m => m.streaming);
+        const reasoning = streamingMsg?.reasoningContent || '';
+        if (reasoning && state.streamEls?.thinkingBlock) {
+          state.streamEls.thinkingBlock.classList.remove('hidden');
+          state.streamEls.thinkingBlock.classList.add('expanded');
+          state.streamEls.thinkingMd.innerHTML = renderMd(reasoning);
+        }
+      } else {
+        dom.messages.querySelectorAll('.thinking-block').forEach(el => {
+          el.classList.add('hidden');
+          el.classList.remove('expanded');
+        });
+      }
+    } else if (state.showThinking) {
+      renderMessages();
+    } else {
+      dom.messages.querySelectorAll('.thinking-block').forEach(el => {
+        el.classList.add('hidden');
+        el.classList.remove('expanded');
+      });
+    }
+    showToast(state.showThinking ? '已显示思考过程' : '已隐藏思考过程');
+  });
   dom.imageSettingsBtn.addEventListener('click', toggleImageSettings);
   dom.paramTemperature.addEventListener('change', saveConvParams);
   dom.paramTopP.addEventListener('change', saveConvParams);
@@ -3433,7 +3505,7 @@
         const initialContent = session.assistantContent || '';
         const initialReasoning = session.reasoningContent || '';
         if (initialContent) { streamEls.contentMd.innerHTML = renderMd(initialContent); lastContent = initialContent; }
-        if (initialReasoning) {
+        if (state.showThinking && initialReasoning) {
           streamEls.thinkingBlock.classList.remove('hidden');
           streamEls.thinkingBlock.classList.add('expanded');
           streamEls.thinkingMd.innerHTML = renderMd(initialReasoning);
@@ -3454,7 +3526,7 @@
 
           if (content && firstTokenTime === null) firstTokenTime = Date.now() - streamStartTime;
 
-          if (reasoning) {
+          if (state.showThinking && reasoning) {
             if (reasoningStartTime === null) reasoningStartTime = Date.now();
             if (streamEls.thinkingBlock.classList.contains('hidden')) {
               streamEls.thinkingBlock.classList.remove('hidden');
@@ -3471,7 +3543,7 @@
             dom.messages.scrollTop = dom.messages.scrollHeight;
           }
 
-          if (reasoning && content && reasoningEndTime === null) {
+          if (state.showThinking && reasoning && content && reasoningEndTime === null) {
             reasoningEndTime = Date.now();
             streamEls.thinkingBlock.classList.remove('expanded');
             const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
@@ -3504,7 +3576,7 @@
       const existingContent = conv.messages[streamIdx].content || '';
       const existingReasoning = conv.messages[streamIdx].reasoningContent || '';
       if (existingContent) state.streamEls.contentMd.innerHTML = renderMd(existingContent);
-      if (existingReasoning) {
+      if (state.showThinking && existingReasoning) {
         state.streamEls.thinkingBlock.classList.remove('hidden');
         state.streamEls.thinkingBlock.classList.add('expanded');
         state.streamEls.thinkingMd.innerHTML = renderMd(existingReasoning);
@@ -3531,7 +3603,7 @@
         const c = placeholder.content || '';
         const r = placeholder.reasoningContent || '';
         if (c) state.streamEls.contentMd.innerHTML = renderMd(c);
-        if (r) state.streamEls.thinkingMd.innerHTML = renderMd(r);
+        if (state.showThinking && r) state.streamEls.thinkingMd.innerHTML = renderMd(r);
         dom.messages.scrollTop = dom.messages.scrollHeight;
       }, 500);
     }
@@ -3660,7 +3732,7 @@
         const item = delBtn.closest('.conv-item');
         const id = item.dataset.id;
         state.imageJobs = state.imageJobs.filter(j => j.id !== id);
-        if (state.currentImageJobId === id) state.currentImageJobId = state.imageJobs[0]?.id || null;
+        if (state.currentImageJobId === id) state.currentImageJobId = null;
         persist();
         imageDbDeleteJob(id);
         updateSidebar();
@@ -3925,7 +3997,7 @@
     closeModelDropdown();
     updateSendBtn();
     updateImageGenerateBtn();
-    showToast(`已切换到 ${state.mode === 'image' ? state.imageModel : state.model}`);
+    showToast(`已切换到 ${state.mode === 'image' ? (state.imageMapModel || state.imageModel) : state.model}`);
   });
 
   document.addEventListener('click', (e) => {
@@ -4145,8 +4217,13 @@
       copyText(btn.dataset.prompt || job.prompt || '');
     } else if (btn.dataset.action === 'retry') {
       if (job.status === 'generating') return;
+      const replyIndex = parseInt(btn.dataset.reply || '0', 10);
+      const reply = imageJobReplies(job)[Number.isFinite(replyIndex) ? replyIndex : 0] || null;
+      const retryPrompt = reply?.prompt || job.prompt || '';
+      const retryParams = Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {}, reply?.params || {});
+      const retryRef = reply?.inputImage || job.inputImage || null;
       state.currentImageJobId = job.id;
-      generateImage(job.prompt, job.params || state.imageDefaults, job);
+      generateImage(retryPrompt, retryParams, job, retryRef);
     } else if (btn.dataset.action === 'cancel') {
       cancelImageGeneration();
     } else if (btn.dataset.action === 'view') {
@@ -4425,7 +4502,7 @@
       const el = document.createElement('div');
       el.className = 'chat-msg ai';
       el.id = 'recovery-el';
-      const hasReasoning = !!msg.reasoningContent;
+      const hasReasoning = state.showThinking && !!msg.reasoningContent;
       el.innerHTML = `
         <div class="chat-msg-inner">
           <div class="chat-msg-avatar">${AI_AVATAR}</div>
@@ -4545,7 +4622,7 @@
       // Skip UI update while SW is still connecting
       if (session.status === 'connecting' || !recoveryEls) return;
 
-      if (msg.reasoningContent && recoveryEls.thinkingMd) {
+      if (state.showThinking && msg.reasoningContent && recoveryEls.thinkingMd) {
         scheduleStreamRender(() => {
           recoveryEls.thinkingMd.innerHTML = renderMd(msg.reasoningContent);
           recoveryEls.thinkingLabel.textContent = `正在恢复思考过程...`;
@@ -4748,6 +4825,7 @@
   updateModelBadge();
   updateSidebar();
   updateSendBtn();
+  updateThinkingToggleBtn();
   syncImageParams();
   updateImageGenerateBtn();
   importConfigFromUrl();

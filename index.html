@@ -156,13 +156,20 @@
           <textarea id="user-input" placeholder="发送消息..." rows="1" maxlength="100000"></textarea>
           <div class="input-toolbar">
             <div class="toolbar-left">
-              <button id="attach-btn" class="toolbar-btn" type="button" title="添加文件">
+              <button id="attach-btn" class="toolbar-btn" type="button" title="添加文件" data-tooltip="添加文件">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path
                     d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
                 </svg>
               </button>
-              <button id="conv-settings-btn" class="toolbar-btn" type="button" title="对话设置">
+              <button id="thinking-toggle-btn" class="toolbar-btn active" type="button" title="显示思考过程" data-tooltip="显示思考过程">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M9 18h6" />
+                  <path d="M10 22h4" />
+                  <path d="M8.5 14.5A6 6 0 1 1 15.5 14.5c-.9.7-1.5 1.7-1.5 2.5h-4c0-.8-.6-1.8-1.5-2.5z" />
+                </svg>
+              </button>
+              <button id="conv-settings-btn" class="toolbar-btn" type="button" title="对话设置" data-tooltip="对话设置">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path
                     d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
@@ -173,7 +180,7 @@
             <div class="toolbar-right">
               <div id="chat-model-slot" class="model-slot">
                 <div id="model-dropdown" class="model-dropdown">
-                  <button id="model-dropdown-btn" class="model-dropdown-btn">
+                  <button id="model-dropdown-btn" class="model-dropdown-btn" type="button" title="切换模型" data-tooltip="切换模型">
                     <span id="current-model">未配置</span>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                       <polyline points="6 9 12 15 18 9" />
@@ -182,7 +189,7 @@
                   <div id="model-dropdown-list" class="model-dropdown-list hidden"></div>
                 </div>
               </div>
-              <button id="send-btn" class="send-btn" title="发送">
+              <button id="send-btn" class="send-btn" title="发送" data-tooltip="发送">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="22" y1="2" x2="11" y2="13" />
                   <polygon points="22 2 15 22 11 13 2 9" />
@@ -232,29 +239,29 @@
           <textarea id="image-prompt" placeholder="描述你想生成的图片..." rows="3" maxlength="4000"></textarea>
           <div class="image-params input-toolbar">
             <div class="toolbar-left image-toolbar-left">
-              <button id="image-ref-btn" class="toolbar-btn image-ref-btn" type="button" title="添加参考图">
+              <button id="image-ref-btn" class="toolbar-btn image-ref-btn" type="button" title="添加参考图" data-tooltip="添加参考图">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <rect x="3" y="3" width="18" height="18" rx="2" />
                   <circle cx="8.5" cy="8.5" r="1.5" />
                   <path d="M21 15l-5-5L5 21" />
                 </svg>
               </button>
-              <button id="image-settings-btn" class="toolbar-btn" type="button" title="绘画设置">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-                  <circle cx="12" cy="12" r="3" />
-                </svg>
-              </button>
-              <button id="image-optimize-btn" class="toolbar-btn" type="button" title="优化提示词">
+              <button id="image-optimize-btn" class="toolbar-btn" type="button" title="优化提示词" data-tooltip="优化提示词">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M12 3l1.7 5.2L19 10l-5.3 1.8L12 17l-1.7-5.2L5 10l5.3-1.8L12 3z" />
                   <path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z" />
                 </svg>
               </button>
+              <button id="image-settings-btn" class="toolbar-btn" type="button" title="绘画设置" data-tooltip="绘画设置">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
             </div>
             <div class="toolbar-right image-toolbar-right">
               <div id="image-model-slot" class="model-slot"></div>
-              <button id="image-generate-btn" class="send-btn image-generate-btn" type="button" title="生成">
+              <button id="image-generate-btn" class="send-btn image-generate-btn" type="button" title="生成" data-tooltip="生成">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="22" y1="2" x2="11" y2="13" />
                   <polygon points="22 2 15 22 11 13 2 9" />
