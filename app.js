@@ -1361,6 +1361,7 @@
       scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
       dom.imagePrompt.focus();
+      recoverImageFromSession();
     }
     document.documentElement.removeAttribute('data-boot-mode');
     persist();
@@ -2194,11 +2195,17 @@
     try {
       const imageSession = await getImageSession();
       state.imageJobs = await imageDbGetAllJobs();
+      const changedJobs = [];
       state.imageJobs.forEach(job => {
         if (job.status === 'generating') {
-          const hasLiveSession = imageSession?.jobId === job.id
-            && ['connecting', 'streaming', 'complete', 'error', 'stopped'].includes(imageSession.status);
-          if (hasLiveSession) {
+          const sessionMatches = imageSession?.jobId === job.id;
+          const sessionStatus = sessionMatches ? imageSession.status : '';
+          if (sessionMatches && ['complete', 'error', 'stopped'].includes(sessionStatus)) {
+            applyRecoveredImageSession(job, imageSession);
+            changedJobs.push(job);
+            return;
+          }
+          if (sessionMatches && ['connecting', 'streaming'].includes(sessionStatus)) {
             ensureImageJobReplies(job);
             return;
           }
@@ -2211,9 +2218,13 @@
             reply.error = job.error;
             reply.durationMs = job.durationMs;
           }
-          imageDbPutJob(job);
+          changedJobs.push(job);
         }
       });
+      if (changedJobs.length) {
+        await Promise.allSettled(changedJobs.map(job => imageDbPutJob(job)));
+        persist();
+      }
       if (state.currentImageJobId && !state.imageJobs.some(j => j.id === state.currentImageJobId)) {
         state.currentImageJobId = state.imageJobs[0]?.id || null;
         persist();
@@ -2590,9 +2601,19 @@
     const job = state.imageJobs.find(j => j.status === 'generating');
     if (!job) return;
     if (state.imageAbortController) state.imageAbortController.abort();
+    if (state.imagePollTimer) {
+      clearInterval(state.imagePollTimer);
+      state.imagePollTimer = null;
+    }
     job.status = 'cancelled';
     job.error = reason;
     job.durationMs = Date.now() - (job.startedAt || job.createdAt);
+    const activeReply = currentImageActiveReply(job);
+    if (activeReply?.status === 'generating') {
+      activeReply.status = 'cancelled';
+      activeReply.error = reason;
+      activeReply.durationMs = job.durationMs;
+    }
     state.isGeneratingImage = false;
     state.imageAbortController = null;
     stopImageProgressTimer();
@@ -3094,11 +3115,25 @@
     scrollImageWorkspaceToBottom();
     startImageProgressTimer();
     let timeoutId = null;
+    const failImageJob = (message, status = 'error') => {
+      const isCancelled = status === 'cancelled';
+      const durationMs = Date.now() - startedAt;
+      activeReply.error = message || (isCancelled ? '请求已中断' : '生成失败');
+      activeReply.status = isCancelled ? 'cancelled' : 'error';
+      activeReply.durationMs = durationMs;
+      job.error = activeReply.error;
+      job.status = activeReply.status;
+      job.durationMs = durationMs;
+    };
 
     function finishImageJob() {
       state.isGeneratingImage = false;
       state.imageAbortController = null;
       stopImageProgressTimer();
+      if (state.imagePollTimer) {
+        clearInterval(state.imagePollTimer);
+        state.imagePollTimer = null;
+      }
       if (timeoutId) clearTimeout(timeoutId);
       if (job.status === 'generating') job.status = 'done';
       if (activeReply?.status === 'generating') activeReply.status = 'done';
@@ -3159,11 +3194,18 @@
         // Poll IndexedDB for image result (every 500ms)
         state.imagePollTimer = setInterval(async () => {
           const session = await getImageSession();
-          if (!session) return;
+          const timedOut = Date.now() - startedAt > imageTimeoutMs(params);
+          if (!session) {
+            if (timedOut) {
+              failImageJob('生成超时，请稍后重试。');
+              showToast('生成超时');
+              finishImageJob();
+            }
+            return;
+          }
+          if (session.jobId && session.jobId !== job.id) return;
 
           if (session.status === 'complete') {
-            clearInterval(state.imagePollTimer);
-            state.imagePollTimer = null;
             const nextOutputs = JSON.parse(session.outputs || '[]');
             if (nextOutputs.length === 0) {
               activeReply.error = '接口未返回可显示的图片数据';
@@ -3186,27 +3228,18 @@
             finishImageJob();
             await clearImageSession();
           } else if (session.status === 'error') {
-            clearInterval(state.imagePollTimer);
-            state.imagePollTimer = null;
-            activeReply.error = session.error || '生成失败';
-            activeReply.status = 'error';
-            activeReply.durationMs = Date.now() - startedAt;
-            job.error = activeReply.error;
-            job.status = 'error';
-            job.durationMs = activeReply.durationMs;
+            failImageJob(session.error || '生成失败');
             showToast('生成失败');
             finishImageJob();
             await clearImageSession();
           } else if (session.status === 'stopped') {
-            clearInterval(state.imagePollTimer);
-            state.imagePollTimer = null;
-            activeReply.error = '请求已中断';
-            activeReply.status = 'cancelled';
-            activeReply.durationMs = Date.now() - startedAt;
-            job.error = activeReply.error;
-            job.status = 'cancelled';
-            job.durationMs = activeReply.durationMs;
+            failImageJob('请求已中断', 'cancelled');
             showToast('生成已中断');
+            finishImageJob();
+            await clearImageSession();
+          } else if (timedOut || Date.now() - (session.updatedAt || startedAt) > imageTimeoutMs(params)) {
+            failImageJob('生成超时，请稍后重试。');
+            showToast('生成超时');
             finishImageJob();
             await clearImageSession();
           }
@@ -3235,12 +3268,10 @@
       }
     } catch (e) {
       const aborted = e?.name === 'AbortError';
-      activeReply.error = aborted ? '请求已中断。可能是手动取消、页面刷新或等待超时，请重试。' : `${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`;
-      activeReply.status = aborted ? 'cancelled' : 'error';
-      activeReply.durationMs = Date.now() - startedAt;
-      job.error = activeReply.error;
-      job.status = aborted ? 'cancelled' : 'error';
-      job.durationMs = activeReply.durationMs;
+      failImageJob(
+        aborted ? '请求已中断。可能是手动取消、页面刷新或等待超时，请重试。' : `${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`,
+        aborted ? 'cancelled' : 'error',
+      );
       showToast(aborted ? '生成已中断' : '生成失败');
       finishImageJob();
     }
