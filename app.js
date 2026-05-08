@@ -1029,6 +1029,7 @@
     imageWorkspace: $('image-workspace'),
     imageEmpty: $('image-empty'),
     imageGallery: $('image-gallery'),
+    convTokenSummary: $('conv-token-summary'),
     userInput: $('user-input'),
     sendBtn: $('send-btn'),
     inputArea: $('input-area'),
@@ -1225,6 +1226,50 @@
     dom.imageOptimizeBtn.classList.toggle('active', state.isOptimizingImagePrompt);
   }
 
+  function formatTokenCount(n) {
+    const value = Math.max(0, Math.round(n || 0));
+    if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
+    if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`;
+    return String(value);
+  }
+
+  function currentConversationTokenTotals() {
+    const conv = currentConv();
+    const totals = { input: 0, output: 0, total: 0, count: 0 };
+    if (!conv?.messages?.length) return totals;
+    conv.messages.forEach(msg => {
+      const tokens = msg.tokens || estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''));
+      if (msg.role === 'user') totals.input += tokens;
+      else if (msg.role === 'assistant') totals.output += tokens;
+      else totals.input += tokens;
+      totals.count += 1;
+    });
+    totals.total = totals.input + totals.output;
+    return totals;
+  }
+
+  function updateConversationTokenSummary() {
+    if (state.mode !== 'chat') {
+      dom.convTokenSummary.classList.add('hidden');
+      dom.convTokenSummary.innerHTML = '';
+      return;
+    }
+    const totals = currentConversationTokenTotals();
+    if (!totals.count) {
+      dom.convTokenSummary.classList.add('hidden');
+      dom.convTokenSummary.innerHTML = '';
+      return;
+    }
+    dom.convTokenSummary.classList.remove('hidden');
+    dom.convTokenSummary.innerHTML = `
+      <div class="conv-token-summary-inner">
+        <span>输入 ${formatTokenCount(totals.input)}</span>
+        <span>输出 ${formatTokenCount(totals.output)}</span>
+        <span>总计 ${formatTokenCount(totals.total)}</span>
+      </div>
+    `;
+  }
+
   function ensureModeConfigured(mode, opts = {}) {
     if (mode === 'chat' && !configured()) {
       showSettings('chat');
@@ -1272,6 +1317,7 @@
     dom.messages.classList.toggle('hidden', mode !== 'chat');
     dom.welcome.classList.toggle('hidden', mode !== 'chat' || !!currentConv()?.messages.length);
     dom.inputArea.classList.toggle('hidden', mode !== 'chat');
+    updateConversationTokenSummary();
     dom.imageWorkspace.classList.toggle('hidden', mode !== 'image');
     dom.imageInputArea.classList.toggle('hidden', mode !== 'image');
     moveModelDropdown();
@@ -1432,11 +1478,13 @@
       dom.messages.innerHTML = '';
       dom.messages.classList.remove('has-messages');
       dom.welcome.classList.remove('hidden');
+      updateConversationTokenSummary();
       return;
     }
 
     dom.welcome.classList.add('hidden');
     dom.messages.classList.add('has-messages');
+    updateConversationTokenSummary();
 
     dom.messages.innerHTML = conv.messages.map((msg, i) => {
       const isUser = msg.role === 'user';
@@ -1532,6 +1580,7 @@
     `;
     dom.messages.classList.add('has-messages');
     dom.welcome.classList.add('hidden');
+    updateConversationTokenSummary();
     dom.messages.appendChild(el);
     dom.messages.scrollTop = dom.messages.scrollHeight;
   }
@@ -1810,6 +1859,13 @@
         // Update content
         if (content !== lastContent) {
           lastContent = content;
+          if (conv.messages[streamMsgIdx]?.streaming) {
+            conv.messages[streamMsgIdx].content = content;
+            conv.messages[streamMsgIdx].tokens = estimateTokens(content);
+            if (reasoning) conv.messages[streamMsgIdx].reasoningContent = reasoning;
+            if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
+          }
+          updateConversationTokenSummary();
           streamEls.contentMd.innerHTML = renderMd(content);
           dom.messages.scrollTop = dom.messages.scrollHeight;
         }
@@ -1958,17 +2014,18 @@
                   streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
                 }
                 updateStream(streamEls.contentMd, splitContent.content);
+                if (conv.messages[streamMsgIdx]?.streaming) {
+                  conv.messages[streamMsgIdx].content = splitContent.content;
+                  conv.messages[streamMsgIdx].tokens = estimateTokens(splitContent.content);
+                  if (reasoningContent) conv.messages[streamMsgIdx].reasoningContent = reasoningContent;
+                  if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
+                }
+                updateConversationTokenSummary();
                 // Persist partial content every 2s for non-SW crash recovery
                 const now = Date.now();
                 if (now - lastStreamPersist > 2000) {
                   lastStreamPersist = now;
-                  if (conv.messages[streamMsgIdx]?.streaming) {
-                    conv.messages[streamMsgIdx].content = splitContent.content;
-                    conv.messages[streamMsgIdx].tokens = estimateTokens(splitContent.content);
-                    if (reasoningContent) conv.messages[streamMsgIdx].reasoningContent = reasoningContent;
-                    if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
-                    persist([KEYS.conversations]);
-                  }
+                  persist([KEYS.conversations]);
                 }
               }
             } catch { /* skip */ }
@@ -3329,7 +3386,7 @@
     });
   }
 
-  dom.convList.addEventListener('click', (e) => {
+  function handleSidebarItemActivate(e) {
     if (state.mode === 'image') {
       const renameBtn = e.target.closest('.conv-item-rename');
       if (renameBtn) {
@@ -3411,7 +3468,34 @@
       closeSidebarMobile();
       resumeStreamPollIfNeeded();
     }
-  });
+  }
+
+  let sidebarTouchStart = null;
+  dom.convList.addEventListener('touchstart', (e) => {
+    const item = e.target.closest('.conv-item');
+    if (!item || e.target.closest('.conv-item-rename, .conv-item-delete, .conv-rename-input')) {
+      sidebarTouchStart = null;
+      return;
+    }
+    const touch = e.changedTouches?.[0];
+    sidebarTouchStart = touch ? { x: touch.clientX, y: touch.clientY } : null;
+  }, { passive: true });
+
+  dom.convList.addEventListener('touchend', (e) => {
+    const item = e.target.closest('.conv-item');
+    if (!item || e.target.closest('.conv-item-rename, .conv-item-delete, .conv-rename-input')) return;
+    const touch = e.changedTouches?.[0];
+    if (touch && sidebarTouchStart) {
+      const dx = Math.abs(touch.clientX - sidebarTouchStart.x);
+      const dy = Math.abs(touch.clientY - sidebarTouchStart.y);
+      sidebarTouchStart = null;
+      if (dx > 10 || dy > 10) return;
+    }
+    e.preventDefault();
+    handleSidebarItemActivate(e);
+  }, { passive: false });
+
+  dom.convList.addEventListener('click', handleSidebarItemActivate);
 
   // Settings
   dom.themeBtn.addEventListener('click', toggleTheme);
@@ -4087,6 +4171,7 @@
       msg.content = session.assistantContent || msg.content;
       if (session.reasoningContent) msg.reasoningContent = session.reasoningContent;
       msg.tokens = estimateTokens(msg.content);
+      updateConversationTokenSummary();
 
       if (session.status === 'complete') {
         msg.streaming = false;

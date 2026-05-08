@@ -449,6 +449,41 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
 
 #messages.has-messages { padding: 8px 0; }
 
+.conv-token-summary {
+  flex-shrink: 0;
+  padding: 4px 24px 0;
+  background: var(--bg-main);
+}
+
+.conv-token-summary-inner {
+  max-width: 768px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.conv-token-summary-inner::before,
+.conv-token-summary-inner::after {
+  content: '';
+  height: 1px;
+  flex: 1;
+  min-width: 24px;
+  background: color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.conv-token-summary-inner span {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-input);
+}
+
 .chat-msg {
   padding: 12px 24px;
   animation: fadeIn 0.2s ease;
@@ -2062,6 +2097,26 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
   .msg-meta { font-size: 11px; gap: 6px; }
   .msg-action-btn { min-width: 28px; min-height: 28px; }
   .copy-menu-popover { min-width: 132px; }
+
+  .conv-token-summary {
+    padding: 4px 12px 0;
+  }
+
+  .conv-token-summary-inner {
+    justify-content: center;
+    gap: 5px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    font-size: 10px;
+  }
+
+  .conv-token-summary-inner::-webkit-scrollbar {
+    display: none;
+  }
+
+  .conv-token-summary-inner span {
+    padding: 2px 6px;
+  }
 
   .thinking-toggle { font-size: 12px; padding: 5px 8px; }
   .thinking-content { font-size: 12px; padding: 8px 10px; max-height: 280px; }
