@@ -413,6 +413,7 @@
     imageAbortController: null,
     imageProgressTimer: null,
     imagePollTimer: null,
+    isImageHistoryLoading: false,
     isOptimizingImagePrompt: false,
     viewerImage: null,
     imageViewerTransform: { scale: 1, x: 0, y: 0 },
@@ -763,7 +764,9 @@
       } catch { /* ignore */ }
     }
     return state.imageJobs.reduce((sum, job) => {
-      return sum + (job.outputs || []).reduce((n, out) => n + imageByteSize(out), 0);
+      return sum + imageJobReplies(job).reduce((n, reply) => {
+        return n + (reply.outputs || []).reduce((m, out) => m + imageByteSize(out), 0);
+      }, 0);
     }, 0);
   }
 
@@ -1160,10 +1163,6 @@
   function updateSidebar() {
     if (state.mode === 'image') {
       dom.sidebarSearch.placeholder = '搜索绘画...';
-      const q = state.sidebarSearch.trim().toLowerCase();
-      const imageJobs = q
-        ? state.imageJobs.filter(j => `${j.title || ''} ${j.prompt || ''} ${j.model || ''}`.toLowerCase().includes(q))
-        : state.imageJobs;
       dom.newChatBtn.innerHTML = `
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="3" y="3" width="18" height="18" rx="2"/>
@@ -1172,6 +1171,14 @@
         </svg>
         新绘画
       `;
+      if (state.isImageHistoryLoading) {
+        dom.convList.innerHTML = `<div class="sidebar-empty">正在加载绘画历史...</div>`;
+        return;
+      }
+      const q = state.sidebarSearch.trim().toLowerCase();
+      const imageJobs = q
+        ? state.imageJobs.filter(j => `${j.title || ''} ${j.prompt || ''} ${j.model || ''}`.toLowerCase().includes(q))
+        : state.imageJobs;
       dom.convList.innerHTML = imageJobs.map(j => `
         <div class="conv-item ${j.id === state.currentImageJobId ? 'active' : ''}" data-id="${j.id}">
           <span class="conv-item-title">${esc(j.title || j.prompt || '未命名绘画')}</span>
@@ -1351,9 +1358,11 @@
     } else {
       syncImageParams();
       renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
       dom.imagePrompt.focus();
     }
+    document.documentElement.removeAttribute('data-boot-mode');
     persist();
   }
 
@@ -1373,6 +1382,7 @@
   const SVG_EDIT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
   const SVG_DOWNLOAD = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
   const SVG_MAXIMIZE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
+  const AI_AVATAR = '<div class="ai-avatar" aria-label="AI"></div>';
 
   // ===== Clipboard =====
   function copyText(text) {
@@ -1509,7 +1519,7 @@
 
     dom.messages.innerHTML = conv.messages.map((msg, i) => {
       const isUser = msg.role === 'user';
-      const avatar = isUser ? SVG_PERSON : `<img src="icon.png" width="20" height="20" alt="AI" class="avatar-img">`;
+      const avatar = isUser ? SVG_PERSON : AI_AVATAR;
       const splitContent = !isUser && typeof msg.content === 'string' ? splitThinkTags(msg.content) : null;
       const reasoningText = !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
       const mainContent = splitContent?.reasoning ? splitContent.content : msg.content;
@@ -1593,7 +1603,7 @@
     el.id = 'typing-el';
     el.innerHTML = `
       <div class="chat-msg-inner">
-        <div class="chat-msg-avatar"><img src="icon.png" width="20" height="20" alt="AI" class="avatar-img"></div>
+        <div class="chat-msg-avatar">${AI_AVATAR}</div>
         <div class="chat-msg-body">
           <div class="typing-dots"><span></span><span></span><span></span></div>
         </div>
@@ -1614,7 +1624,7 @@
     el.id = 'stream-el';
     el.innerHTML = `
       <div class="chat-msg-inner">
-        <div class="chat-msg-avatar"><img src="icon.png" width="20" height="20" alt="AI" class="avatar-img"></div>
+        <div class="chat-msg-avatar">${AI_AVATAR}</div>
         <div class="chat-msg-body">
           <div class="thinking-block hidden">
             <button class="thinking-toggle" type="button">
@@ -2179,22 +2189,42 @@
   }
 
   async function loadImageHistory() {
-    state.imageJobs = await imageDbGetAllJobs();
-    state.imageJobs.forEach(job => {
-      if (job.status === 'generating') {
-        job.status = 'error';
-        job.error = '上次生成因页面刷新或关闭而中断，请点击“重绘”重新生成。';
-        job.durationMs = job.startedAt ? Date.now() - job.startedAt : job.durationMs;
-        imageDbPutJob(job);
+    state.isImageHistoryLoading = true;
+    if (state.mode === 'image') updateSidebar();
+    try {
+      const imageSession = await getImageSession();
+      state.imageJobs = await imageDbGetAllJobs();
+      state.imageJobs.forEach(job => {
+        if (job.status === 'generating') {
+          const hasLiveSession = imageSession?.jobId === job.id
+            && ['connecting', 'streaming', 'complete', 'error', 'stopped'].includes(imageSession.status);
+          if (hasLiveSession) {
+            ensureImageJobReplies(job);
+            return;
+          }
+          job.status = 'error';
+          job.error = '上次生成因页面刷新或关闭而中断，请点击“重绘”重新生成。';
+          job.durationMs = job.startedAt ? Date.now() - job.startedAt : job.durationMs;
+          const reply = currentImageActiveReply(job);
+          if (reply?.status === 'generating') {
+            reply.status = 'error';
+            reply.error = job.error;
+            reply.durationMs = job.durationMs;
+          }
+          imageDbPutJob(job);
+        }
+      });
+      if (state.currentImageJobId && !state.imageJobs.some(j => j.id === state.currentImageJobId)) {
+        state.currentImageJobId = state.imageJobs[0]?.id || null;
+        persist();
       }
-    });
-    if (state.currentImageJobId && !state.imageJobs.some(j => j.id === state.currentImageJobId)) {
-      state.currentImageJobId = state.imageJobs[0]?.id || null;
-      persist();
-    }
-    if (state.mode === 'image') {
-      updateSidebar();
-      renderImageWorkspace();
+    } finally {
+      state.isImageHistoryLoading = false;
+      if (state.mode === 'image') {
+        updateSidebar();
+        renderImageWorkspace();
+        scrollImageWorkspaceToBottom(false);
+      }
     }
   }
 
@@ -2218,6 +2248,47 @@
 
   function currentImageJob() {
     return state.imageJobs.find(j => j.id === state.currentImageJobId);
+  }
+
+  function imageJobReplies(job) {
+    if (!job) return [];
+    if (Array.isArray(job.replies) && job.replies.length) return job.replies;
+    return [{
+      id: `${job.id}-reply-0`,
+      model: job.model,
+      mapModel: job.mapModel,
+      prompt: job.prompt,
+      inputImage: job.inputImage || null,
+      params: job.params || DEFAULT_IMAGE_PARAMS,
+      outputs: job.outputs || [],
+      error: job.error || null,
+      status: job.status || 'done',
+      startedAt: job.startedAt || job.createdAt,
+      createdAt: job.startedAt || job.createdAt,
+      estimatedSeconds: job.estimatedSeconds,
+      durationMs: job.durationMs,
+    }];
+  }
+
+  function ensureImageJobReplies(job) {
+    if (!job) return [];
+    if (!Array.isArray(job.replies) || !job.replies.length) {
+      job.replies = imageJobReplies(job);
+    }
+    return job.replies;
+  }
+
+  function currentImageActiveReply(job) {
+    const replies = ensureImageJobReplies(job);
+    return replies.find(reply => reply.status === 'generating') || replies[replies.length - 1] || null;
+  }
+
+  function imageReplyOutput(job, replyIndex, outputIndex) {
+    const reply = imageJobReplies(job)[Number.isFinite(replyIndex) ? replyIndex : 0];
+    return {
+      reply,
+      out: reply?.outputs?.[Number.isFinite(outputIndex) ? outputIndex : 0],
+    };
   }
 
   function dataUrlForImage(out, fallbackFormat) {
@@ -2274,7 +2345,9 @@
 
   function updateImageOutputMeta(jobId, index, img) {
     const job = state.imageJobs.find(j => j.id === jobId);
-    const out = job?.outputs?.[index];
+    const resultEl = img?.closest?.('.image-result');
+    const replyIndex = parseInt(resultEl?.dataset.reply || '0', 10);
+    const { reply, out } = imageReplyOutput(job, replyIndex, index);
     if (!job || !out || !img?.naturalWidth || !img?.naturalHeight) return;
     const nextWidth = img.naturalWidth;
     const nextHeight = img.naturalHeight;
@@ -2283,10 +2356,8 @@
     out.height = nextHeight;
     out.bytes = imageByteSize(out);
     imageDbPutJob(job);
-    const resultEl = Array.from(dom.imageGallery.querySelectorAll('.image-result'))
-      .find(el => el.dataset.job === jobId && parseInt(el.dataset.index, 10) === index);
     const metaEl = resultEl?.querySelector('.image-result-meta');
-    if (metaEl) metaEl.innerHTML = imageOutputMeta(out, job.params?.outputFormat).map(esc).join('<span>·</span>');
+    if (metaEl) metaEl.innerHTML = imageOutputMeta(out, (reply?.params || job.params)?.outputFormat).map(esc).join('<span>·</span>');
     updateRemoteImageOutputMeta(job, out, metaEl);
   }
 
@@ -2328,10 +2399,13 @@
     }
   }
 
-  function openImageViewer(job, out) {
-    state.viewerImage = { jobId: job.id, index: job.outputs.indexOf(out) };
+  function openImageViewer(job, out, replyIndex = 0) {
+    const reply = imageJobReplies(job)[replyIndex];
+    state.viewerImage = out.inputRef
+      ? { jobId: job.id, inputRef: true, inputImage: out.inputImage || null, replyIndex }
+      : { jobId: job.id, replyIndex, index: reply?.outputs?.indexOf(out) ?? 0 };
     resetImageViewerTransform();
-    dom.imageViewerImg.src = dataUrlForImage(out, job.params?.outputFormat);
+    dom.imageViewerImg.src = dataUrlForImage(out, (reply?.params || job.params)?.outputFormat);
     dom.imageViewer.classList.remove('hidden');
   }
 
@@ -2345,7 +2419,17 @@
   function currentViewerImage() {
     if (!state.viewerImage) return null;
     const job = state.imageJobs.find(j => j.id === state.viewerImage.jobId);
-    const out = job?.outputs?.[state.viewerImage.index];
+    if (state.viewerImage.inputRef) {
+      const inputImage = state.viewerImage.inputImage || job?.inputImage;
+      if (!inputImage) return null;
+      const reply = imageJobReplies(job)[state.viewerImage.replyIndex || 0];
+      const format = (inputImage.type || '').replace(/^image\//, '') || (reply?.params || job.params)?.outputFormat || 'png';
+      return {
+        job,
+        out: { b64: inputImage.base64.split(',').pop(), format },
+      };
+    }
+    const { reply, out } = imageReplyOutput(job, state.viewerImage.replyIndex || 0, state.viewerImage.index);
     return job && out ? { job, out } : null;
   }
 
@@ -2477,6 +2561,12 @@
     return s ? `${m}m ${s}s` : `${m}m`;
   }
 
+  function formatDateTime(ts) {
+    const d = new Date(ts || Date.now());
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+
   function imageTimeoutMs(params) {
     return Math.max(10 * 60 * 1000, estimateImageSeconds(params) * 1000 * 3);
   }
@@ -2515,7 +2605,9 @@
 
   async function updateImageHistorySummary() {
     const usage = await estimateImageDbUsage();
-    const outputCount = state.imageJobs.reduce((sum, job) => sum + (job.outputs?.length || 0), 0);
+    const outputCount = state.imageJobs.reduce((sum, job) => {
+      return sum + imageJobReplies(job).reduce((n, reply) => n + (reply.outputs?.length || 0), 0);
+    }, 0);
     dom.imageHistorySummary.textContent = `绘画历史 ${state.imageJobs.length} 条，图片 ${outputCount} 张，浏览器存储约 ${formatBytes(usage) || '未知'}`;
   }
 
@@ -2564,67 +2656,127 @@
     const jobs = selected ? [selected] : state.imageJobs;
     dom.imageEmpty.classList.toggle('hidden', state.imageJobs.length > 0);
     dom.imageGallery.innerHTML = jobs.map(job => {
-      const meta = [
-        job.model,
-        job.mapModel ? `映射 ${job.mapModel}` : '',
-        job.params?.size,
-        job.params?.quality !== 'auto' ? job.params?.quality : '',
-        job.durationMs ? `耗时 ${formatDuration(job.durationMs)}` : '',
-        new Date(job.createdAt).toLocaleString(),
-      ].filter(Boolean).map(esc).join(' · ');
-      const outputs = (job.outputs || []).map((out, i) => {
-        const outputMeta = imageOutputMeta(out, job.params?.outputFormat).map(esc).join('<span>·</span>');
+      const renderUserMessage = (prompt, inputImage, createdAt, params = job.params || DEFAULT_IMAGE_PARAMS, replyIndex = '') => {
+        const inputRef = inputImage
+          ? `<div class="image-input-ref">
+              <img src="${esc(inputImage.base64)}" alt="${esc(inputImage.name || '参考图')}" class="image-input-preview" data-job="${esc(job.id)}" data-reply="${esc(String(replyIndex))}">
+              <span>参考图：${esc(inputImage.name || '生成图')}</span>
+            </div>`
+          : '';
         return `
-        <div class="image-result" data-job="${esc(job.id)}" data-index="${i}">
-          <img src="${esc(dataUrlForImage(out, job.params?.outputFormat))}" alt="${esc(job.prompt)}" loading="lazy" class="image-preview">
-          <div class="image-result-meta">${outputMeta}</div>
-          <div class="image-result-actions">
-            <button class="msg-action-btn image-action" data-action="view" data-job="${job.id}" data-index="${i}" title="放大查看" data-tooltip="放大查看">${SVG_MAXIMIZE}</button>
-            <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${job.id}" data-index="${i}" title="以图编辑" data-tooltip="以图编辑">${SVG_EDIT}</button>
-            <button class="msg-action-btn image-action" data-action="copy-image" data-job="${job.id}" data-index="${i}" title="复制图片" data-tooltip="复制图片">${SVG_COPY}</button>
-            <button class="msg-action-btn image-action" data-action="download" data-job="${job.id}" data-index="${i}" title="下载" data-tooltip="下载">${SVG_DOWNLOAD}</button>
+          <div class="image-chat-msg user">
+            <div class="image-chat-inner">
+              <div class="image-chat-avatar">${SVG_PERSON}</div>
+              <div class="image-chat-bubble">
+                <div class="image-chat-prompt">${esc(prompt || '')}</div>
+                ${inputRef}
+                <div class="image-msg-meta">
+                  <span>${formatDateTime(createdAt || job.createdAt)}</span>
+                  <span>~${formatTokenCount(estimateTokens(prompt))} tokens</span>
+                  <button class="msg-action-btn image-action" data-action="copy-prompt" data-job="${job.id}" data-prompt="${esc(prompt || '')}" type="button" title="复制提示词" data-tooltip="复制提示词">${SVG_COPY}</button>
+                  <button class="msg-action-btn image-action" data-action="reuse" data-job="${job.id}" data-prompt="${esc(prompt || '')}" data-size="${esc(params.size || '')}" data-quality="${esc(params.quality || '')}" data-format="${esc(params.outputFormat || '')}" data-background="${esc(params.background || '')}" type="button" title="复用到输入框" data-tooltip="复用到输入框">${SVG_EDIT}</button>
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-      `;
+        `;
+      };
+      const userMessage = renderUserMessage(job.prompt, job.inputImage, job.createdAt, job.params);
+      const replies = imageJobReplies(job);
+      const replyMessages = replies.map((reply, replyIndex) => {
+        const params = reply.params || job.params || DEFAULT_IMAGE_PARAMS;
+        const replyUserMessage = replyIndex > 0
+          ? renderUserMessage(reply.prompt || job.prompt, reply.inputImage || null, reply.createdAt || reply.startedAt, params, replyIndex)
+          : '';
+        if (reply.status === 'generating' && !(reply.outputs || []).length && !reply.error) {
+          return replyUserMessage;
+        }
+        const aiMetaParts = [
+          reply.model || job.model,
+          reply.mapModel ? `映射 ${reply.mapModel}` : '',
+          params.size,
+          params.quality !== 'auto' ? params.quality : '',
+          params.outputFormat ? params.outputFormat.toUpperCase() : '',
+          reply.durationMs ? `耗时 ${formatDuration(reply.durationMs)}` : '',
+          formatDateTime(reply.durationMs ? (reply.startedAt || reply.createdAt || job.createdAt) + reply.durationMs : (reply.createdAt || job.createdAt)),
+        ].filter(Boolean).map(item => `<span>${esc(item)}</span>`).join('');
+        const outputs = (reply.outputs || []).map((out, i) => {
+          const outputMeta = imageOutputMeta(out, params.outputFormat).map(esc).join('<span>·</span>');
+          return `
+          <div class="image-result" data-job="${esc(job.id)}" data-reply="${replyIndex}" data-index="${i}">
+            <img src="${esc(dataUrlForImage(out, params.outputFormat))}" alt="${esc(job.prompt)}" loading="lazy" class="image-preview">
+            <div class="image-result-meta">${outputMeta}</div>
+            <div class="image-result-actions">
+              <button class="msg-action-btn image-action" data-action="view" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="放大查看" data-tooltip="放大查看">${SVG_MAXIMIZE}</button>
+              <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="以图编辑" data-tooltip="以图编辑">${SVG_EDIT}</button>
+              <button class="msg-action-btn image-action" data-action="copy-image" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="复制图片" data-tooltip="复制图片">${SVG_COPY}</button>
+              <button class="msg-action-btn image-action" data-action="download" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="下载" data-tooltip="下载">${SVG_DOWNLOAD}</button>
+            </div>
+          </div>
+        `;
+        }).join('');
+        return `
+          ${replyUserMessage}
+          <div class="image-chat-msg ai">
+            <div class="image-chat-inner">
+              <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
+              <div class="image-chat-bubble">
+                ${reply.error ? `<div class="image-error">${esc(reply.error)}</div>` : ''}
+                <div class="image-results">${outputs}</div>
+                <div class="image-msg-meta">${aiMetaParts}</div>
+                <div class="image-job-actions">
+                  <button class="btn-secondary image-action" data-action="edit-latest" data-job="${job.id}" data-reply="${replyIndex}" type="button">编辑</button>
+                  <button class="btn-secondary image-action" data-action="retry" data-job="${job.id}" data-reply="${replyIndex}" type="button">${reply.status === 'generating' ? '生成中' : '重绘'}</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
       }).join('');
-      const inputImage = job.inputImage
-        ? `<div class="image-input-ref">
-            <img src="${esc(job.inputImage.base64)}" alt="${esc(job.inputImage.name || '参考图')}">
-            <span>参考图：${esc(job.inputImage.name || '生成图')}</span>
-          </div>`
-        : '';
       const waitedMs = Date.now() - (job.startedAt || job.createdAt);
       const estimatedMs = (job.estimatedSeconds || estimateImageSeconds(job.params || DEFAULT_IMAGE_PARAMS)) * 1000;
       const progress = job.status === 'generating'
         ? `<div class="image-progress">
-            <div class="image-spinner"></div>
+            <div class="image-progress-indicator">
+              <div class="image-spinner"></div>
+            </div>
             <div class="image-progress-body">
-              <div class="image-progress-title">正在生成图片 · 已等待 ${formatDuration(waitedMs)}</div>
-              <div class="image-progress-note">预计约 ${formatDuration(estimatedMs)}，高峰期、参考图编辑或高质量图片可能更久。请勿刷新或关闭页面。</div>
+              <div class="image-progress-title">正在生成图片</div>
+              <div class="image-progress-stats">
+                <span>已等待 ${formatDuration(waitedMs)}</span>
+                <span>预计约 ${formatDuration(estimatedMs)}</span>
+              </div>
+              <div class="image-progress-note">高峰期、参考图编辑或高质量图片可能更久。请勿刷新或关闭页面。</div>
             </div>
             <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${job.id}" type="button">取消</button>
           </div>`
         : '';
+      const progressMessage = progress
+        ? `<div class="image-chat-msg ai">
+            <div class="image-chat-inner">
+              <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
+              <div class="image-chat-bubble">${progress}</div>
+            </div>
+          </div>`
+        : '';
       return `
         <article class="image-job-card" data-id="${job.id}">
-          <div class="image-job-header">
-            <div>
-              <h2>${esc(job.title || '未命名绘画')}</h2>
-              <div class="image-job-meta">${meta}</div>
-            </div>
-            <div class="image-job-actions">
-              <button class="btn-secondary image-action" data-action="reuse" data-job="${job.id}" type="button">复用</button>
-              <button class="btn-secondary image-action" data-action="retry" data-job="${job.id}" type="button">${job.status === 'generating' ? '生成中' : '重绘'}</button>
-            </div>
-          </div>
-          <p class="image-job-prompt">${esc(job.prompt)}</p>
-          ${inputImage}
-          ${progress}
-          ${job.error ? `<div class="image-error">${esc(job.error)}</div>` : ''}
-          <div class="image-results">${outputs}</div>
+          ${userMessage}
+          ${replyMessages}
+          ${progressMessage}
         </article>
       `;
     }).join('');
+  }
+
+  function scrollImageWorkspaceToBottom(smooth = true) {
+    if (state.mode !== 'image' || !dom.imageWorkspace) return;
+    requestAnimationFrame(() => {
+      dom.imageWorkspace.scrollTo({
+        top: dom.imageWorkspace.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+    });
   }
 
   function parseImageOutputs(data, format) {
@@ -2903,25 +3055,43 @@
       estimatedSeconds,
       durationMs: null,
     };
+    if (!job.replies) job.replies = imageJobReplies(job);
+    let activeReply = null;
     if (!retryJob) {
       state.imageJobs.unshift(job);
       state.currentImageJobId = job.id;
+      activeReply = job.replies[0];
     } else {
       job.model = state.imageModel;
       job.mapModel = state.imageMapModel;
       job.params = Object.assign({}, params);
-      job.inputImage = ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : job.inputImage || null;
       job.error = null;
-      job.outputs = [];
       job.status = 'generating';
       job.startedAt = startedAt;
       job.estimatedSeconds = estimatedSeconds;
       job.durationMs = null;
+      activeReply = {
+        id: `${job.id}-reply-${Date.now()}`,
+        model: state.imageModel,
+        mapModel: state.imageMapModel,
+        prompt: prompt.trim(),
+        inputImage: ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : null,
+        params: Object.assign({}, params),
+        outputs: [],
+        error: null,
+        status: 'generating',
+        startedAt,
+        createdAt: startedAt,
+        estimatedSeconds,
+        durationMs: null,
+      };
+      job.replies.push(activeReply);
     }
     persist();
     imageDbPutJob(job);
     updateSidebar();
     renderImageWorkspace();
+    scrollImageWorkspaceToBottom();
     startImageProgressTimer();
     let timeoutId = null;
 
@@ -2931,10 +3101,12 @@
       stopImageProgressTimer();
       if (timeoutId) clearTimeout(timeoutId);
       if (job.status === 'generating') job.status = 'done';
+      if (activeReply?.status === 'generating') activeReply.status = 'done';
       persist();
       imageDbPutJob(job);
       updateSidebar();
       renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
     }
 
@@ -2992,16 +3164,23 @@
           if (session.status === 'complete') {
             clearInterval(state.imagePollTimer);
             state.imagePollTimer = null;
-            job.outputs = JSON.parse(session.outputs || '[]');
-            if (job.outputs.length === 0) {
-              job.error = '接口未返回可显示的图片数据';
+            const nextOutputs = JSON.parse(session.outputs || '[]');
+            if (nextOutputs.length === 0) {
+              activeReply.error = '接口未返回可显示的图片数据';
+              activeReply.status = 'error';
+              job.error = activeReply.error;
               job.status = 'error';
             } else {
+              activeReply.outputs = nextOutputs;
+              activeReply.error = null;
+              activeReply.status = 'done';
+              job.outputs = nextOutputs;
               job.error = null;
               job.status = 'done';
             }
-            job.durationMs = Date.now() - startedAt;
-            if (!retryJob && ref) { state.imageRef = null; renderImageRefPreview(); }
+            activeReply.durationMs = Date.now() - startedAt;
+            job.durationMs = activeReply.durationMs;
+            if (ref) { state.imageRef = null; renderImageRefPreview(); }
             if (job.status === 'done') showToast('图片已生成');
             else showToast('生成失败');
             finishImageJob();
@@ -3009,18 +3188,24 @@
           } else if (session.status === 'error') {
             clearInterval(state.imagePollTimer);
             state.imagePollTimer = null;
-            job.error = session.error || '生成失败';
+            activeReply.error = session.error || '生成失败';
+            activeReply.status = 'error';
+            activeReply.durationMs = Date.now() - startedAt;
+            job.error = activeReply.error;
             job.status = 'error';
-            job.durationMs = Date.now() - startedAt;
+            job.durationMs = activeReply.durationMs;
             showToast('生成失败');
             finishImageJob();
             await clearImageSession();
           } else if (session.status === 'stopped') {
             clearInterval(state.imagePollTimer);
             state.imagePollTimer = null;
-            job.error = '请求已中断';
+            activeReply.error = '请求已中断';
+            activeReply.status = 'cancelled';
+            activeReply.durationMs = Date.now() - startedAt;
+            job.error = activeReply.error;
             job.status = 'cancelled';
-            job.durationMs = Date.now() - startedAt;
+            job.durationMs = activeReply.durationMs;
             showToast('生成已中断');
             finishImageJob();
             await clearImageSession();
@@ -3030,24 +3215,32 @@
       } else {
         // === Fallback: no SW, direct fetch ===
         timeoutId = setTimeout(() => controller.abort(), imageTimeoutMs(params));
-        job.outputs = state.imageMapModel
+        const nextOutputs = state.imageMapModel
           ? await requestMappedImage(prompt, params, job.inputImage, controller.signal)
           : job.inputImage
             ? await requestImageEdit(prompt, params, job.inputImage, controller.signal)
             : await requestOneImage(prompt, params, controller.signal);
-        if (job.outputs.length === 0) throw new Error('接口未返回可显示的图片数据');
+        if (nextOutputs.length === 0) throw new Error('接口未返回可显示的图片数据');
+        activeReply.outputs = nextOutputs;
+        activeReply.error = null;
+        activeReply.status = 'done';
+        activeReply.durationMs = Date.now() - startedAt;
+        job.outputs = nextOutputs;
         job.error = null;
         job.status = 'done';
-        job.durationMs = Date.now() - startedAt;
-        if (!retryJob && ref) { state.imageRef = null; renderImageRefPreview(); }
+        job.durationMs = activeReply.durationMs;
+        if (ref) { state.imageRef = null; renderImageRefPreview(); }
         showToast('图片已生成');
         finishImageJob();
       }
     } catch (e) {
       const aborted = e?.name === 'AbortError';
-      job.error = aborted ? '请求已中断。可能是手动取消、页面刷新或等待超时，请重试。' : `${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`;
+      activeReply.error = aborted ? '请求已中断。可能是手动取消、页面刷新或等待超时，请重试。' : `${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`;
+      activeReply.status = aborted ? 'cancelled' : 'error';
+      activeReply.durationMs = Date.now() - startedAt;
+      job.error = activeReply.error;
       job.status = aborted ? 'cancelled' : 'error';
-      job.durationMs = Date.now() - startedAt;
+      job.durationMs = activeReply.durationMs;
       showToast(aborted ? '生成已中断' : '生成失败');
       finishImageJob();
     }
@@ -3441,6 +3634,7 @@
         imageDbDeleteJob(id);
         updateSidebar();
         renderImageWorkspace();
+        scrollImageWorkspaceToBottom(false);
         return;
       }
       const item = e.target.closest('.conv-item');
@@ -3449,6 +3643,7 @@
         persist();
         updateSidebar();
         renderImageWorkspace();
+        scrollImageWorkspaceToBottom(false);
         closeSidebarMobile();
       }
       return;
@@ -3858,7 +4053,10 @@
     const prompt = dom.imagePrompt.value.trim();
     if (!ensureModeConfigured('image')) return;
     if (!prompt) return;
-    generateImage(prompt);
+    const editJob = state.imageRef && state.currentImageJobId ? currentImageJob() : null;
+    generateImage(prompt, state.imageDefaults, editJob);
+    dom.imagePrompt.value = '';
+    updateImageGenerateBtn();
   });
   dom.imagePrompt.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
@@ -3867,12 +4065,30 @@
     }
   });
   dom.imageGallery.addEventListener('click', (e) => {
+    const inputPreview = e.target.closest('.image-input-preview');
+    if (inputPreview) {
+      const job = state.imageJobs.find(j => j.id === inputPreview.dataset.job);
+      const replyIndex = parseInt(inputPreview.dataset.reply || '', 10);
+      const reply = Number.isFinite(replyIndex) ? imageJobReplies(job)[replyIndex] : null;
+      const inputImage = reply?.inputImage || job?.inputImage;
+      if (inputImage) {
+        openImageViewer(job, {
+          inputRef: true,
+          inputImage,
+          b64: inputImage.base64.split(',').pop(),
+          format: (inputImage.type || '').replace(/^image\//, '') || (reply?.params || job.params)?.outputFormat || 'png',
+        }, Number.isFinite(replyIndex) ? replyIndex : 0);
+      }
+      return;
+    }
+
     const preview = e.target.closest('.image-preview');
     if (preview) {
       const result = preview.closest('.image-result');
       const job = state.imageJobs.find(j => j.id === result.dataset.job);
-      const out = job?.outputs?.[parseInt(result.dataset.index, 10)];
-      if (job && out) openImageViewer(job, out);
+      const replyIndex = parseInt(result.dataset.reply || '0', 10);
+      const { out } = imageReplyOutput(job, replyIndex, parseInt(result.dataset.index, 10));
+      if (job && out) openImageViewer(job, out, replyIndex);
       return;
     }
 
@@ -3881,14 +4097,21 @@
     const job = state.imageJobs.find(j => j.id === btn.dataset.job);
     if (!job) return;
     if (btn.dataset.action === 'reuse') {
-      dom.imagePrompt.value = job.prompt;
+      dom.imagePrompt.value = btn.dataset.prompt || job.prompt;
       state.currentImageJobId = job.id;
-      state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {});
+      state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {}, {
+        size: btn.dataset.size || job.params?.size || DEFAULT_IMAGE_PARAMS.size,
+        quality: btn.dataset.quality || job.params?.quality || DEFAULT_IMAGE_PARAMS.quality,
+        outputFormat: btn.dataset.format || job.params?.outputFormat || DEFAULT_IMAGE_PARAMS.outputFormat,
+        background: btn.dataset.background || job.params?.background || DEFAULT_IMAGE_PARAMS.background,
+      });
       syncImageParams();
       updateImageGenerateBtn();
       persist();
       updateSidebar();
       dom.imagePrompt.focus();
+    } else if (btn.dataset.action === 'copy-prompt') {
+      copyText(btn.dataset.prompt || job.prompt || '');
     } else if (btn.dataset.action === 'retry') {
       if (job.status === 'generating') return;
       state.currentImageJobId = job.id;
@@ -3896,10 +4119,36 @@
     } else if (btn.dataset.action === 'cancel') {
       cancelImageGeneration();
     } else if (btn.dataset.action === 'view') {
-      const out = job.outputs[parseInt(btn.dataset.index, 10)];
-      if (out) openImageViewer(job, out);
+      const replyIndex = parseInt(btn.dataset.reply || '0', 10);
+      const { out } = imageReplyOutput(job, replyIndex, parseInt(btn.dataset.index, 10));
+      if (out) openImageViewer(job, out, replyIndex);
+    } else if (btn.dataset.action === 'edit-latest') {
+      const replyIndex = parseInt(btn.dataset.reply || '0', 10);
+      const { reply, out } = imageReplyOutput(job, replyIndex, 0);
+      if (!out) {
+        showToast('暂无可编辑的图片');
+        return;
+      }
+      if (!out.b64) {
+        showToast('链接图片无法直接作为参考图，请先下载后上传');
+        return;
+      }
+      state.imageRef = {
+        name: imageFilename(job, out),
+        type: `image/${out.format || reply?.params?.outputFormat || job.params?.outputFormat || 'png'}`,
+        base64: dataUrlForImage(out, (reply?.params || job.params)?.outputFormat),
+      };
+      dom.imagePrompt.value = '基于参考图进行编辑：';
+      state.currentImageJobId = job.id;
+      renderImageRefPreview();
+      updateImageGenerateBtn();
+      persist();
+      updateSidebar();
+      renderImageWorkspace();
+      dom.imagePrompt.focus();
     } else if (btn.dataset.action === 'use-as-ref') {
-      const out = job.outputs[parseInt(btn.dataset.index, 10)];
+      const replyIndex = parseInt(btn.dataset.reply || '0', 10);
+      const { reply, out } = imageReplyOutput(job, replyIndex, parseInt(btn.dataset.index, 10));
       if (!out) return;
       if (!out.b64) {
         showToast('链接图片无法直接作为参考图，请先下载后上传');
@@ -3907,11 +4156,11 @@
       }
       state.imageRef = {
         name: imageFilename(job, out),
-        type: `image/${out.format || job.params?.outputFormat || 'png'}`,
-        base64: dataUrlForImage(out, job.params?.outputFormat),
+        type: `image/${out.format || reply?.params?.outputFormat || job.params?.outputFormat || 'png'}`,
+        base64: dataUrlForImage(out, (reply?.params || job.params)?.outputFormat),
       };
-      dom.imagePrompt.value = job.prompt;
-      state.currentImageJobId = null;
+      dom.imagePrompt.value = '基于参考图进行编辑：';
+      state.currentImageJobId = job.id;
       renderImageRefPreview();
       updateImageGenerateBtn();
       persist();
@@ -3919,10 +4168,12 @@
       renderImageWorkspace();
       dom.imagePrompt.focus();
     } else if (btn.dataset.action === 'copy-image') {
-      const out = job.outputs[parseInt(btn.dataset.index, 10)];
+      const replyIndex = parseInt(btn.dataset.reply || '0', 10);
+      const { out } = imageReplyOutput(job, replyIndex, parseInt(btn.dataset.index, 10));
       if (out) copyImage(job, out);
     } else if (btn.dataset.action === 'download') {
-      const out = job.outputs[parseInt(btn.dataset.index, 10)];
+      const replyIndex = parseInt(btn.dataset.reply || '0', 10);
+      const { out } = imageReplyOutput(job, replyIndex, parseInt(btn.dataset.index, 10));
       if (!out) return;
       downloadImage(job, out);
     }
@@ -4146,7 +4397,7 @@
       const hasReasoning = !!msg.reasoningContent;
       el.innerHTML = `
         <div class="chat-msg-inner">
-          <div class="chat-msg-avatar"><img src="icon.png" width="20" height="20" alt="AI" class="avatar-img"></div>
+          <div class="chat-msg-avatar">${AI_AVATAR}</div>
           <div class="chat-msg-body">
             ${hasReasoning ? `<div class="thinking-block expanded">
               <button class="thinking-toggle" type="button">
@@ -4300,6 +4551,45 @@
     if (recovered) persist([KEYS.conversations]);
   }
 
+  function applyRecoveredImageSession(job, session) {
+    const activeReply = currentImageActiveReply(job);
+    if (!activeReply) return;
+    const durationMs = Date.now() - (job.startedAt || activeReply?.startedAt || job.createdAt || Date.now());
+    if (session.status === 'complete') {
+      const outputs = JSON.parse(session.outputs || '[]');
+      if (outputs.length === 0) {
+        activeReply.error = '接口未返回可显示的图片数据';
+        activeReply.status = 'error';
+        job.error = activeReply.error;
+        job.status = 'error';
+      } else {
+        activeReply.outputs = outputs;
+        activeReply.error = null;
+        activeReply.status = 'done';
+        job.outputs = outputs;
+        job.error = null;
+        job.status = 'done';
+      }
+    } else if (session.status === 'stopped') {
+      activeReply.error = '请求已中断';
+      activeReply.status = 'cancelled';
+      job.error = activeReply.error;
+      job.status = 'cancelled';
+    } else if (session.status === 'error') {
+      activeReply.error = session.error || '生成失败';
+      activeReply.status = 'error';
+      job.error = activeReply.error;
+      job.status = 'error';
+    } else if (session.status === 'timeout') {
+      activeReply.error = '生成超时';
+      activeReply.status = 'error';
+      job.error = activeReply.error;
+      job.status = 'error';
+    }
+    activeReply.durationMs = durationMs;
+    job.durationMs = durationMs;
+  }
+
   // Recover image generation session from Service Worker
   async function recoverImageFromSession() {
     const session = await getImageSession();
@@ -4313,19 +4603,12 @@
     }
 
     if (session.status === 'complete') {
-      job.outputs = JSON.parse(session.outputs || '[]');
-      if (job.outputs.length === 0) {
-        job.error = '接口未返回可显示的图片数据';
-        job.status = 'error';
-      } else {
-        job.error = null;
-        job.status = 'done';
-      }
-      job.durationMs = Date.now() - job.startedAt;
+      applyRecoveredImageSession(job, session);
       persist();
       imageDbPutJob(job);
       updateSidebar();
       renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
       showToast(job.status === 'done' ? '图片已恢复完成' : '图片生成失败');
       await clearImageSession();
@@ -4333,26 +4616,24 @@
     }
 
     if (session.status === 'stopped') {
-      job.error = '请求已中断';
-      job.status = 'cancelled';
-      job.durationMs = Date.now() - job.startedAt;
+      applyRecoveredImageSession(job, session);
       persist();
       imageDbPutJob(job);
       updateSidebar();
       renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
       await clearImageSession();
       return true;
     }
 
     if (session.status === 'error') {
-      job.error = session.error || '生成失败';
-      job.status = 'error';
-      job.durationMs = Date.now() - job.startedAt;
+      applyRecoveredImageSession(job, session);
       persist();
       imageDbPutJob(job);
       updateSidebar();
       renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
       await clearImageSession();
       return true;
@@ -4360,17 +4641,35 @@
 
     // Still streaming/connecting — start polling (same pattern as chat recovery)
     if (session.status === 'streaming' || session.status === 'connecting') {
+      job.status = 'generating';
+      const activeReply = currentImageActiveReply(job);
+      if (activeReply) activeReply.status = 'generating';
+      state.isGeneratingImage = true;
+      state.currentImageJobId = job.id;
+      startImageProgressTimer();
+      persist();
+      imageDbPutJob(job);
+      updateSidebar();
+      renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
+      updateImageGenerateBtn();
       state.imagePollTimer = setInterval(async () => {
         const s = await getImageSession();
-        if (!s) { clearInterval(state.imagePollTimer); state.imagePollTimer = null; return; }
+        if (!s) {
+          clearInterval(state.imagePollTimer);
+          state.imagePollTimer = null;
+          state.isGeneratingImage = false;
+          stopImageProgressTimer();
+          updateImageGenerateBtn();
+          return;
+        }
 
         if (s.status === 'complete') {
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
-          job.outputs = JSON.parse(s.outputs || '[]');
-          job.status = job.outputs.length > 0 ? 'done' : 'error';
-          if (job.status === 'error') job.error = '接口未返回可显示的图片数据';
-          job.durationMs = Date.now() - job.startedAt;
+          state.isGeneratingImage = false;
+          stopImageProgressTimer();
+          applyRecoveredImageSession(job, s);
           persist(); imageDbPutJob(job);
           updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
           showToast(job.status === 'done' ? '图片已恢复完成' : '图片生成失败');
@@ -4378,9 +4677,9 @@
         } else if (s.status === 'error' || s.status === 'stopped') {
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
-          job.error = s.error || (s.status === 'stopped' ? '请求已中断' : '生成失败');
-          job.status = s.status === 'stopped' ? 'cancelled' : 'error';
-          job.durationMs = Date.now() - job.startedAt;
+          state.isGeneratingImage = false;
+          stopImageProgressTimer();
+          applyRecoveredImageSession(job, s);
           persist(); imageDbPutJob(job);
           updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
           await clearImageSession();
@@ -4388,9 +4687,9 @@
           // 10 min timeout — SW was likely killed
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
-          job.error = '生成超时';
-          job.status = 'error';
-          job.durationMs = Date.now() - job.startedAt;
+          state.isGeneratingImage = false;
+          stopImageProgressTimer();
+          applyRecoveredImageSession(job, Object.assign({}, s, { status: 'timeout' }));
           persist(); imageDbPutJob(job);
           updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
           await clearImageSession();
@@ -4413,6 +4712,7 @@
   } else {
     dom.sidebar.classList.toggle('collapsed', state.sidebarCollapsed);
   }
+  if (state.mode === 'image') state.isImageHistoryLoading = true;
   updateModelBadge();
   updateSidebar();
   updateSendBtn();
@@ -4420,8 +4720,11 @@
   updateImageGenerateBtn();
   importConfigFromUrl();
 
+  const imageHistoryReady = loadImageHistory();
+
   // Hydrate file attachments and recover sessions (async)
-  hydrateFilesInConversations(state.conversations).then(() => {
+  hydrateFilesInConversations(state.conversations).then(async () => {
+    await imageHistoryReady;
     // Recover chat stream and image generation sessions
     Promise.all([recoverStreamFromSession(), recoverImageFromSession()]).then(([swRecovered]) => {
       if (!swRecovered) recoverInterruptedStreams();
@@ -4447,5 +4750,4 @@
       }
     });
   });
-  loadImageHistory();
 })();

@@ -15,8 +15,15 @@
       } catch {
         document.documentElement.setAttribute('data-theme', 'dark');
       }
+      try {
+        const mode = JSON.parse(localStorage.getItem('nc_mode'));
+        document.documentElement.setAttribute('data-boot-mode', mode === 'image' ? 'image' : 'chat');
+      } catch {
+        document.documentElement.setAttribute('data-boot-mode', 'chat');
+      }
     })();
   </script>
+  <link rel="preload" as="image" href="icon.png">
   <link rel="icon" type="image/png" href="icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
