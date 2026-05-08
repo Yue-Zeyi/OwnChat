@@ -148,7 +148,7 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
   cursor: pointer;
   padding: 4px;
   border-radius: var(--radius-xs);
-  transition: opacity var(--transition), color var(--transition);
+  transition: opacity var(--transition), color var(--transition), background var(--transition);
   flex-shrink: 0;
   min-width: 28px;
   min-height: 28px;
@@ -158,7 +158,7 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
 }
 
 .conv-item:hover .conv-item-rename { opacity: 1; }
-.conv-item-rename:hover { color: var(--text-1); }
+.conv-item-rename:hover { color: var(--text-1); background: rgba(255,255,255,0.06); opacity: 1; }
 
 .conv-rename-input {
   width: 100%;
@@ -482,6 +482,22 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg-input);
+}
+
+.conv-token-summary-inner .conv-token-warn {
+  color: #eab308;
+  border-color: rgba(234, 179, 8, 0.36);
+  background: rgba(234, 179, 8, 0.08);
+}
+
+.conv-token-summary-inner .conv-token-over {
+  color: var(--danger);
+  border-color: rgba(239, 68, 68, 0.38);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.conv-token-summary-inner .conv-token-unlimited {
+  color: var(--text-2);
 }
 
 .chat-msg {
@@ -2136,7 +2152,10 @@ body { height: 100%; background: var(--bg-main); color: var(--text-1); font-fami
   .msg-md blockquote { padding: 8px 12px; }
   .msg-md code:not(pre code):not(.code-block code) { font-size: 12px; padding: 1px 4px; }
 
-  .conv-item-delete { opacity: 0.6; }
+  .conv-item-rename,
+  .conv-item-delete {
+    opacity: 0.72;
+  }
 
   #input-area {
     padding: 6px 12px;

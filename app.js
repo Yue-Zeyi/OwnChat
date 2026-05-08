@@ -1249,6 +1249,7 @@
   }
 
   function updateConversationTokenSummary() {
+    const conv = currentConv();
     if (state.mode !== 'chat') {
       dom.convTokenSummary.classList.add('hidden');
       dom.convTokenSummary.innerHTML = '';
@@ -1260,14 +1261,34 @@
       dom.convTokenSummary.innerHTML = '';
       return;
     }
+    const contextLimit = Number.isFinite(Number(conv?.contextLimit)) ? Number(conv.contextLimit) : DEFAULT_CONTEXT_LIMIT;
+    let remainingHtml = '';
+    if (contextLimit === 0) {
+      remainingHtml = '<span class="conv-token-unlimited">剩余 不限制</span>';
+    } else {
+      const remaining = contextLimit - totals.total;
+      const ratio = contextLimit > 0 ? remaining / contextLimit : 1;
+      const cls = remaining < 0 ? 'conv-token-over' : ratio <= 0.1 ? 'conv-token-warn' : '';
+      const label = remaining < 0
+        ? `超出 ${formatTokenCount(Math.abs(remaining))}`
+        : `剩余 ${formatTokenCount(remaining)}`;
+      remainingHtml = `<span class="${cls}">${label}</span>`;
+    }
     dom.convTokenSummary.classList.remove('hidden');
     dom.convTokenSummary.innerHTML = `
       <div class="conv-token-summary-inner">
         <span>输入 ${formatTokenCount(totals.input)}</span>
         <span>输出 ${formatTokenCount(totals.output)}</span>
         <span>总计 ${formatTokenCount(totals.total)}</span>
+        ${remainingHtml}
       </div>
     `;
+  }
+
+  function conversationContextExceeded(conv = currentConv()) {
+    const contextLimit = Number.isFinite(Number(conv?.contextLimit)) ? Number(conv.contextLimit) : DEFAULT_CONTEXT_LIMIT;
+    if (!conv?.messages?.length || contextLimit === 0) return false;
+    return currentConversationTokenTotals().total > contextLimit;
   }
 
   function ensureModeConfigured(mode, opts = {}) {
@@ -1764,6 +1785,9 @@
       userMsgData = { role: 'user', content: userContent, tokens: inputTokens, timestamp: Date.now() };
     }
     conv.messages.push(userMsgData);
+    if (conversationContextExceeded(conv)) {
+      showToast('上下文已超出上限，本次将自动裁剪旧消息');
+    }
 
     let contextTokens = inputTokens;
     for (const msg of conv.messages.slice(0, -1)) {
@@ -3072,7 +3096,7 @@
       dom.paramTemperature.value = conv.temperature;
       dom.paramTopP.value = conv.topP;
       dom.paramMaxTokens.value = conv.maxTokens;
-      dom.paramContextLimit.value = conv.contextLimit || DEFAULT_CONTEXT_LIMIT;
+      dom.paramContextLimit.value = conv.contextLimit ?? DEFAULT_CONTEXT_LIMIT;
       dom.convRenameInput.value = conv.title;
       dom.convRoleInput.value = conv.systemPrompt || '';
     }
@@ -3084,12 +3108,14 @@
     conv.temperature = parseFloat(dom.paramTemperature.value) || 0.7;
     conv.topP = parseFloat(dom.paramTopP.value) || 1;
     conv.maxTokens = parseInt(dom.paramMaxTokens.value) || 4096;
-    conv.contextLimit = parseInt(dom.paramContextLimit.value) || DEFAULT_CONTEXT_LIMIT;
+    const contextLimit = parseInt(dom.paramContextLimit.value, 10);
+    conv.contextLimit = Number.isFinite(contextLimit) && contextLimit >= 0 ? contextLimit : DEFAULT_CONTEXT_LIMIT;
     conv.systemPrompt = dom.convRoleInput.value.trim();
     const newName = dom.convRenameInput.value.trim();
     if (newName) conv.title = newName;
     persist();
     updateSidebar();
+    updateConversationTokenSummary();
   }
 
   function toggleConvSettings() {

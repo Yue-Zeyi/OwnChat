@@ -172,7 +172,7 @@ pauseActivePolls() → 仅清除 UI 轮询定时器，SW 继续生成
 - 代码语法高亮和复制按钮由应用内置实现；`markdown-it` 加载失败时会回退到内置简化渲染器
 - 上下文自动裁剪（每个对话可配置上限，默认 128K；超出时从前面裁剪，保留 system 消息和最后一轮对话；设为 0 则不裁剪）
 - 上传图片、PDF、文本、代码等文件作为上下文（base64 存储在 IndexedDB，不占 localStorage）
-- 每个会话独立设置 Temperature、Top P、Max Tokens、上下文上限
+- 每个会话独立设置 Temperature、Top P、回复长度上限、上下文上限
 - Token 统计：累计输入/输出 token，每条消息显示首 token 延迟
 - URL 安全过滤：仅允许 `http`、`https`、`mailto`、`tel` 和 `data:image` 协议
 - 未配置时点击发送会打开对话设置；设置窗口可以关闭，不会阻塞使用界面
