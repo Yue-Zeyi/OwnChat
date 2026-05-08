@@ -4712,6 +4712,7 @@
   } else {
     dom.sidebar.classList.toggle('collapsed', state.sidebarCollapsed);
   }
+  document.documentElement.removeAttribute('data-boot-sidebar');
   if (state.mode === 'image') state.isImageHistoryLoading = true;
   updateModelBadge();
   updateSidebar();

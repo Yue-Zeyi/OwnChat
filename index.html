@@ -21,6 +21,16 @@
       } catch {
         document.documentElement.setAttribute('data-boot-mode', 'chat');
       }
+      try {
+        const collapsed = JSON.parse(localStorage.getItem('nc_sidebar_collapsed'));
+        if (collapsed || matchMedia('(max-width: 768px)').matches) {
+          document.documentElement.setAttribute('data-boot-sidebar', 'collapsed');
+        }
+      } catch {
+        if (matchMedia('(max-width: 768px)').matches) {
+          document.documentElement.setAttribute('data-boot-sidebar', 'collapsed');
+        }
+      }
     })();
   </script>
   <link rel="preload" as="image" href="icon.png">

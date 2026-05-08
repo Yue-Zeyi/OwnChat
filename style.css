@@ -92,6 +92,13 @@ html[data-boot-mode="image"] #image-input-area {
   display: block !important;
 }
 
+html[data-boot-sidebar="collapsed"] #sidebar {
+  margin-left: calc(var(--sidebar-w) * -1);
+  opacity: 0;
+  pointer-events: none;
+  transition: none;
+}
+
 /* ===== Sidebar ===== */
 #sidebar {
   width: var(--sidebar-w);
@@ -2153,6 +2160,11 @@ html[data-boot-mode="image"] #image-input-area {
     opacity: 0;
     pointer-events: none;
     margin-left: 0; /* override desktop margin-left approach */
+  }
+
+  html[data-boot-sidebar="collapsed"] #sidebar {
+    transform: translateX(-100%);
+    margin-left: 0;
   }
 
   .sidebar-backdrop { z-index: 79; }
