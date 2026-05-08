@@ -339,7 +339,7 @@ style.css
 app.js
 sw.js
 icon.png
-vendor/markdown-it.min.js
+markdown-it.min.js
 ```
 
 可以部署到：
@@ -354,7 +354,7 @@ vendor/markdown-it.min.js
 
 - Service Worker 要求 HTTPS 或 localhost。
 - 如果你的 API 服务没有开放 CORS，纯前端页面无法直接请求，需要服务端或网关支持 CORS。
-- 如果部署路径不是根目录，通常不需要额外配置；确保 `sw.js`、`app.js`、`style.css` 和 `vendor/` 路径可访问即可。
+- 如果部署路径不是根目录，通常不需要额外配置；确保 `sw.js`、`app.js`、`style.css` 和 `markdown-it.min.js` 路径可访问即可。
 
 ## 开发
 
@@ -367,8 +367,7 @@ vendor/markdown-it.min.js
 ├── app.js
 ├── sw.js
 ├── icon.png
-├── vendor/
-│   └── markdown-it.min.js
+├── markdown-it.min.js
 └── README.md
 ```
 
