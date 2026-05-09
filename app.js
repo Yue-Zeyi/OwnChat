@@ -384,6 +384,7 @@
   // ===== State =====
   const DEFAULT_IMAGE_MODELS = ['gpt-image-2', 'gpt-image-2-2026-04-21', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-3', 'dall-e-2'];
   const DEFAULT_IMAGE_PARAMS = { size: 'auto', quality: 'auto', outputFormat: 'png', background: 'auto' };
+  let serviceWorkerRegistrationPromise = null;
 
   const state = {
     mode: load(KEYS.mode) || 'chat',
@@ -513,7 +514,7 @@
     if (summary.imageDefaults) state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, summary.imageDefaults);
     state.modelsCache = mergeUnique([state.model], summary.chatModels, state.modelsCache);
     state.imageModelsCache = mergeUnique(
-      [state.imageModel, state.imageMapModel, state.imagePromptModel],
+      [state.imageModel],
       summary.imageModels,
       state.imageModelsCache,
       DEFAULT_IMAGE_MODELS,
@@ -578,9 +579,58 @@
     return conv;
   }
 
+  function effectiveImageBaseUrl() {
+    return (state.imageBaseUrl || state.baseUrl || '').trim();
+  }
+
+  function effectiveImageApiKey() {
+    return (state.imageApiKey || state.apiKey || '').trim();
+  }
+
   function configured() { return state.baseUrl && state.apiKey && state.model; }
-  function imageConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imageModel; }
-  function imagePromptOptimizerConfigured() { return state.imageBaseUrl && state.imageApiKey && state.imagePromptModel; }
+  function imageConfigured() { return effectiveImageBaseUrl() && effectiveImageApiKey() && state.imageModel; }
+  function parseSourcedModelRef(value, fallback = 'image') {
+    const raw = (value || '').trim();
+    const match = raw.match(/^(chat|image):(.+)$/i);
+    if (match) return { source: match[1].toLowerCase(), model: match[2].trim(), value: `${match[1].toLowerCase()}:${match[2].trim()}` };
+
+    const hasImageModel = state.imageModelsCache.includes(raw) || DEFAULT_IMAGE_MODELS.includes(raw);
+    const hasChatModel = state.modelsCache.includes(raw) || raw === state.model;
+    const source = hasChatModel && !hasImageModel ? 'chat' : fallback;
+    return { source, model: raw, value: raw ? `${source}:${raw}` : '' };
+  }
+
+  function parsePromptModelRef(value) {
+    return parseSourcedModelRef(value, 'image');
+  }
+
+  function parseMapModelRef(value) {
+    return parseSourcedModelRef(value, 'image');
+  }
+
+  function formatSourcedModel(value) {
+    const ref = parseSourcedModelRef(value, 'image');
+    if (!ref.model) return '';
+    return `${ref.model} · ${ref.source === 'chat' ? '对话' : '绘画'}`;
+  }
+
+  function modelEndpoint(ref) {
+    if (!ref?.model) return null;
+    if (ref.source === 'chat') {
+      return { baseUrl: state.baseUrl, apiKey: state.apiKey, source: 'chat', model: ref.model };
+    }
+    return { baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey(), source: 'image', model: ref.model };
+  }
+
+  function imagePromptEndpoint() {
+    const ref = parsePromptModelRef(state.imagePromptModel);
+    return modelEndpoint(ref);
+  }
+
+  function imagePromptOptimizerConfigured() {
+    const endpoint = imagePromptEndpoint();
+    return endpoint?.baseUrl && endpoint.apiKey && state.imagePromptModel;
+  }
 
   const DEFAULT_CONTEXT_LIMIT = 128000;
 
@@ -652,14 +702,14 @@
     if (!/Failed to fetch|NetworkError|Load failed|fetch/i.test(msg)) return err;
     let target = url;
     try { target = new URL(url, window.location.href).origin; } catch { /* keep raw url */ }
-    const hints = [`无法连接到 ${target}`];
+    const hints = [`浏览器没有拿到 ${target} 的可用响应`];
     try {
       const parsed = new URL(url, window.location.href);
       if (window.location.protocol === 'https:' && parsed.protocol === 'http:') {
         hints.push('当前页面是 HTTPS，但接口是 HTTP，浏览器会拦截混合内容');
       }
       if (parsed.origin !== window.location.origin) {
-        hints.push('这是跨域请求，服务端必须允许 CORS；如果服务不支持，请改用同源代理地址');
+        hints.push('这是跨域请求，如 Network 面板显示 CORS 错误才需要检查 Access-Control-Allow-Origin');
       }
       if (/api\.openai\.com$/i.test(parsed.hostname)) {
         hints.push('浏览器直连 OpenAI API 容易被 CORS 拦截，建议通过本地或服务端代理转发');
@@ -677,6 +727,47 @@
       `排查建议: ${hints.join('；')}`,
     ].join('\n');
     return error;
+  }
+
+  function canUseServiceWorker() {
+    return 'serviceWorker' in navigator && window.location.protocol !== 'file:';
+  }
+
+  function registerServiceWorker() {
+    if (!canUseServiceWorker()) return Promise.resolve(null);
+    if (!serviceWorkerRegistrationPromise) {
+      serviceWorkerRegistrationPromise = navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(e => {
+        console.warn('SW registration failed:', e);
+        return null;
+      });
+    }
+    return serviceWorkerRegistrationPromise;
+  }
+
+  async function ensureServiceWorkerTarget(timeoutMs = 5000) {
+    if (!canUseServiceWorker()) return null;
+    if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
+
+    const registration = await registerServiceWorker();
+    if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
+    if (registration?.active) return registration.active;
+
+    return new Promise(resolve => {
+      let done = false;
+      const finish = target => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+        resolve(target || navigator.serviceWorker.controller || null);
+      };
+      const onControllerChange = () => finish(navigator.serviceWorker.controller);
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+      navigator.serviceWorker.ready.then(reg => {
+        finish(navigator.serviceWorker.controller || reg.active || null);
+      }).catch(() => finish(null));
+    });
   }
 
   function httpError(status, message, url) {
@@ -1136,7 +1227,7 @@
   // ===== Render Functions =====
   function updateModelBadge() {
     dom.currentModel.textContent = state.mode === 'image'
-      ? (state.imageMapModel ? `映射 ${state.imageMapModel}` : (state.imageModel || '未配置'))
+      ? (state.imageMapModel ? `映射 ${formatSourcedModel(state.imageMapModel)}` : (state.imageModel || '未配置'))
       : (state.model || '未配置');
   }
 
@@ -1741,22 +1832,36 @@
 
   function populateImageMapModelSelect() {
     dom.cfgImageMapModelSelect.innerHTML = '<option value="">关闭映射，使用绘画模型</option>';
-    mergeUnique(state.imageModelsCache, state.modelsCache).forEach(m => {
+    mergeUnique([state.model], state.modelsCache).forEach(m => {
       const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = m;
-      if (m === state.imageMapModel) opt.selected = true;
+      opt.value = `chat:${m}`;
+      opt.textContent = `${m} · 对话`;
+      if (opt.value === parseMapModelRef(state.imageMapModel).value) opt.selected = true;
+      dom.cfgImageMapModelSelect.appendChild(opt);
+    });
+    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = `image:${m}`;
+      opt.textContent = `${m} · 绘画`;
+      if (opt.value === parseMapModelRef(state.imageMapModel).value) opt.selected = true;
       dom.cfgImageMapModelSelect.appendChild(opt);
     });
   }
 
   function populateImagePromptModelSelect() {
     dom.cfgImagePromptModelSelect.innerHTML = '<option value="">关闭提示词优化</option>';
-    mergeUnique(state.imageModelsCache, state.modelsCache).forEach(m => {
+    mergeUnique([state.model], state.modelsCache).forEach(m => {
       const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = m;
-      if (m === state.imagePromptModel) opt.selected = true;
+      opt.value = `chat:${m}`;
+      opt.textContent = `${m} · 对话`;
+      if (opt.value === parsePromptModelRef(state.imagePromptModel).value) opt.selected = true;
+      dom.cfgImagePromptModelSelect.appendChild(opt);
+    });
+    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS).forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = `image:${m}`;
+      opt.textContent = `${m} · 绘画`;
+      if (opt.value === parsePromptModelRef(state.imagePromptModel).value) opt.selected = true;
       dom.cfgImagePromptModelSelect.appendChild(opt);
     });
   }
@@ -1777,7 +1882,7 @@
       selectEl.value = (opts.image ? state.imageModel : state.model) || models[0] || '';
     } catch (e) {
       selectEl.innerHTML = '<option value="">-- 获取失败 --</option>';
-      alert('获取模型列表失败: ' + e.message);
+      alert(`获取模型列表失败: ${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`);
     } finally {
       refreshBtn.disabled = false;
     }
@@ -1836,7 +1941,6 @@
 
     state.isStreaming = true;
     state.streamingConvId = conv.id;
-    dom.userInput.disabled = true;
     updateSendBtn();
 
     // Write stream session metadata
@@ -1984,7 +2088,6 @@
 
           state.isStreaming = false;
           state.chatAbortController = null;
-          dom.userInput.disabled = false;
           dom.userInput.focus();
           updateSendBtn();
           clearStreamSession();
@@ -2144,7 +2247,6 @@
         state.chatAbortController = null;
         // Only update UI if we're still viewing this conversation
         if (currentConv()?.id === conv.id) {
-          dom.userInput.disabled = false;
           dom.userInput.focus();
           updateSendBtn();
         } else {
@@ -2169,20 +2271,22 @@
     dom.cfgModelSelect.value = state.model;
     dom.cfgModelManual.value = '';
     dom.cfgModelManual.placeholder = `手动填写模型，当前 ${state.model || '未配置'}`;
-    dom.cfgImageBaseUrl.value = state.imageBaseUrl;
-    dom.cfgImageApiKey.value = state.imageApiKey;
+    dom.cfgImageBaseUrl.value = effectiveImageBaseUrl();
+    dom.cfgImageApiKey.value = effectiveImageApiKey();
     populateSelectFromCache(dom.cfgImageModelSelect, { image: true });
     dom.cfgImageModelSelect.value = state.imageModel;
     dom.cfgImageModelManual.value = '';
     dom.cfgImageModelManual.placeholder = `手动填写模型，当前 ${state.imageModel || 'gpt-image-2'}`;
     populateImageMapModelSelect();
-    dom.cfgImageMapModelSelect.value = state.imageMapModel;
+    dom.cfgImageMapModelSelect.value = parseMapModelRef(state.imageMapModel).value;
     dom.cfgImageMapModelManual.value = '';
-    dom.cfgImageMapModelManual.placeholder = state.imageMapModel ? `当前 ${state.imageMapModel}` : '可选，如 gpt-5.5';
+    const mapRef = parseMapModelRef(state.imageMapModel);
+    dom.cfgImageMapModelManual.placeholder = mapRef.model ? `当前 ${mapRef.source}:${mapRef.model}` : '可选，如 chat:gpt-5.5 或 image:gpt-image-2';
     populateImagePromptModelSelect();
-    dom.cfgImagePromptModelSelect.value = state.imagePromptModel;
+    dom.cfgImagePromptModelSelect.value = parsePromptModelRef(state.imagePromptModel).value;
     dom.cfgImagePromptModelManual.value = '';
-    dom.cfgImagePromptModelManual.placeholder = state.imagePromptModel ? `当前 ${state.imagePromptModel}` : '可选，如 gpt-5.5';
+    const promptRef = parsePromptModelRef(state.imagePromptModel);
+    dom.cfgImagePromptModelManual.placeholder = promptRef.model ? `当前 ${promptRef.source}:${promptRef.model}` : '可选，如 chat:gpt-5.5 或 image:gpt-image-2';
     switchSettingsTab(tab === 'image' ? 'image' : 'chat');
     dom.settingsModal.classList.remove('hidden');
   }
@@ -2737,7 +2841,7 @@
         }
         const aiMetaParts = [
           reply.model || job.model,
-          reply.mapModel ? `映射 ${reply.mapModel}` : '',
+          reply.mapModel ? `映射 ${formatSourcedModel(reply.mapModel)}` : '',
           params.size,
           params.quality !== 'auto' ? params.quality : '',
           params.outputFormat ? params.outputFormat.toUpperCase() : '',
@@ -2877,16 +2981,17 @@
   }
 
   async function requestMappedImage(prompt, params, ref = null, signal = null) {
-    const url = requestUrl(state.imageBaseUrl, '/responses');
+    const endpoint = modelEndpoint(parseMapModelRef(state.imageMapModel));
+    const url = requestUrl(endpoint.baseUrl, '/responses');
     const body = {
-      model: state.imageMapModel,
+      model: endpoint.model,
       input: mappedImageInput(prompt, ref),
       tools: [imageToolOptions(params)],
       tool_choice: 'required',
     };
     let resp = await apiFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
       body: JSON.stringify(body),
       signal,
     });
@@ -2894,21 +2999,21 @@
       body.tool_choice = { type: 'image_generation' };
       resp = await apiFetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
         body: JSON.stringify(body),
         signal,
       });
     }
     if (!resp.ok && (body.tools[0].output_format || body.tools[0].background || body.tools[0].quality || body.tools[0].size)) {
       const fallback = {
-        model: state.imageMapModel,
+        model: endpoint.model,
         input: mappedImageInput(prompt, ref),
         tools: [{ type: 'image_generation' }],
         tool_choice: 'required',
       };
       resp = await apiFetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
         body: JSON.stringify(fallback),
         signal,
       });
@@ -2966,15 +3071,17 @@
     }
     const prompt = dom.imagePrompt.value.trim();
     if (!prompt || state.isOptimizingImagePrompt || state.isGeneratingImage) return;
-    const model = state.imagePromptModel;
+    const endpoint = imagePromptEndpoint();
+    const model = endpoint.model;
     state.isOptimizingImagePrompt = true;
     updateImageGenerateBtn();
     showToast('正在优化提示词...');
     try {
       const lang = promptLanguageInstruction(prompt);
-      const resp = await apiFetch(requestUrl(state.imageBaseUrl, '/chat/completions'), {
+      const optimizeUrl = requestUrl(endpoint.baseUrl, '/chat/completions');
+      const resp = await apiFetch(optimizeUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
         body: JSON.stringify({
           model,
           temperature: 0.4,
@@ -2992,7 +3099,7 @@
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-        throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, requestUrl(state.imageBaseUrl, '/chat/completions'));
+        throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, optimizeUrl);
       }
       const optimized = extractChatText(await resp.json()).replace(/^["“]|["”]$/g, '').trim();
       if (!optimized) throw new Error('接口未返回优化后的提示词');
@@ -3002,7 +3109,7 @@
       showToast('提示词已优化');
     } catch (e) {
       showToast('优化失败');
-      alert(`优化提示词失败: ${e.message}\n\n请确认绘画设置里的“提示词优化模型”支持 /chat/completions，并且绘画 Base URL 与 API Key 可用。`);
+      alert(`优化提示词失败: ${e.message}\n\n请确认“提示词优化模型”支持 /chat/completions，并且对应的对话或绘画 Base URL 与 API Key 可用。`);
     } finally {
       state.isOptimizingImagePrompt = false;
       updateImageGenerateBtn();
@@ -3010,11 +3117,13 @@
   }
 
   async function requestOneImage(prompt, params, signal = null) {
-    const url = requestUrl(state.imageBaseUrl, '/images/generations');
+    const imageBaseUrl = effectiveImageBaseUrl();
+    const imageApiKey = effectiveImageApiKey();
+    const url = requestUrl(imageBaseUrl, '/images/generations');
     let body = buildImageRequestBody(prompt, params);
     let resp = await apiFetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${imageApiKey}` },
       body: JSON.stringify(body),
       signal,
     });
@@ -3023,7 +3132,7 @@
       if (params.size !== 'auto') body.size = params.size;
       resp = await apiFetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${imageApiKey}` },
         body: JSON.stringify(body),
         signal,
       });
@@ -3051,7 +3160,9 @@
   }
 
   async function requestImageEdit(prompt, params, ref, signal = null) {
-    const url = requestUrl(state.imageBaseUrl, '/images/edits');
+    const imageBaseUrl = effectiveImageBaseUrl();
+    const imageApiKey = effectiveImageApiKey();
+    const url = requestUrl(imageBaseUrl, '/images/edits');
     const form = new FormData();
     const refBlob = dataUrlToBlob(ref.base64);
     form.append('model', state.imageModel);
@@ -3064,7 +3175,7 @@
 
     let resp = await apiFetch(url, {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
+      headers: { 'Authorization': `Bearer ${imageApiKey}` },
       body: form,
       signal,
     });
@@ -3076,7 +3187,7 @@
       if (params.size !== 'auto') fallback.append('size', params.size);
       resp = await apiFetch(url, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${state.imageApiKey}` },
+        headers: { 'Authorization': `Bearer ${imageApiKey}` },
         body: fallback,
         signal,
       });
@@ -3186,31 +3297,36 @@
     }
 
     try {
-      if (navigator.serviceWorker?.controller) {
-        // === SW proxy mode: route through Service Worker ===
+      const swTarget = await ensureServiceWorkerTarget();
+      if (swTarget) {
+        // === SW background mode: Service Worker owns the long image request ===
         state.imageAbortController = { abort: () => {
-          navigator.serviceWorker.controller.postMessage({ type: 'stop-image' });
+          swTarget.postMessage({ type: 'stop-image' });
         }};
-        const swHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.imageApiKey}` };
+        const imageBaseUrl = effectiveImageBaseUrl();
+        const imageApiKey = effectiveImageApiKey();
+        const swHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${imageApiKey}` };
 
         let swData;
         if (state.imageMapModel) {
+          const mapEndpoint = modelEndpoint(parseMapModelRef(state.imageMapModel));
           const body = {
-            model: state.imageMapModel,
+            model: mapEndpoint.model,
             input: mappedImageInput(prompt, ref),
             tools: [imageToolOptions(params)],
             tool_choice: 'required',
           };
           swData = {
             type: 'start-image', jobId: job.id,
-            url: requestUrl(state.imageBaseUrl, '/responses'),
-            headers: swHeaders, body: JSON.stringify(body),
+            url: requestUrl(mapEndpoint.baseUrl, '/responses'),
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${mapEndpoint.apiKey}` },
+            body: JSON.stringify(body),
             requestType: 'responses', outputFormat: params.outputFormat,
           };
         } else if (ref) {
           swData = {
             type: 'start-image', jobId: job.id,
-            url: requestUrl(state.imageBaseUrl, '/images/edits'),
+            url: requestUrl(imageBaseUrl, '/images/edits'),
             headers: swHeaders,
             requestType: 'edit', outputFormat: params.outputFormat,
             formParams: {
@@ -3224,12 +3340,12 @@
           const body = buildImageRequestBody(prompt, params);
           swData = {
             type: 'start-image', jobId: job.id,
-            url: requestUrl(state.imageBaseUrl, '/images/generations'),
+            url: requestUrl(imageBaseUrl, '/images/generations'),
             headers: swHeaders, body: JSON.stringify(body),
             requestType: 'generations', outputFormat: params.outputFormat,
           };
         }
-        navigator.serviceWorker.controller.postMessage(swData);
+        swTarget.postMessage(swData);
 
         // Poll IndexedDB for image result (every 500ms)
         state.imagePollTimer = setInterval(async () => {
@@ -3481,7 +3597,6 @@
         // Session matches this conversation
         state.isStreaming = true;
         state.streamingConvId = conv.id;
-        dom.userInput.disabled = true;
         updateSendBtn();
 
         if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
@@ -3563,7 +3678,6 @@
       // Replace the stale streamEls reference so the fallback flow updates the new DOM elements.
       state.isStreaming = true;
       state.streamingConvId = conv.id;
-      dom.userInput.disabled = true;
       updateSendBtn();
       removeTyping();
       $('stream-el')?.remove();
@@ -3595,7 +3709,6 @@
           state.streamingConvId = null;
           $('stream-el')?.remove();
           renderMessages();
-          dom.userInput.disabled = false;
           dom.userInput.focus();
           updateSendBtn();
           return;
@@ -3652,7 +3765,6 @@
 
     $('stream-el')?.remove();
     renderMessages();
-    dom.userInput.disabled = false;
     dom.userInput.focus();
     updateSendBtn();
     clearStreamSession();
@@ -3679,13 +3791,11 @@
     persist([KEYS.conversations, KEYS.currentConvId]);
     updateSidebar();
     renderMessages();
-    dom.userInput.disabled = false;
     updateSendBtn();
     updateInputState();
   }
 
   function updateInputState() {
-    dom.userInput.disabled = state.isStreaming;
     updateSendBtn();
   }
 
@@ -3834,6 +3944,36 @@
     switchSettingsTab('image');
   });
 
+  document.querySelectorAll('[data-secret-toggle]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = $(btn.dataset.secretToggle);
+      if (!input) return;
+      const visible = input.type === 'text';
+      input.type = visible ? 'password' : 'text';
+      btn.classList.toggle('is-visible', !visible);
+      btn.title = visible ? '显示密钥' : '隐藏密钥';
+      btn.setAttribute('aria-label', btn.title);
+    });
+  });
+
+  document.querySelectorAll('[data-secret-copy]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const input = $(btn.dataset.secretCopy);
+      const value = input?.value || '';
+      if (!value) { showToast('没有可复制的密钥'); return; }
+      try {
+        await navigator.clipboard.writeText(value);
+        showToast('密钥已复制');
+      } catch {
+        input.focus();
+        input.select();
+        document.execCommand('copy');
+        input.setSelectionRange(input.value.length, input.value.length);
+        showToast('密钥已复制');
+      }
+    });
+  });
+
   dom.cfgRefreshModels.addEventListener('click', () => {
     refreshModelsForSelect(dom.cfgBaseUrl.value.trim(), dom.cfgApiKey.value.trim(), dom.cfgModelSelect, dom.cfgRefreshModels);
   });
@@ -3842,8 +3982,8 @@
     await refreshModelsForSelect(dom.cfgImageBaseUrl.value.trim(), dom.cfgImageApiKey.value.trim(), dom.cfgImageModelSelect, dom.cfgRefreshImageModels, { image: true });
     populateImageMapModelSelect();
     populateImagePromptModelSelect();
-    dom.cfgImageMapModelSelect.value = state.imageMapModel;
-    dom.cfgImagePromptModelSelect.value = state.imagePromptModel;
+    dom.cfgImageMapModelSelect.value = parseMapModelRef(state.imageMapModel).value;
+    dom.cfgImagePromptModelSelect.value = parsePromptModelRef(state.imagePromptModel).value;
   });
 
   dom.cfgExportSafe.addEventListener('click', () => {
@@ -3905,9 +4045,9 @@
     const ik = dom.cfgImageApiKey.value.trim();
     const im = dom.cfgImageModelManual.value.trim() || dom.cfgImageModelSelect.value;
     const imm = dom.cfgImageMapModelManual.value.trim();
-    const mapModel = imm || dom.cfgImageMapModelSelect.value;
+    const mapModel = parseMapModelRef(imm || dom.cfgImageMapModelSelect.value).value;
     const ipm = dom.cfgImagePromptModelManual.value.trim();
-    const promptModel = ipm || dom.cfgImagePromptModelSelect.value;
+    const promptModel = parsePromptModelRef(ipm || dom.cfgImagePromptModelSelect.value).value;
 
     const needChat = !savingImageTab;
     const needImage = savingImageTab;
@@ -3917,19 +4057,19 @@
 
     if (needChat || b || k || dom.cfgModelManual.value.trim()) {
       if (!b || !k || !m) { alert('对话配置需要同时填写 Base URL、API Key 和模型'); return; }
-      state.baseUrl = b;
+      state.baseUrl = normalizeUrl(b);
       state.apiKey = k;
       state.model = m;
       state.modelsCache = mergeUnique([m], state.modelsCache);
     }
     if (needImage || ib || ik || dom.cfgImageModelManual.value.trim()) {
       if (!ib || !ik || !im) { alert('绘画配置需要同时填写 Base URL、API Key 和模型'); return; }
-      state.imageBaseUrl = ib;
+      state.imageBaseUrl = normalizeUrl(ib);
       state.imageApiKey = ik;
       state.imageModel = im;
       state.imageMapModel = mapModel || '';
       state.imagePromptModel = promptModel || '';
-      state.imageModelsCache = mergeUnique([im, mapModel, promptModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
+      state.imageModelsCache = mergeUnique([im], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
     }
     persist();
     updateModelBadge();
@@ -3988,7 +4128,10 @@
       return;
     }
     if (state.mode === 'image') {
-      if (state.imageMapModel) state.imageMapModel = opt.dataset.model;
+      if (state.imageMapModel) {
+        const currentMap = parseMapModelRef(state.imageMapModel);
+        state.imageMapModel = `${currentMap.source}:${opt.dataset.model}`;
+      }
       else state.imageModel = opt.dataset.model;
     }
     else state.model = opt.dataset.model;
@@ -3997,7 +4140,7 @@
     closeModelDropdown();
     updateSendBtn();
     updateImageGenerateBtn();
-    showToast(`已切换到 ${state.mode === 'image' ? (state.imageMapModel || state.imageModel) : state.model}`);
+    showToast(`已切换到 ${state.mode === 'image' ? (state.imageMapModel ? formatSourcedModel(state.imageMapModel) : state.imageModel) : state.model}`);
   });
 
   document.addEventListener('click', (e) => {
@@ -4374,6 +4517,7 @@
   dom.userInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      if (state.isStreaming) return;
       dom.sendBtn.click();
     }
   });
@@ -4386,12 +4530,8 @@
   // ===== Init =====
   applyTheme();
 
-  // Register Service Worker for stream continuation across page refreshes
-  if ('serviceWorker' in navigator && window.location.protocol !== 'file:') {
-    navigator.serviceWorker.register('sw.js').catch(e => {
-      console.warn('SW registration failed:', e);
-    });
-  }
+  // Register Service Worker for long requests and refresh recovery.
+  registerServiceWorker();
 
   // Recover streaming messages: check SW session first (better data), then local flags
   async function recoverStreamFromSession() {

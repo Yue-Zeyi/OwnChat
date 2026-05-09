@@ -1948,6 +1948,46 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 .model-field select { flex: 1; }
 .model-manual-input { margin-top: 8px; }
 
+.secret-field {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.secret-field input {
+  min-width: 0;
+  flex: 1;
+}
+
+.secret-action {
+  width: 40px;
+  min-width: 40px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+}
+
+.secret-action:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+  border-color: var(--border-strong);
+}
+
+.secret-action .icon-eye-off,
+.secret-action.is-visible .icon-eye {
+  display: none;
+}
+
+.secret-action.is-visible .icon-eye-off {
+  display: block;
+}
+
 .settings-panel {
   background: var(--bg-modal);
   border: 1px solid var(--border);

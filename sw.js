@@ -11,15 +11,21 @@ let activeImageAbort = null;
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', () => self.clients.claim());
 
+function keepAlive(event, promise) {
+  if (typeof event.waitUntil === 'function') {
+    event.waitUntil(promise);
+  }
+}
+
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'start-stream') {
-    startStream(event.data);
+    keepAlive(event, startStream(event.data));
   }
   if (event.data?.type === 'stop-stream') {
     if (activeStreamAbort) { activeStreamAbort.abort(); activeStreamAbort = null; }
   }
   if (event.data?.type === 'start-image') {
-    startImage(event.data);
+    keepAlive(event, startImage(event.data));
   }
   if (event.data?.type === 'stop-image') {
     if (activeImageAbort) { activeImageAbort.abort(); activeImageAbort = null; }
@@ -114,6 +120,9 @@ async function startImage(data) {
     id: IMAGE_KEY, jobId, requestType,
     status: 'connecting', updatedAt: Date.now(), outputs: '', error: '',
   });
+  const heartbeat = setInterval(() => {
+    updateStreamData({ id: IMAGE_KEY, status: 'connecting', updatedAt: Date.now() });
+  }, 15000);
 
   try {
     let resp;
@@ -258,6 +267,8 @@ async function startImage(data) {
       return;
     }
     await updateStreamData({ id: IMAGE_KEY, status: 'error', updatedAt: Date.now(), error: String(e.message || e) });
+  } finally {
+    clearInterval(heartbeat);
   }
   activeImageAbort = null;
 }

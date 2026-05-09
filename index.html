@@ -374,7 +374,16 @@
             </div>
             <div class="form-group">
               <label>API Key</label>
-              <input type="password" id="cfg-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+              <div class="secret-field">
+                <input type="password" id="cfg-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+                <button class="secret-action" type="button" data-secret-toggle="cfg-api-key" title="显示密钥" aria-label="显示密钥">
+                  <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="icon-eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 4.2A9.3 9.3 0 0 1 12 4c6.5 0 10 8 10 8a18.4 18.4 0 0 1-3.1 4.2"/><path d="M6.6 6.6C3.6 8.7 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 4.4-1"/></svg>
+                </button>
+                <button class="secret-action" type="button" data-secret-copy="cfg-api-key" title="复制密钥" aria-label="复制密钥">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </div>
               <div class="field-hint">密钥仅保存在浏览器本地，不会发送到第三方</div>
             </div>
             <div class="form-group">
@@ -400,7 +409,16 @@
             </div>
             <div class="form-group">
               <label>Image API Key</label>
-              <input type="password" id="cfg-image-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+              <div class="secret-field">
+                <input type="password" id="cfg-image-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+                <button class="secret-action" type="button" data-secret-toggle="cfg-image-api-key" title="显示密钥" aria-label="显示密钥">
+                  <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <svg class="icon-eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 4.2A9.3 9.3 0 0 1 12 4c6.5 0 10 8 10 8a18.4 18.4 0 0 1-3.1 4.2"/><path d="M6.6 6.6C3.6 8.7 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 4.4-1"/></svg>
+                </button>
+                <button class="secret-action" type="button" data-secret-copy="cfg-image-api-key" title="复制密钥" aria-label="复制密钥">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </div>
               <div class="field-hint">绘画密钥仅保存在浏览器本地</div>
             </div>
             <div class="form-group">
@@ -422,16 +440,16 @@
               <div class="model-field">
                 <select id="cfg-image-map-model-select" title="选择映射模型"></select>
               </div>
-              <input type="text" id="cfg-image-map-model-manual" class="model-manual-input" placeholder="可选，如 gpt-5.5；留空则关闭映射" spellcheck="false">
-              <div class="field-hint">启用后使用该模型通过 image_generation 工具生图；留空或选择关闭则使用原绘画模型</div>
+              <input type="text" id="cfg-image-map-model-manual" class="model-manual-input" placeholder="可选，如 chat:gpt-5.5 或 image:gpt-image-2" spellcheck="false">
+              <div class="field-hint">同名模型会分开显示；对话模型调用对话配置，绘画模型调用绘画配置</div>
             </div>
             <div class="form-group">
               <label>提示词优化模型</label>
               <div class="model-field">
                 <select id="cfg-image-prompt-model-select" title="选择提示词优化模型"></select>
               </div>
-              <input type="text" id="cfg-image-prompt-model-manual" class="model-manual-input" placeholder="可选，如 gpt-5.5；仅用于优化提示词" spellcheck="false">
-              <div class="field-hint">只调用绘画 Base URL 和绘画 API Key，不读取对话配置；留空则关闭提示词优化</div>
+              <input type="text" id="cfg-image-prompt-model-manual" class="model-manual-input" placeholder="可选，如 chat:gpt-5.5 或 image:gpt-image-2" spellcheck="false">
+              <div class="field-hint">同名模型会分开显示；对话模型调用对话配置，绘画模型调用绘画配置</div>
             </div>
             <div class="image-history-tools">
               <div class="image-history-info">
@@ -514,7 +532,16 @@
         </div>
         <div class="form-group">
           <label>API Key</label>
-          <input type="password" id="setup-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+          <div class="secret-field">
+            <input type="password" id="setup-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+            <button class="secret-action" type="button" data-secret-toggle="setup-api-key" title="显示密钥" aria-label="显示密钥">
+              <svg class="icon-eye" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="icon-eye-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8"/><path d="M9.9 4.2A9.3 9.3 0 0 1 12 4c6.5 0 10 8 10 8a18.4 18.4 0 0 1-3.1 4.2"/><path d="M6.6 6.6C3.6 8.7 2 12 2 12s3.5 8 10 8a9.7 9.7 0 0 0 4.4-1"/></svg>
+            </button>
+            <button class="secret-action" type="button" data-secret-copy="setup-api-key" title="复制密钥" aria-label="复制密钥">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+          </div>
           <div class="field-hint">密钥仅保存在浏览器本地</div>
         </div>
         <div class="form-group">
