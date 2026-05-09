@@ -2985,12 +2985,19 @@
 
   function scrollImageWorkspaceToBottom(smooth = true) {
     if (state.mode !== 'image' || !dom.imageWorkspace) return;
-    requestAnimationFrame(() => {
+    const scroll = () => {
+      if (state.mode !== 'image' || !dom.imageWorkspace) return;
       dom.imageWorkspace.scrollTo({
         top: dom.imageWorkspace.scrollHeight,
         behavior: smooth ? 'smooth' : 'auto',
       });
-    });
+    };
+    requestAnimationFrame(scroll);
+    requestAnimationFrame(() => requestAnimationFrame(scroll));
+    if (!smooth) {
+      setTimeout(scroll, 80);
+      setTimeout(scroll, 250);
+    }
   }
 
   function parseImageOutputs(data, format) {
@@ -4493,6 +4500,7 @@
     const result = img.closest('.image-result');
     if (!result) return;
     updateImageOutputMeta(result.dataset.job, parseInt(result.dataset.index, 10), img);
+    if (state.mode === 'image') scrollImageWorkspaceToBottom(false);
   }, true);
 
   dom.imageViewerClose.addEventListener('click', closeImageViewer);

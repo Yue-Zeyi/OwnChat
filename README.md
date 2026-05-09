@@ -32,6 +32,7 @@ OwnChat 是一款自用 AI 客户端，使用原生 HTML / CSS / JavaScript 实�
 ## 特性
 
 - **纯前端运行**：无框架、无构建步骤，直接部署静态文件即可。
+- **轻量化**：不计算 Markdown 渲染插件 `markdown-it.min.js` 时，整个项目大小仅约 598 KB。
 - **对话和绘画双模式**：顶部快速切换，两个模式的配置和模型互相隔离。
 - **OpenAI-compatible**：对话兼容 Chat Completions；绘画兼容 Images API，并支持 Responses API 映射模式。
 - **Service Worker 代理**：支持刷新后恢复流式回复和图片生成结果；SW 不可用时自动回退到页面请求。
