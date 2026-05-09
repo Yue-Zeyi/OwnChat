@@ -26,6 +26,7 @@
   --bg-code: #1a1a1a;
   --bg-backdrop: rgba(0,0,0,0.5);
   --border: #3a3a3a;
+  --border-strong: #525252;
   --text-1: #ececec;
   --text-2: #b4b4b4;
   --text-3: #8e8e8e;
@@ -45,6 +46,7 @@
   --bg-code: #f6f6f6;
   --bg-backdrop: rgba(0,0,0,0.3);
   --border: #e5e5e5;
+  --border-strong: #cfcfcf;
   --text-1: #1a1a1a;
   --text-2: #6b6b6b;
   --text-3: #999999;
@@ -462,7 +464,6 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 }
 
 .model-option:hover { background: var(--bg-hover); color: var(--text-1); }
-.model-option-clear { color: var(--danger); }
 .model-option.active {
   color: var(--accent);
   font-weight: 600;

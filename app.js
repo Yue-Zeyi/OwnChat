@@ -627,9 +627,20 @@
     return modelEndpoint(ref);
   }
 
+  function imageMapEndpoint() {
+    const ref = parseMapModelRef(state.imageMapModel);
+    return modelEndpoint(ref);
+  }
+
   function imagePromptOptimizerConfigured() {
     const endpoint = imagePromptEndpoint();
     return endpoint?.baseUrl && endpoint.apiKey && state.imagePromptModel;
+  }
+
+  function imageMapConfigured() {
+    if (!state.imageMapModel) return true;
+    const endpoint = imageMapEndpoint();
+    return !!(endpoint?.baseUrl && endpoint.apiKey && endpoint.model);
   }
 
   const DEFAULT_CONTEXT_LIMIT = 128000;
@@ -1776,13 +1787,12 @@
   // ===== Model Dropdown =====
   function renderModelDropdown() {
     const models = state.mode === 'image'
-      ? mergeUnique(state.imageModelsCache, state.modelsCache)
+      ? mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS)
       : state.modelsCache;
-    const current = state.mode === 'image' ? (state.imageMapModel || state.imageModel) : state.model;
+    const current = state.mode === 'image' ? state.imageModel : state.model;
     dom.modelDropdownList.innerHTML = `
       <div class="model-dropdown-header">选择模型</div>
       <div class="model-dropdown-scroll">
-        ${state.mode === 'image' && state.imageMapModel ? '<div class="model-option model-option-clear" data-clear-map="1">关闭映射，使用绘画模型</div>' : ''}
         ${models.map(m => `
           <div class="model-option ${m === current ? 'active' : ''}" data-model="${esc(m)}">${esc(m)}</div>
         `).join('')}
@@ -1831,37 +1841,39 @@
   }
 
   function populateImageMapModelSelect() {
+    const current = parseMapModelRef(state.imageMapModel);
     dom.cfgImageMapModelSelect.innerHTML = '<option value="">关闭映射，使用绘画模型</option>';
-    mergeUnique([state.model], state.modelsCache).forEach(m => {
+    mergeUnique([state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `chat:${m}`;
       opt.textContent = `${m} · 对话`;
-      if (opt.value === parseMapModelRef(state.imageMapModel).value) opt.selected = true;
+      if (opt.value === current.value) opt.selected = true;
       dom.cfgImageMapModelSelect.appendChild(opt);
     });
-    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS).forEach(m => {
+    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS, current.source === 'image' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `image:${m}`;
       opt.textContent = `${m} · 绘画`;
-      if (opt.value === parseMapModelRef(state.imageMapModel).value) opt.selected = true;
+      if (opt.value === current.value) opt.selected = true;
       dom.cfgImageMapModelSelect.appendChild(opt);
     });
   }
 
   function populateImagePromptModelSelect() {
+    const current = parsePromptModelRef(state.imagePromptModel);
     dom.cfgImagePromptModelSelect.innerHTML = '<option value="">关闭提示词优化</option>';
-    mergeUnique([state.model], state.modelsCache).forEach(m => {
+    mergeUnique([state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `chat:${m}`;
       opt.textContent = `${m} · 对话`;
-      if (opt.value === parsePromptModelRef(state.imagePromptModel).value) opt.selected = true;
+      if (opt.value === current.value) opt.selected = true;
       dom.cfgImagePromptModelSelect.appendChild(opt);
     });
-    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS).forEach(m => {
+    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS, current.source === 'image' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `image:${m}`;
       opt.textContent = `${m} · 绘画`;
-      if (opt.value === parsePromptModelRef(state.imagePromptModel).value) opt.selected = true;
+      if (opt.value === current.value) opt.selected = true;
       dom.cfgImagePromptModelSelect.appendChild(opt);
     });
   }
@@ -2981,7 +2993,7 @@
   }
 
   async function requestMappedImage(prompt, params, ref = null, signal = null) {
-    const endpoint = modelEndpoint(parseMapModelRef(state.imageMapModel));
+    const endpoint = imageMapEndpoint();
     const url = requestUrl(endpoint.baseUrl, '/responses');
     const body = {
       model: endpoint.model,
@@ -3201,6 +3213,11 @@
 
   async function generateImage(prompt, params = state.imageDefaults, retryJob = null, refOverride = undefined) {
     if (!ensureModeConfigured('image')) return;
+    if (!imageMapConfigured()) {
+      showSettings('image');
+      showToast('请完善映射模型对应的接口配置');
+      return;
+    }
     if (!prompt.trim() || state.isGeneratingImage) return;
 
     state.isGeneratingImage = true;
@@ -3309,7 +3326,7 @@
 
         let swData;
         if (state.imageMapModel) {
-          const mapEndpoint = modelEndpoint(parseMapModelRef(state.imageMapModel));
+          const mapEndpoint = imageMapEndpoint();
           const body = {
             model: mapEndpoint.model,
             input: mappedImageInput(prompt, ref),
@@ -4088,7 +4105,7 @@
     const k = dom.setupApiKey.value.trim();
     const m = dom.setupModelSelect.value;
     if (!b || !k || !m) { alert('请填写所有配置项并选择模型'); return; }
-    state.baseUrl = b;
+    state.baseUrl = normalizeUrl(b);
     state.apiKey = k;
     state.model = m;
     persist();
@@ -4118,21 +4135,8 @@
     e.stopPropagation();
     const opt = e.target.closest('.model-option');
     if (!opt) return;
-    if (opt.dataset.clearMap) {
-      state.imageMapModel = '';
-      persist();
-      updateModelBadge();
-      closeModelDropdown();
-      updateImageGenerateBtn();
-      showToast('已关闭映射模型');
-      return;
-    }
     if (state.mode === 'image') {
-      if (state.imageMapModel) {
-        const currentMap = parseMapModelRef(state.imageMapModel);
-        state.imageMapModel = `${currentMap.source}:${opt.dataset.model}`;
-      }
-      else state.imageModel = opt.dataset.model;
+      state.imageModel = opt.dataset.model;
     }
     else state.model = opt.dataset.model;
     persist();
@@ -4140,7 +4144,7 @@
     closeModelDropdown();
     updateSendBtn();
     updateImageGenerateBtn();
-    showToast(`已切换到 ${state.mode === 'image' ? (state.imageMapModel ? formatSourcedModel(state.imageMapModel) : state.imageModel) : state.model}`);
+    showToast(`已切换到 ${state.mode === 'image' ? state.imageModel : state.model}`);
   });
 
   document.addEventListener('click', (e) => {
