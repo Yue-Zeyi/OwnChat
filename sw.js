@@ -121,7 +121,7 @@ async function startImage(data) {
     status: 'connecting', updatedAt: Date.now(), outputs: '', error: '',
   });
   const heartbeat = setInterval(() => {
-    updateStreamData({ id: IMAGE_KEY, status: 'connecting', updatedAt: Date.now() });
+    updateStreamData({ id: IMAGE_KEY, updatedAt: Date.now() });
   }, 15000);
 
   try {

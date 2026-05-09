@@ -1030,10 +1030,23 @@
       return await new Promise((resolve, reject) => {
         const tx = db.transaction(STREAM_STORE, 'readonly');
         const req = tx.objectStore(STREAM_STORE).get(IMAGE_KEY);
-        req.onsuccess = () => resolve(req.result || null);
+        req.onsuccess = () => resolve(normalizeImageSession(req.result || null));
         req.onerror = () => reject(req.error);
       });
     } catch { return null; }
+  }
+
+  function normalizeImageSession(session) {
+    if (!session) return null;
+    if ((session.status === 'connecting' || session.status === 'streaming')) {
+      if (typeof session.outputs === 'string' && session.outputs.trim()) {
+        return Object.assign({}, session, { status: 'complete' });
+      }
+      if (session.error) {
+        return Object.assign({}, session, { status: 'error' });
+      }
+    }
+    return session;
   }
 
   async function clearImageSession() {
@@ -1041,6 +1054,24 @@
       const db = await openStreamDb();
       const tx = db.transaction(STREAM_STORE, 'readwrite');
       tx.objectStore(STREAM_STORE).delete(IMAGE_KEY);
+      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
+    } catch { /* ignore */ }
+  }
+
+  async function clearImageSessionForJob(jobId, statuses = []) {
+    try {
+      const session = await getImageSession();
+      if (!session || session.jobId !== jobId) return;
+      if (statuses.length && !statuses.includes(session.status)) return;
+      await clearImageSession();
+    } catch { /* ignore */ }
+  }
+
+  async function writeImageSession(meta) {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).put(Object.assign({ id: IMAGE_KEY, status: 'stopped', updatedAt: Date.now() }, meta));
       await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
     } catch { /* ignore */ }
   }
@@ -2359,6 +2390,21 @@
           }
           changedJobs.push(job);
         }
+        const replies = ensureImageJobReplies(job);
+        replies.forEach(reply => {
+          if (reply?.status !== 'generating') return;
+          const sessionMatches = imageSession?.jobId === job.id;
+          if (sessionMatches && ['connecting', 'streaming'].includes(imageSession.status)) return;
+          reply.status = job.status === 'cancelled' ? 'cancelled' : 'error';
+          reply.error = job.error || '上次生成因页面刷新或关闭而中断，请点击“重绘”重新生成。';
+          reply.durationMs = reply.startedAt ? Date.now() - reply.startedAt : reply.durationMs;
+          if (job.status === 'generating') {
+            job.status = reply.status;
+            job.error = reply.error;
+            job.durationMs = reply.durationMs;
+          }
+          if (!changedJobs.includes(job)) changedJobs.push(job);
+        });
       });
       if (changedJobs.length) {
         await Promise.allSettled(changedJobs.map(job => imageDbPutJob(job)));
@@ -2736,7 +2782,7 @@
     state.imageProgressTimer = null;
   }
 
-  function cancelImageGeneration(reason = '已取消生成') {
+  async function cancelImageGeneration(reason = '已取消生成') {
     const job = state.imageJobs.find(j => j.status === 'generating');
     if (!job) return;
     if (state.imageAbortController) state.imageAbortController.abort();
@@ -2761,6 +2807,14 @@
     renderImageWorkspace();
     updateSidebar();
     updateImageGenerateBtn();
+    await writeImageSession({
+      id: IMAGE_KEY,
+      jobId: job.id,
+      status: 'stopped',
+      updatedAt: Date.now(),
+      error: reason,
+    });
+    setTimeout(() => clearImageSessionForJob(job.id, ['stopped']), 1000);
   }
 
   async function updateImageHistorySummary() {
