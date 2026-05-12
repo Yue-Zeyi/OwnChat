@@ -37,23 +37,61 @@ async function startStream(data) {
   const { url, headers, body, convId, model } = data;
   const controller = new AbortController();
   activeStreamAbort = controller;
+  let requestMeta = {};
+  try {
+    const parsedBody = JSON.parse(body || '{}');
+    requestMeta = {
+      requestInputTokens: data.requestInputTokens,
+      includeContext: data.includeContext,
+      streamOptions: parsedBody.stream_options || null,
+    };
+  } catch {
+    requestMeta = { requestInputTokens: data.requestInputTokens, includeContext: data.includeContext };
+  }
 
   await updateStreamData({
     id: STREAM_KEY, convId, model,
     assistantContent: '', reasoningContent: '',
     status: 'connecting', updatedAt: Date.now(), error: '',
+    usage: null,
+    ...requestMeta,
   });
 
   try {
-    const resp = await fetch(url, {
+    let resp = await fetch(url, {
       method: 'POST', headers, body, signal: controller.signal,
     });
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
-      await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
-      activeStreamAbort = null;
-      return;
+      if (errText && /stream_options|include_usage/i.test(errText)) {
+        try {
+          const fallbackBody = JSON.parse(body || '{}');
+          delete fallbackBody.stream_options;
+          resp = await fetch(url, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(fallbackBody),
+            signal: controller.signal,
+          });
+          if (resp.ok) {
+            await updateStreamData({ streamOptions: null, usageUnavailable: true, updatedAt: Date.now() });
+          } else {
+            const retryErrText = await resp.text().catch(() => '');
+            await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${retryErrText.slice(0, 500)}` });
+            activeStreamAbort = null;
+            return;
+          }
+        } catch {
+          await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
+          activeStreamAbort = null;
+          return;
+        }
+      } else {
+        await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
+        activeStreamAbort = null;
+        return;
+      }
     }
 
     await updateStreamData({ status: 'streaming', updatedAt: Date.now() });
@@ -63,6 +101,7 @@ async function startStream(data) {
     let buffer = '';
     let assistantContent = '';
     let reasoningContent = '';
+    let usage = null;
     let lastPersist = 0;
 
     try {
@@ -81,6 +120,7 @@ async function startStream(data) {
           if (payload === '[DONE]') continue;
           try {
             const json = JSON.parse(payload);
+            if (json.usage) usage = json.usage;
             const delta = json.choices?.[0]?.delta;
             if (delta?.reasoning_content) reasoningContent += delta.reasoning_content;
             if (delta?.thinking) reasoningContent += delta.thinking;
@@ -91,17 +131,17 @@ async function startStream(data) {
         const now = Date.now();
         if (now - lastPersist > 300) {
           lastPersist = now;
-          await updateStreamData({ assistantContent, reasoningContent, status: 'streaming', updatedAt: now });
+          await updateStreamData({ assistantContent, reasoningContent, usage, status: 'streaming', updatedAt: now });
         }
       }
 
-      await updateStreamData({ assistantContent, reasoningContent, status: 'complete', updatedAt: Date.now() });
+      await updateStreamData({ assistantContent, reasoningContent, usage, status: 'complete', updatedAt: Date.now() });
     } catch (e) {
       if (e?.name === 'AbortError') {
-        await updateStreamData({ assistantContent, reasoningContent, status: 'stopped', updatedAt: Date.now() });
+        await updateStreamData({ assistantContent, reasoningContent, usage, status: 'stopped', updatedAt: Date.now() });
         return;
       }
-      await updateStreamData({ assistantContent, reasoningContent, status: 'error', updatedAt: Date.now(), error: String(e.message || e) });
+      await updateStreamData({ assistantContent, reasoningContent, usage, status: 'error', updatedAt: Date.now(), error: String(e.message || e) });
     }
   } catch (e) {
     if (e?.name === 'AbortError') { activeStreamAbort = null; return; }

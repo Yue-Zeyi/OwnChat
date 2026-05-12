@@ -169,6 +169,13 @@
                   <path d="M8.5 14.5A6 6 0 1 1 15.5 14.5c-.9.7-1.5 1.7-1.5 2.5h-4c0-.8-.6-1.8-1.5-2.5z" />
                 </svg>
               </button>
+              <button id="context-toggle-btn" class="toolbar-btn active" type="button" title="携带上下文" data-tooltip="携带上下文">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+                  <path d="M8 10h8" />
+                  <path d="M8 14h5" />
+                </svg>
+              </button>
               <button id="conv-settings-btn" class="toolbar-btn" type="button" title="对话设置" data-tooltip="对话设置">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path
@@ -218,13 +225,13 @@
             </div>
             <div class="conv-settings-row">
               <label>回复长度上限</label>
-              <input type="number" id="param-max-tokens" min="1" max="128000" step="1" value="4096" title="回复长度上限">
-              <span class="param-hint">限制单次回答长度，通常无需修改</span>
+              <input type="number" id="param-max-tokens" min="1" max="128" step="1" value="128" title="回复长度上限">
+              <span class="param-hint">单位 K tokens，限制单次回答长度</span>
             </div>
             <div class="conv-settings-row">
               <label>上下文上限</label>
-              <input type="number" id="param-context-limit" min="0" max="512000" step="1000" value="128000" title="上下文 Token 上限">
-              <span class="param-hint">超出时自动裁剪旧消息，0=不裁剪</span>
+              <input type="number" id="param-context-limit" min="0" max="512" step="1" value="128" title="上下文上限">
+              <span class="param-hint">单位 K tokens，超出时裁剪，0=不裁剪</span>
             </div>
           </div>
         </div>

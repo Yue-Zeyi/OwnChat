@@ -11,6 +11,7 @@
     currentConvId: 'nc_current_conv_id',
     tokenStats: 'nc_token_stats',
     showThinking: 'nc_show_thinking',
+    includeContext: 'nc_include_context',
     sidebarCollapsed: 'nc_sidebar_collapsed',
     theme: 'nc_theme',
     mode: 'nc_mode',
@@ -396,6 +397,7 @@
     currentConvId: load(KEYS.currentConvId) || null,
     tokenStats: load(KEYS.tokenStats) || { input: 0, output: 0, total: 0 },
     showThinking: load(KEYS.showThinking) !== false,
+    includeContext: load(KEYS.includeContext) !== false,
     sidebarCollapsed: load(KEYS.sidebarCollapsed) || false,
     theme: load(KEYS.theme) || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
     imageBaseUrl: load(KEYS.imageBaseUrl) || '',
@@ -572,7 +574,7 @@
   }
 
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: 4096, contextLimit: 128000, systemPrompt: '' };
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: DEFAULT_MAX_TOKENS, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '' };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -644,6 +646,20 @@
   }
 
   const DEFAULT_CONTEXT_LIMIT = 128000;
+  const DEFAULT_MAX_TOKENS = 128000;
+  const TOKEN_K = 1000;
+
+  function tokensToK(tokens, fallback) {
+    const value = Number.isFinite(Number(tokens)) ? Number(tokens) : fallback;
+    return Math.round(value / TOKEN_K);
+  }
+
+  function kToTokens(value, fallback, opts = {}) {
+    const kValue = parseFloat(value);
+    if (!Number.isFinite(kValue) || kValue < 0) return fallback;
+    if (opts.allowZero && kValue === 0) return 0;
+    return Math.max(TOKEN_K, Math.round(kValue * TOKEN_K));
+  }
 
   function trimContextMessages(messages, systemPrompt, maxTokens) {
     if (maxTokens === 0) {
@@ -693,6 +709,34 @@
     if (sysMsg) result.push(sysMsg);
     result.push(...head, ...keepTail);
     return result;
+  }
+
+  function apiMessagesTokenCount(messages) {
+    return messages.reduce((sum, msg) => {
+      return sum + estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''));
+    }, 0);
+  }
+
+  function normalizeUsage(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const input = Number(usage.prompt_tokens ?? usage.input_tokens);
+    const output = Number(usage.completion_tokens ?? usage.output_tokens);
+    const total = Number(usage.total_tokens);
+    const normalized = {};
+    if (Number.isFinite(input)) normalized.input = input;
+    if (Number.isFinite(output)) normalized.output = output;
+    if (Number.isFinite(total)) normalized.total = total;
+    return Object.keys(normalized).length ? normalized : null;
+  }
+
+  function usageInputTokens(usage, fallback) {
+    const normalized = normalizeUsage(usage);
+    return normalized?.input ?? fallback;
+  }
+
+  function usageOutputTokens(usage, fallback) {
+    const normalized = normalizeUsage(usage);
+    return normalized?.output ?? fallback;
   }
 
   function normalizeUrl(u) {
@@ -1237,6 +1281,7 @@
     // File upload
     attachBtn: $('attach-btn'),
     thinkingToggleBtn: $('thinking-toggle-btn'),
+    contextToggleBtn: $('context-toggle-btn'),
     fileInput: $('file-input'),
     filePreview: $('file-preview'),
     // Setup overlay
@@ -1367,6 +1412,14 @@
     dom.thinkingToggleBtn.dataset.tooltip = state.showThinking ? '隐藏思考过程' : '显示思考过程';
   }
 
+  function updateContextToggleBtn() {
+    dom.contextToggleBtn.classList.toggle('active', state.includeContext);
+    const label = state.includeContext ? '携带上下文' : '不带上下文';
+    dom.contextToggleBtn.title = label;
+    dom.contextToggleBtn.setAttribute('aria-label', label);
+    dom.contextToggleBtn.dataset.tooltip = label;
+  }
+
   function updateImageGenerateBtn() {
     dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage;
     dom.imageGenerateBtn.title = state.imageRef ? '编辑图片' : '生成图片';
@@ -1391,8 +1444,10 @@
     const totals = { input: 0, output: 0, total: 0, count: 0 };
     if (!conv?.messages?.length) return totals;
     conv.messages.forEach(msg => {
+      const usage = normalizeUsage(msg.usage);
       const tokens = msg.tokens || estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''));
-      if (msg.role === 'user') totals.input += tokens;
+      if (msg.role === 'assistant' && usage?.output != null) totals.output += usage.output;
+      else if (msg.role === 'user') totals.input += tokens;
       else if (msg.role === 'assistant') totals.output += tokens;
       else totals.input += tokens;
       totals.count += 1;
@@ -1638,15 +1693,21 @@
     if (!conv) return;
     const msg = conv.messages[index];
     let userText;
+    let includeContext = state.includeContext;
     if (msg.role === 'user') {
       userText = typeof msg.content === 'string' ? msg.content : msg.content.find(p => p.type === 'text')?.text || '';
+      includeContext = msg.includeContext !== false;
       conv.messages = conv.messages.slice(0, index);
     } else {
       const prev = conv.messages[index - 1];
-      if (prev && prev.role === 'user') { userText = prev.content; conv.messages = conv.messages.slice(0, index - 1); }
+      if (prev && prev.role === 'user') {
+        userText = prev.content;
+        includeContext = prev.includeContext !== false;
+        conv.messages = conv.messages.slice(0, index - 1);
+      }
       else return;
     }
-    persist(); renderMessages(); sendMsg(userText);
+    persist(); renderMessages(); sendMsg(userText, { includeContext });
   }
 
   function renderMessages() {
@@ -1711,12 +1772,24 @@
         const pad = n => String(n).padStart(2, '0');
         metaParts.push(`<span class="msg-meta-item">${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}</span>`);
       }
+      if (isUser && msg.includeContext === false) {
+        metaParts.push('<span class="msg-meta-item">未带上下文</span>');
+      }
       if (state.showThinking && !isUser && reasoningText && msg.reasoningTimeMs != null) {
         metaParts.push(`<span class="msg-meta-item">思考 ${msg.reasoningTimeMs >= 1000 ? (msg.reasoningTimeMs / 1000).toFixed(1) + 's' : msg.reasoningTimeMs + 'ms'}</span>`);
       } else if (!isUser && msg.firstTokenMs !== undefined) {
         metaParts.push(`<span class="msg-meta-item">${msg.firstTokenMs >= 1000 ? (msg.firstTokenMs / 1000).toFixed(1) + 's' : msg.firstTokenMs + 'ms'}</span>`);
       }
-      if (msg.tokens) metaParts.push(`<span class="msg-meta-item">~${msg.tokens} tokens</span>`);
+      const usage = normalizeUsage(msg.usage);
+      if (usage && !isUser) {
+        const usageParts = [];
+        if (usage.input != null) usageParts.push(`输入 ${formatTokenCount(usage.input)}`);
+        if (usage.output != null) usageParts.push(`输出 ${formatTokenCount(usage.output)}`);
+        if (usage.total != null) usageParts.push(`总计 ${formatTokenCount(usage.total)}`);
+        if (usageParts.length) metaParts.push(`<span class="msg-meta-item">${usageParts.join(' / ')}</span>`);
+      } else if (msg.tokens) {
+        metaParts.push(`<span class="msg-meta-item">~${formatTokenCount(msg.tokens)} tokens</span>`);
+      }
       if (!isUser && msg.model) metaParts.push(`<span class="msg-meta-item msg-model-tag">${esc(msg.model)}</span>`);
       metaParts.push(`
         <span class="copy-menu">
@@ -1936,12 +2009,13 @@
   }
 
   // ===== Send Message =====
-  async function sendMsg(userContent) {
+  async function sendMsg(userContent, opts = {}) {
     if (!ensureModeConfigured('chat')) return;
     const conv = currentConv();
     if (!conv) return;
 
     const inputTokens = estimateTokens(userContent);
+    const includeContext = opts.includeContext ?? state.includeContext;
 
     // Build user message content (plain text or multimodal)
     const files = state.pendingFiles;
@@ -1955,28 +2029,25 @@
           contentParts.push({ type: 'text', text: `[文件: ${f.name}]\n${f.text}` });
         }
       }
-      userMsgData = { role: 'user', content: contentParts, tokens: inputTokens, timestamp: Date.now(), files: files.map(f => ({ name: f.name, type: f.type, base64: f.base64 })) };
+      userMsgData = { role: 'user', content: contentParts, tokens: inputTokens, timestamp: Date.now(), includeContext, files: files.map(f => ({ name: f.name, type: f.type, base64: f.base64 })) };
     } else {
-      userMsgData = { role: 'user', content: userContent, tokens: inputTokens, timestamp: Date.now() };
+      userMsgData = { role: 'user', content: userContent, tokens: inputTokens, timestamp: Date.now(), includeContext };
     }
     conv.messages.push(userMsgData);
-    if (conversationContextExceeded(conv)) {
+    if (includeContext && conversationContextExceeded(conv)) {
       showToast('上下文已超出上限，本次将自动裁剪旧消息');
-    }
-
-    let contextTokens = inputTokens;
-    for (const msg of conv.messages.slice(0, -1)) {
-      contextTokens += estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
     }
 
     renderMessages();
 
     // Build API messages with context window trimming
-    const rawApiMessages = conv.messages.map(m => {
+    const sourceMessages = includeContext ? conv.messages : [userMsgData];
+    const rawApiMessages = sourceMessages.map(m => {
       if (typeof m.content === 'string') return { role: m.role, content: m.content };
       return { role: m.role, content: m.content };
     });
     const apiMessages = trimContextMessages(rawApiMessages, conv.systemPrompt?.trim() || null, conv.contextLimit);
+    const requestInputTokens = apiMessagesTokenCount(apiMessages);
 
     // Clear pending files after adding to message
     state.pendingFiles = [];
@@ -1987,12 +2058,12 @@
     updateSendBtn();
 
     // Write stream session metadata
-    await writeStreamSession({ convId: conv.id, model: state.model, startTime: Date.now() });
+    await writeStreamSession({ convId: conv.id, model: state.model, requestInputTokens, includeContext, startTime: Date.now() });
 
     addTyping();
 
     // Add a placeholder streaming message to conv.messages for crash recovery
-    const streamPlaceholder = { role: 'assistant', content: '', tokens: 0, model: state.model, streaming: true };
+    const streamPlaceholder = { role: 'assistant', content: '', tokens: 0, model: state.model, requestInputTokens, streaming: true };
     conv.messages.push(streamPlaceholder);
     const streamMsgIdx = conv.messages.length - 1;
     persist([KEYS.conversations, KEYS.currentConvId]);
@@ -2002,6 +2073,7 @@
     reqBody.temperature = conv.temperature;
     reqBody.top_p = conv.topP;
     reqBody.max_tokens = conv.maxTokens;
+    reqBody.stream_options = { include_usage: true };
     const streamUrl = requestUrl(state.baseUrl, '/chat/completions');
     const swAvailable = navigator.serviceWorker?.controller;
 
@@ -2014,6 +2086,8 @@
         body: JSON.stringify(reqBody),
         convId: conv.id,
         model: state.model,
+        requestInputTokens,
+        includeContext,
       });
 
       // Set up abort via SW message
@@ -2038,6 +2112,7 @@
 
         const content = session.assistantContent || '';
         const reasoning = session.reasoningContent || '';
+        const usage = normalizeUsage(session.usage);
 
         if (content && firstTokenTime === null) {
           firstTokenTime = Date.now() - streamStartTime;
@@ -2060,7 +2135,8 @@
           lastContent = content;
           if (conv.messages[streamMsgIdx]?.streaming) {
             conv.messages[streamMsgIdx].content = content;
-            conv.messages[streamMsgIdx].tokens = estimateTokens(content);
+            conv.messages[streamMsgIdx].tokens = usageOutputTokens(usage, estimateTokens(content));
+            if (usage) conv.messages[streamMsgIdx].usage = usage;
             if (reasoning) conv.messages[streamMsgIdx].reasoningContent = reasoning;
             if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
           }
@@ -2082,7 +2158,8 @@
           clearInterval(state.chatPollTimer);
           state.chatPollTimer = null;
 
-          const outputTokens = estimateTokens(content);
+          const estimatedOutputTokens = estimateTokens(content);
+          const outputTokens = usageOutputTokens(usage, estimatedOutputTokens);
           let msgData;
 
           if (session.status === 'error') {
@@ -2096,6 +2173,7 @@
             if (reasoning) msgData.reasoningContent = reasoning;
           } else {
             msgData = { role: 'assistant', content, tokens: outputTokens, model: state.model };
+            if (usage) msgData.usage = usage;
             if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
             if (reasoning) {
               msgData.reasoningContent = reasoning;
@@ -2116,9 +2194,7 @@
             conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
           }
 
-          let ctxTokens = 0;
-          for (const msg of conv.messages) ctxTokens += estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
-          state.tokenStats.input += ctxTokens;
+          state.tokenStats.input += usageInputTokens(usage, requestInputTokens);
           state.tokenStats.output += outputTokens;
           state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
 
@@ -2148,10 +2224,11 @@
       let firstTokenTime = null;
       let reasoningStartTime = null;
       let reasoningEndTime = null;
+      let streamUsage = null;
       const streamStartTime = Date.now();
 
       try {
-        const resp = await apiFetch(streamUrl, {
+        let resp = await apiFetch(streamUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
           body: JSON.stringify(reqBody),
@@ -2159,8 +2236,24 @@
         });
 
         if (!resp.ok) {
-          const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-          throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, streamUrl);
+          let errText = await resp.text().catch(() => '');
+          if (/stream_options|include_usage/i.test(errText)) {
+            const fallbackBody = Object.assign({}, reqBody);
+            delete fallbackBody.stream_options;
+            resp = await apiFetch(streamUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+              body: JSON.stringify(fallbackBody),
+              signal: controller.signal,
+            });
+            if (!resp.ok) errText = await resp.text().catch(() => errText);
+          }
+          if (!resp.ok) {
+            let err = null;
+            try { err = errText ? JSON.parse(errText) : null; } catch { /* keep text */ }
+            if (!err) err = await resp.json().catch(() => ({ error: { message: errText || `HTTP ${resp.status}` } }));
+            throw httpError(resp.status, err.error?.message || errText || `HTTP ${resp.status}`, streamUrl);
+          }
         }
 
         removeTyping();
@@ -2184,6 +2277,8 @@
             if (data === '[DONE]') continue;
             try {
               const json = JSON.parse(data);
+              const usage = normalizeUsage(json.usage);
+              if (usage) streamUsage = usage;
               const delta = json.choices?.[0]?.delta;
               const reasoningDelta = delta?.reasoning_content || delta?.thinking || '';
               const contentDelta = delta?.content || '';
@@ -2214,7 +2309,8 @@
                 updateStream(streamEls.contentMd, splitContent.content);
                 if (conv.messages[streamMsgIdx]?.streaming) {
                   conv.messages[streamMsgIdx].content = splitContent.content;
-                  conv.messages[streamMsgIdx].tokens = estimateTokens(splitContent.content);
+                  conv.messages[streamMsgIdx].tokens = usageOutputTokens(streamUsage, estimateTokens(splitContent.content));
+                  if (streamUsage) conv.messages[streamMsgIdx].usage = streamUsage;
                   if (reasoningContent) conv.messages[streamMsgIdx].reasoningContent = reasoningContent;
                   if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
                 }
@@ -2236,8 +2332,9 @@
           reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
         }
         const finalContent = finalSplitContent.content;
-        const outputTokens = estimateTokens(finalContent);
+        const outputTokens = usageOutputTokens(streamUsage, estimateTokens(finalContent));
         const msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: state.model };
+        if (streamUsage) msgData.usage = streamUsage;
         if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
         if (reasoningContent) {
           msgData.reasoningContent = reasoningContent;
@@ -2253,9 +2350,7 @@
           conv.title = userContent.slice(0, 30) + (userContent.length > 30 ? '...' : '');
         }
 
-        let ctxTokens = 0;
-        for (const msg of conv.messages) ctxTokens += estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
-        state.tokenStats.input += ctxTokens;
+        state.tokenStats.input += usageInputTokens(streamUsage, requestInputTokens);
         state.tokenStats.output += outputTokens;
         state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
 
@@ -3555,8 +3650,8 @@
     if (conv) {
       dom.paramTemperature.value = conv.temperature;
       dom.paramTopP.value = conv.topP;
-      dom.paramMaxTokens.value = conv.maxTokens;
-      dom.paramContextLimit.value = conv.contextLimit ?? DEFAULT_CONTEXT_LIMIT;
+      dom.paramMaxTokens.value = tokensToK(conv.maxTokens, DEFAULT_MAX_TOKENS);
+      dom.paramContextLimit.value = tokensToK(conv.contextLimit, DEFAULT_CONTEXT_LIMIT);
       dom.convRenameInput.value = conv.title;
       dom.convRoleInput.value = conv.systemPrompt || '';
     }
@@ -3567,9 +3662,8 @@
     if (!conv) return;
     conv.temperature = parseFloat(dom.paramTemperature.value) || 0.7;
     conv.topP = parseFloat(dom.paramTopP.value) || 1;
-    conv.maxTokens = parseInt(dom.paramMaxTokens.value) || 4096;
-    const contextLimit = parseInt(dom.paramContextLimit.value, 10);
-    conv.contextLimit = Number.isFinite(contextLimit) && contextLimit >= 0 ? contextLimit : DEFAULT_CONTEXT_LIMIT;
+    conv.maxTokens = kToTokens(dom.paramMaxTokens.value, DEFAULT_MAX_TOKENS);
+    conv.contextLimit = kToTokens(dom.paramContextLimit.value, DEFAULT_CONTEXT_LIMIT, { allowZero: true });
     conv.systemPrompt = dom.convRoleInput.value.trim();
     const newName = dom.convRenameInput.value.trim();
     if (newName) conv.title = newName;
@@ -3624,6 +3718,12 @@
       });
     }
     showToast(state.showThinking ? '已显示思考过程' : '已隐藏思考过程');
+  });
+  dom.contextToggleBtn.addEventListener('click', () => {
+    state.includeContext = !state.includeContext;
+    persist([KEYS.includeContext]);
+    updateContextToggleBtn();
+    showToast(state.includeContext ? '发送时将携带上下文' : '发送时不携带上下文');
   });
   dom.imageSettingsBtn.addEventListener('click', toggleImageSettings);
   dom.paramTemperature.addEventListener('change', saveConvParams);
@@ -3804,7 +3904,9 @@
   function finalizeStreamFromSession(conv, streamIdx, session) {
     const content = session.assistantContent || '';
     const reasoning = session.reasoningContent || '';
-    const outputTokens = estimateTokens(content);
+    const usage = normalizeUsage(session.usage);
+    const outputTokens = usageOutputTokens(usage, estimateTokens(content));
+    const requestInputTokens = Number(session.requestInputTokens || conv.messages[streamIdx]?.requestInputTokens || 0);
     let msgData;
     if (session.status === 'error') {
       const detail = session.error ? `\n\n\`\`\`text\n${session.error}\n\`\`\`` : '';
@@ -3815,6 +3917,7 @@
       if (reasoning) msgData.reasoningContent = reasoning;
     } else {
       msgData = { role: 'assistant', content, tokens: outputTokens, model: state.model };
+      if (usage) msgData.usage = usage;
       if (reasoning) { msgData.reasoningContent = reasoning; }
     }
 
@@ -3827,9 +3930,7 @@
       conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
     }
 
-    let ctxTokens = 0;
-    for (const msg of conv.messages) ctxTokens += estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content));
-    state.tokenStats.input += ctxTokens;
+    state.tokenStats.input += usageInputTokens(usage, requestInputTokens);
     state.tokenStats.output += outputTokens;
     state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
 
@@ -3875,6 +3976,7 @@
 
   function updateInputState() {
     updateSendBtn();
+    updateContextToggleBtn();
   }
 
   function startSidebarRename(item, currentTitle, onSave) {
@@ -4615,12 +4717,14 @@
 
     if (session.status === 'complete') {
       // Stream finished while page was refreshing — full recovery
+      const usage = normalizeUsage(session.usage);
       const msgData = {
         role: 'assistant',
         content: session.assistantContent || '',
-        tokens: estimateTokens(session.assistantContent),
+        tokens: usageOutputTokens(usage, estimateTokens(session.assistantContent)),
         model: session.model,
       };
+      if (usage) msgData.usage = usage;
       if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
 
       if (streamIdx >= 0) {
@@ -4637,13 +4741,15 @@
     if (session.status === 'streaming' || session.status === 'connecting') {
       state.isStreaming = true;
       state.streamingConvId = conv.id;
+      const usage = normalizeUsage(session.usage);
       const msgData = {
         role: 'assistant',
         content: session.assistantContent || '...',
-        tokens: estimateTokens(session.assistantContent),
+        tokens: usageOutputTokens(usage, estimateTokens(session.assistantContent)),
         model: session.model,
         streaming: true,
       };
+      if (usage) msgData.usage = usage;
       if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
 
       if (streamIdx >= 0) {
@@ -4659,8 +4765,10 @@
     // SW reported stopped (user aborted before page refresh)
     if (session.status === 'stopped') {
       const content = (session.assistantContent || '').trim();
+      const usage = normalizeUsage(session.usage);
       const stoppedContent = content ? `${content}\n\n_已停止生成_` : '**已停止生成**';
-      const msgData = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(content), model: session.model };
+      const msgData = { role: 'assistant', content: stoppedContent, tokens: usageOutputTokens(usage, estimateTokens(content)), model: session.model };
+      if (usage) msgData.usage = usage;
       if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
       if (streamIdx >= 0) conv.messages[streamIdx] = msgData;
       else conv.messages.push(msgData);
@@ -4673,12 +4781,14 @@
     if (session.status === 'error') {
       const content = (session.assistantContent || '').trim();
       if (content) {
+        const usage = normalizeUsage(session.usage);
         const msgData = {
           role: 'assistant',
           content: `${content}\n\n_（回复中断）_`,
-          tokens: estimateTokens(content),
+          tokens: usageOutputTokens(usage, estimateTokens(content)),
           model: session.model,
         };
+        if (usage) msgData.usage = usage;
         if (session.reasoningContent) msgData.reasoningContent = session.reasoningContent;
         if (streamIdx >= 0) {
           conv.messages[streamIdx] = msgData;
@@ -4759,9 +4869,11 @@
       }
 
       const msg = conv.messages[streamIdx];
+      const usage = normalizeUsage(session.usage);
       msg.content = session.assistantContent || msg.content;
       if (session.reasoningContent) msg.reasoningContent = session.reasoningContent;
-      msg.tokens = estimateTokens(msg.content);
+      msg.tokens = usageOutputTokens(usage, estimateTokens(msg.content));
+      if (usage) msg.usage = usage;
       updateConversationTokenSummary();
 
       if (session.status === 'complete') {
@@ -5032,6 +5144,7 @@
   updateSidebar();
   updateSendBtn();
   updateThinkingToggleBtn();
+  updateContextToggleBtn();
   syncImageParams();
   updateImageGenerateBtn();
   importConfigFromUrl();
