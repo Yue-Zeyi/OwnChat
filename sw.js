@@ -103,45 +103,85 @@ async function startStream(data) {
     let reasoningContent = '';
     let usage = null;
     let lastPersist = 0;
+    let outputStartAt = null;
+
+    const processStreamLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data:')) return;
+      const payload = trimmed.slice(5).trim();
+      if (payload === '[DONE]') return;
+      try {
+        const json = JSON.parse(payload);
+        if (json.usage) usage = json.usage;
+        const delta = json.choices?.[0]?.delta;
+        if (delta?.reasoning_content) reasoningContent += delta.reasoning_content;
+        if (delta?.thinking) reasoningContent += delta.thinking;
+        if (delta?.content) {
+          if (!outputStartAt) outputStartAt = Date.now();
+          assistantContent += delta.content;
+        }
+      } catch { /* skip */ }
+    };
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          if (buffer.trim()) processStreamLine(buffer);
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data:')) continue;
-          const payload = trimmed.slice(5).trim();
-          if (payload === '[DONE]') continue;
-          try {
-            const json = JSON.parse(payload);
-            if (json.usage) usage = json.usage;
-            const delta = json.choices?.[0]?.delta;
-            if (delta?.reasoning_content) reasoningContent += delta.reasoning_content;
-            if (delta?.thinking) reasoningContent += delta.thinking;
-            if (delta?.content) assistantContent += delta.content;
-          } catch { /* skip */ }
-        }
+        for (const line of lines) processStreamLine(line);
 
         const now = Date.now();
         if (now - lastPersist > 300) {
           lastPersist = now;
-          await updateStreamData({ assistantContent, reasoningContent, usage, status: 'streaming', updatedAt: now });
+          await updateStreamData({ assistantContent, reasoningContent, usage, outputStartAt, status: 'streaming', updatedAt: now });
         }
       }
 
-      await updateStreamData({ assistantContent, reasoningContent, usage, status: 'complete', updatedAt: Date.now() });
+      const completedAt = Date.now();
+      await updateStreamData({
+        assistantContent,
+        reasoningContent,
+        usage,
+        outputStartAt,
+        outputEndAt: completedAt,
+        outputTimeMs: outputStartAt ? completedAt - outputStartAt : null,
+        status: 'complete',
+        updatedAt: completedAt,
+      });
     } catch (e) {
       if (e?.name === 'AbortError') {
-        await updateStreamData({ assistantContent, reasoningContent, usage, status: 'stopped', updatedAt: Date.now() });
+        const stoppedAt = Date.now();
+        await updateStreamData({
+          assistantContent,
+          reasoningContent,
+          usage,
+          outputStartAt,
+          outputEndAt: stoppedAt,
+          outputTimeMs: outputStartAt ? stoppedAt - outputStartAt : null,
+          status: 'stopped',
+          updatedAt: stoppedAt,
+        });
         return;
       }
-      await updateStreamData({ assistantContent, reasoningContent, usage, status: 'error', updatedAt: Date.now(), error: String(e.message || e) });
+      const erroredAt = Date.now();
+      await updateStreamData({
+        assistantContent,
+        reasoningContent,
+        usage,
+        outputStartAt,
+        outputEndAt: erroredAt,
+        outputTimeMs: outputStartAt ? erroredAt - outputStartAt : null,
+        status: 'error',
+        updatedAt: erroredAt,
+        error: String(e.message || e),
+      });
     }
   } catch (e) {
     if (e?.name === 'AbortError') { activeStreamAbort = null; return; }

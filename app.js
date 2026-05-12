@@ -719,14 +719,19 @@
 
   function normalizeUsage(usage) {
     if (!usage || typeof usage !== 'object') return null;
-    const input = Number(usage.prompt_tokens ?? usage.input_tokens);
-    const output = Number(usage.completion_tokens ?? usage.output_tokens);
-    const total = Number(usage.total_tokens);
+    const input = Number(usage.prompt_tokens ?? usage.input_tokens ?? usage.input);
+    const output = Number(usage.completion_tokens ?? usage.output_tokens ?? usage.output);
+    const total = Number(usage.total_tokens ?? usage.total);
     const normalized = {};
     if (Number.isFinite(input)) normalized.input = input;
     if (Number.isFinite(output)) normalized.output = output;
     if (Number.isFinite(total)) normalized.total = total;
     return Object.keys(normalized).length ? normalized : null;
+  }
+
+  function formatShortDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
   }
 
   function usageInputTokens(usage, fallback) {
@@ -1057,6 +1062,14 @@
         req.onerror = () => reject(req.error);
       });
     } catch { return null; }
+  }
+
+  async function getStableStreamSession(baseSession) {
+    if (!baseSession || !['complete', 'error', 'stopped'].includes(baseSession.status)) return baseSession;
+    await new Promise(r => setTimeout(r, 50));
+    const latest = await getStreamSession();
+    if (!latest || (latest.convId && baseSession.convId && latest.convId !== baseSession.convId)) return baseSession;
+    return Object.assign({}, baseSession, latest);
   }
 
   async function clearStreamSession() {
@@ -1735,9 +1748,7 @@
       // Build content: thinking block + main content
       let contentHtml = '';
       if (!isUser && reasoningText) {
-        const thinkingTimeStr = msg.reasoningTimeMs != null
-          ? (msg.reasoningTimeMs >= 1000 ? (msg.reasoningTimeMs / 1000).toFixed(1) + 's' : msg.reasoningTimeMs + 'ms')
-          : '';
+        const thinkingTimeStr = msg.reasoningTimeMs != null ? formatShortDuration(msg.reasoningTimeMs) : '';
         contentHtml += `
           <div class="thinking-block">
             <button class="thinking-toggle" type="button">
@@ -1775,10 +1786,11 @@
       if (isUser && msg.includeContext === false) {
         metaParts.push('<span class="msg-meta-item">未带上下文</span>');
       }
-      if (state.showThinking && !isUser && reasoningText && msg.reasoningTimeMs != null) {
-        metaParts.push(`<span class="msg-meta-item">思考 ${msg.reasoningTimeMs >= 1000 ? (msg.reasoningTimeMs / 1000).toFixed(1) + 's' : msg.reasoningTimeMs + 'ms'}</span>`);
-      } else if (!isUser && msg.firstTokenMs !== undefined) {
-        metaParts.push(`<span class="msg-meta-item">${msg.firstTokenMs >= 1000 ? (msg.firstTokenMs / 1000).toFixed(1) + 's' : msg.firstTokenMs + 'ms'}</span>`);
+      if (!isUser && msg.firstTokenMs !== undefined) {
+        metaParts.push(`<span class="msg-meta-item">首字 ${formatShortDuration(msg.firstTokenMs)}</span>`);
+      }
+      if (!isUser && msg.outputTimeMs != null) {
+        metaParts.push(`<span class="msg-meta-item">输出 ${formatShortDuration(msg.outputTimeMs)}</span>`);
       }
       const usage = normalizeUsage(msg.usage);
       if (usage && !isUser) {
@@ -2100,6 +2112,7 @@
       const streamEls = state.streamEls;
       const streamStartTime = Date.now();
       let firstTokenTime = null;
+      let outputStartTime = null;
       let reasoningStartTime = null;
       let reasoningEndTime = null;
       let lastContent = '';
@@ -2116,6 +2129,7 @@
 
         if (content && firstTokenTime === null) {
           firstTokenTime = Date.now() - streamStartTime;
+          outputStartTime = Date.now();
         }
 
         // Update thinking block
@@ -2158,25 +2172,37 @@
           clearInterval(state.chatPollTimer);
           state.chatPollTimer = null;
 
-          const estimatedOutputTokens = estimateTokens(content);
-          const outputTokens = usageOutputTokens(usage, estimatedOutputTokens);
+          const finalSession = await getStableStreamSession(session);
+          const finalContent = finalSession.assistantContent || content;
+          const finalReasoning = finalSession.reasoningContent || reasoning;
+          const finalUsage = normalizeUsage(finalSession.usage) || usage;
+          const estimatedOutputTokens = estimateTokens(finalContent);
+          const outputTokens = usageOutputTokens(finalUsage, estimatedOutputTokens);
+          const outputEndTime = Date.now();
+          const sessionOutputTimeMs = finalSession.outputTimeMs != null ? Number(finalSession.outputTimeMs) : null;
+          const localOutputTimeMs = outputStartTime ? outputEndTime - outputStartTime : null;
+          const outputTimeMs = Number.isFinite(sessionOutputTimeMs) ? sessionOutputTimeMs : localOutputTimeMs;
           let msgData;
 
-          if (session.status === 'error') {
-            const detail = session.error ? `\n\n\`\`\`text\n${session.error}\n\`\`\`` : '';
+          if (finalSession.status === 'error') {
+            const detail = finalSession.error ? `\n\n\`\`\`text\n${finalSession.error}\n\`\`\`` : '';
             msgData = { role: 'assistant', content: `**错误**: 请求失败${detail}`, tokens: 0, model: state.model };
-          } else if (session.status === 'stopped') {
-            const stoppedContent = content.trim()
-              ? `${content}\n\n_已停止生成_`
+          } else if (finalSession.status === 'stopped') {
+            const stoppedContent = finalContent.trim()
+              ? `${finalContent}\n\n_已停止生成_`
               : '**已停止生成**';
             msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: state.model };
-            if (reasoning) msgData.reasoningContent = reasoning;
-          } else {
-            msgData = { role: 'assistant', content, tokens: outputTokens, model: state.model };
-            if (usage) msgData.usage = usage;
+            if (finalUsage) msgData.usage = finalUsage;
             if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
-            if (reasoning) {
-              msgData.reasoningContent = reasoning;
+            if (finalReasoning) msgData.reasoningContent = finalReasoning;
+            if (Number.isFinite(outputTimeMs)) msgData.outputTimeMs = outputTimeMs;
+          } else {
+            msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: state.model };
+            if (finalUsage) msgData.usage = finalUsage;
+            if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
+            if (Number.isFinite(outputTimeMs)) msgData.outputTimeMs = outputTimeMs;
+            if (finalReasoning) {
+              msgData.reasoningContent = finalReasoning;
               msgData.reasoningTimeMs = reasoningEndTime ? reasoningEndTime - (reasoningStartTime || streamStartTime) : null;
             }
           }
@@ -2194,7 +2220,7 @@
             conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
           }
 
-          state.tokenStats.input += usageInputTokens(usage, requestInputTokens);
+          state.tokenStats.input += usageInputTokens(finalUsage, requestInputTokens);
           state.tokenStats.output += outputTokens;
           state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
 
@@ -2222,6 +2248,7 @@
       let apiReasoningContent = '';
       let tagReasoningContent = '';
       let firstTokenTime = null;
+      let outputStartTime = null;
       let reasoningStartTime = null;
       let reasoningEndTime = null;
       let streamUsage = null;
@@ -2264,66 +2291,73 @@
         let buffer = '';
         let lastStreamPersist = 0;
 
+        const processStreamLine = (line) => {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data:')) return;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') return;
+          try {
+            const json = JSON.parse(data);
+            const usage = normalizeUsage(json.usage);
+            if (usage) streamUsage = usage;
+            const delta = json.choices?.[0]?.delta;
+            const reasoningDelta = delta?.reasoning_content || delta?.thinking || '';
+            const contentDelta = delta?.content || '';
+
+            if (reasoningDelta) {
+              if (reasoningStartTime === null) reasoningStartTime = Date.now();
+              apiReasoningContent += reasoningDelta;
+              reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
+              updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
+            }
+
+            if (contentDelta) {
+              if (firstTokenTime === null) {
+                firstTokenTime = Date.now() - streamStartTime;
+                outputStartTime = Date.now();
+              }
+              assistantContent += contentDelta;
+              const splitContent = splitThinkTags(assistantContent);
+              tagReasoningContent = splitContent.reasoning;
+              reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
+              if (reasoningContent) {
+                if (reasoningStartTime === null) reasoningStartTime = Date.now();
+                updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
+              }
+              if (reasoningContent && !splitContent.openThink && reasoningEndTime === null) {
+                reasoningEndTime = Date.now();
+                streamEls.thinkingBlock.classList.remove('expanded');
+                const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
+                streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+              }
+              updateStream(streamEls.contentMd, splitContent.content);
+              if (conv.messages[streamMsgIdx]?.streaming) {
+                conv.messages[streamMsgIdx].content = splitContent.content;
+                conv.messages[streamMsgIdx].tokens = usageOutputTokens(streamUsage, estimateTokens(splitContent.content));
+                if (streamUsage) conv.messages[streamMsgIdx].usage = streamUsage;
+                if (reasoningContent) conv.messages[streamMsgIdx].reasoningContent = reasoningContent;
+                if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
+              }
+              updateConversationTokenSummary();
+              const now = Date.now();
+              if (now - lastStreamPersist > 2000) {
+                lastStreamPersist = now;
+                persist([KEYS.conversations]);
+              }
+            }
+          } catch { /* skip */ }
+        };
+
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            if (buffer.trim()) processStreamLine(buffer);
+            break;
+          }
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
           buffer = lines.pop() || '';
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || !trimmed.startsWith('data:')) continue;
-            const data = trimmed.slice(5).trim();
-            if (data === '[DONE]') continue;
-            try {
-              const json = JSON.parse(data);
-              const usage = normalizeUsage(json.usage);
-              if (usage) streamUsage = usage;
-              const delta = json.choices?.[0]?.delta;
-              const reasoningDelta = delta?.reasoning_content || delta?.thinking || '';
-              const contentDelta = delta?.content || '';
-
-              if (reasoningDelta) {
-                if (reasoningStartTime === null) reasoningStartTime = Date.now();
-                apiReasoningContent += reasoningDelta;
-                reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
-                updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
-              }
-
-              if (contentDelta) {
-                if (firstTokenTime === null) firstTokenTime = Date.now() - streamStartTime;
-                assistantContent += contentDelta;
-                const splitContent = splitThinkTags(assistantContent);
-                tagReasoningContent = splitContent.reasoning;
-                reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
-                if (reasoningContent) {
-                  if (reasoningStartTime === null) reasoningStartTime = Date.now();
-                  updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
-                }
-                if (reasoningContent && !splitContent.openThink && reasoningEndTime === null) {
-                  reasoningEndTime = Date.now();
-                  streamEls.thinkingBlock.classList.remove('expanded');
-                  const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
-                  streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
-                }
-                updateStream(streamEls.contentMd, splitContent.content);
-                if (conv.messages[streamMsgIdx]?.streaming) {
-                  conv.messages[streamMsgIdx].content = splitContent.content;
-                  conv.messages[streamMsgIdx].tokens = usageOutputTokens(streamUsage, estimateTokens(splitContent.content));
-                  if (streamUsage) conv.messages[streamMsgIdx].usage = streamUsage;
-                  if (reasoningContent) conv.messages[streamMsgIdx].reasoningContent = reasoningContent;
-                  if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
-                }
-                updateConversationTokenSummary();
-                // Persist partial content every 2s for non-SW crash recovery
-                const now = Date.now();
-                if (now - lastStreamPersist > 2000) {
-                  lastStreamPersist = now;
-                  persist([KEYS.conversations]);
-                }
-              }
-            } catch { /* skip */ }
-          }
+          for (const line of lines) processStreamLine(line);
         }
 
         const finalSplitContent = splitThinkTags(assistantContent);
@@ -2333,9 +2367,12 @@
         }
         const finalContent = finalSplitContent.content;
         const outputTokens = usageOutputTokens(streamUsage, estimateTokens(finalContent));
+        const outputEndTime = Date.now();
+        const outputTimeMs = outputStartTime ? outputEndTime - outputStartTime : null;
         const msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: state.model };
         if (streamUsage) msgData.usage = streamUsage;
         if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
+        if (outputTimeMs !== null) msgData.outputTimeMs = outputTimeMs;
         if (reasoningContent) {
           msgData.reasoningContent = reasoningContent;
           msgData.reasoningTimeMs = reasoningEndTime ? reasoningEndTime - (reasoningStartTime || streamStartTime) : null;
@@ -2369,6 +2406,8 @@
             ? `${assistantContent}\n\n_已停止生成_`
             : '**已停止生成**';
           const stoppedMsg = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(assistantContent), model: state.model };
+          if (firstTokenTime !== null) stoppedMsg.firstTokenMs = firstTokenTime;
+          if (outputStartTime) stoppedMsg.outputTimeMs = Date.now() - outputStartTime;
           if (reasoningContent) stoppedMsg.reasoningContent = reasoningContent;
           if (conv.messages[streamMsgIdx]?.streaming) conv.messages[streamMsgIdx] = stoppedMsg;
           else conv.messages.push(stoppedMsg);
@@ -3790,6 +3829,7 @@
         const streamEls = state.streamEls;
         const streamStartTime = Date.now();
         let firstTokenTime = null;
+        let outputStartTime = null;
         let reasoningStartTime = null;
         let reasoningEndTime = null;
         let lastContent = conv.messages[streamIdx].content || '';
@@ -3817,7 +3857,10 @@
           const content = session.assistantContent || '';
           const reasoning = session.reasoningContent || '';
 
-          if (content && firstTokenTime === null) firstTokenTime = Date.now() - streamStartTime;
+          if (content && firstTokenTime === null) {
+            firstTokenTime = Date.now() - streamStartTime;
+            outputStartTime = Date.now();
+          }
 
           if (state.showThinking && reasoning) {
             if (reasoningStartTime === null) reasoningStartTime = Date.now();
@@ -3846,6 +3889,7 @@
           if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
             clearInterval(state.chatPollTimer);
             state.chatPollTimer = null;
+            if (outputStartTime && !session.outputTimeMs) session.outputTimeMs = Date.now() - outputStartTime;
             finalizeStreamFromSession(conv, streamIdx, session);
           }
         }, 100);
@@ -3914,12 +3958,15 @@
     } else if (session.status === 'stopped') {
       const stoppedContent = content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**';
       msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: state.model };
+      if (usage) msgData.usage = usage;
       if (reasoning) msgData.reasoningContent = reasoning;
     } else {
       msgData = { role: 'assistant', content, tokens: outputTokens, model: state.model };
       if (usage) msgData.usage = usage;
       if (reasoning) { msgData.reasoningContent = reasoning; }
     }
+    const outputTimeMs = session.outputTimeMs != null ? Number(session.outputTimeMs) : null;
+    if (Number.isFinite(outputTimeMs)) msgData.outputTimeMs = outputTimeMs;
 
     if (conv.messages[streamIdx]?.streaming) conv.messages[streamIdx] = msgData;
     else conv.messages.push(msgData);
