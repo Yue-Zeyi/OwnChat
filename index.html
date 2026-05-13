@@ -51,6 +51,12 @@
           新对话
         </button>
         <input id="sidebar-search" class="sidebar-search" type="search" placeholder="搜索对话..." autocomplete="off">
+        <div id="sidebar-bulk-bar" class="sidebar-bulk-bar">
+          <button id="sidebar-bulk-toggle" class="sidebar-bulk-btn" type="button">批量删除</button>
+          <button id="sidebar-bulk-select-all" class="sidebar-bulk-btn hidden" type="button">全选</button>
+          <button id="sidebar-bulk-delete" class="sidebar-bulk-btn danger hidden" type="button" disabled>删除</button>
+          <button id="sidebar-bulk-cancel" class="sidebar-bulk-btn hidden" type="button">取消</button>
+        </div>
       </div>
       <div id="conv-list" class="sidebar-list"></div>
       <div class="sidebar-footer">
@@ -340,22 +346,13 @@
             <div class="settings-config-desc">导出或导入对话与绘画配置</div>
           </div>
           <div class="tool-chip-group">
-            <button id="cfg-export-safe" class="tool-chip" type="button" title="导出配置">
+            <button id="cfg-export-config" class="tool-chip" type="button" title="导出配置">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
                 <polyline points="7 10 12 15 17 10" />
                 <line x1="12" y1="15" x2="12" y2="3" />
               </svg>
-              导出
-            </button>
-            <button id="cfg-export-full" class="tool-chip" type="button" title="含密钥导出">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M15 7a5 5 0 1 1-4-4" />
-                <path d="M14 6l7-3-3 7" />
-                <path d="M9 15l-4 4" />
-                <path d="M5 19H2v3" />
-              </svg>
-              含密钥
+              导出配置
             </button>
             <button id="cfg-import-file" class="tool-chip" type="button" title="导入配置">
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -363,7 +360,7 @@
                 <polyline points="17 8 12 3 7 8" />
                 <line x1="12" y1="3" x2="12" y2="15" />
               </svg>
-              导入
+              导入配置
             </button>
             <input id="cfg-import-input" class="hidden" type="file" accept="application/json,.json">
           </div>
@@ -448,7 +445,7 @@
                 <select id="cfg-image-map-model-select" title="选择映射模型"></select>
               </div>
               <input type="text" id="cfg-image-map-model-manual" class="model-manual-input" placeholder="可选，如 chat:gpt-5.5 或 image:gpt-image-2" spellcheck="false">
-              <div class="field-hint">同名模型会分开显示；对话模型调用对话配置，绘画模型调用绘画配置</div>
+              <div class="field-hint">对话模型调用对话配置，绘画模型调用绘画配置</div>
             </div>
             <div class="form-group">
               <label>提示词优化模型</label>
@@ -456,17 +453,12 @@
                 <select id="cfg-image-prompt-model-select" title="选择提示词优化模型"></select>
               </div>
               <input type="text" id="cfg-image-prompt-model-manual" class="model-manual-input" placeholder="可选，如 chat:gpt-5.5 或 image:gpt-image-2" spellcheck="false">
-              <div class="field-hint">同名模型会分开显示；对话模型调用对话配置，绘画模型调用绘画配置</div>
+              <div class="field-hint">对话模型调用对话配置，绘画模型调用绘画配置</div>
             </div>
             <div class="image-history-tools">
               <div class="image-history-info">
                 <div class="image-history-title">绘画历史</div>
-                <div id="image-history-summary" class="image-history-summary">点击统计查看占用</div>
-              </div>
-              <div class="tool-chip-group">
-                <button id="image-history-stats" class="tool-chip" type="button">统计</button>
-                <button id="image-history-trim" class="tool-chip" type="button">保留 20</button>
-                <button id="image-history-clear" class="tool-chip danger-chip" type="button">清空</button>
+                <div id="image-history-summary" class="image-history-summary">正在统计绘画历史...</div>
               </div>
             </div>
           </div>

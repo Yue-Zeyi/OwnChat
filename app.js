@@ -413,6 +413,7 @@
     streamingConvId: null,
     chatAbortController: null,
     chatPollTimer: null,
+    chatWakeLock: null,
     streamEls: null,
     isGeneratingImage: false,
     imageAbortController: null,
@@ -428,6 +429,9 @@
     imageRef: null,
     pendingFiles: [],
     sidebarSearch: '',
+    sidebarBulkMode: false,
+    sidebarSelectedIds: new Set(),
+    sidebarVisibleIds: [],
     pendingImportConfig: null,
   };
 
@@ -1252,6 +1256,11 @@
     sidebarToggle: $('sidebar-toggle'),
     convList: $('conv-list'),
     newChatBtn: $('new-chat-btn'),
+    sidebarBulkBar: $('sidebar-bulk-bar'),
+    sidebarBulkToggle: $('sidebar-bulk-toggle'),
+    sidebarBulkSelectAll: $('sidebar-bulk-select-all'),
+    sidebarBulkDelete: $('sidebar-bulk-delete'),
+    sidebarBulkCancel: $('sidebar-bulk-cancel'),
     modeChatBtn: $('mode-chat-btn'),
     modeImageBtn: $('mode-image-btn'),
     settingsBtn: $('settings-btn'),
@@ -1316,13 +1325,9 @@
     imageViewerDownload: $('image-viewer-download'),
     cfgSave: $('cfg-save'),
     cfgCancel: $('cfg-cancel'),
-    cfgExportSafe: $('cfg-export-safe'),
-    cfgExportFull: $('cfg-export-full'),
+    cfgExportConfig: $('cfg-export-config'),
     cfgImportFile: $('cfg-import-file'),
     cfgImportInput: $('cfg-import-input'),
-    imageHistoryStats: $('image-history-stats'),
-    imageHistoryTrim: $('image-history-trim'),
-    imageHistoryClear: $('image-history-clear'),
     imageHistorySummary: $('image-history-summary'),
     configImportModal: $('config-import-modal'),
     configImportPreview: $('config-import-preview'),
@@ -1401,6 +1406,29 @@
     }
   }
 
+  function sidebarBulkCheckbox(id, label) {
+    if (!state.sidebarBulkMode) return '';
+    const checked = state.sidebarSelectedIds.has(id) ? ' checked' : '';
+    return `<label class="conv-item-check" title="选择${esc(label)}">
+      <input type="checkbox" data-action="bulk-check" data-id="${esc(id)}"${checked}>
+      <span></span>
+    </label>`;
+  }
+
+  function updateSidebarBulkBar() {
+    const total = state.sidebarVisibleIds.length;
+    const selected = state.sidebarVisibleIds.filter(id => state.sidebarSelectedIds.has(id)).length;
+    dom.sidebarBulkBar.classList.toggle('is-active', state.sidebarBulkMode);
+    dom.sidebarBulkToggle.classList.toggle('hidden', state.sidebarBulkMode);
+    dom.sidebarBulkSelectAll.classList.toggle('hidden', !state.sidebarBulkMode);
+    dom.sidebarBulkDelete.classList.toggle('hidden', !state.sidebarBulkMode);
+    dom.sidebarBulkCancel.classList.toggle('hidden', !state.sidebarBulkMode);
+    dom.sidebarBulkSelectAll.disabled = total === 0;
+    dom.sidebarBulkSelectAll.textContent = total > 0 && selected === total ? '取消全选' : '全选';
+    dom.sidebarBulkDelete.disabled = selected === 0;
+    dom.sidebarBulkDelete.textContent = selected ? `删除 ${selected}` : '删除';
+  }
+
   function updateSidebar() {
     if (state.mode === 'image') {
       dom.sidebarSearch.placeholder = '搜索绘画...';
@@ -1420,8 +1448,11 @@
       const imageJobs = q
         ? state.imageJobs.filter(j => `${j.title || ''} ${j.prompt || ''} ${j.model || ''}`.toLowerCase().includes(q))
         : state.imageJobs;
+      state.sidebarVisibleIds = imageJobs.map(j => j.id);
+      state.sidebarSelectedIds = new Set([...state.sidebarSelectedIds].filter(id => state.sidebarVisibleIds.includes(id)));
       dom.convList.innerHTML = imageJobs.map(j => `
-        <div class="conv-item ${j.id === state.currentImageJobId ? 'active' : ''}" data-id="${j.id}">
+        <div class="conv-item ${j.id === state.currentImageJobId ? 'active' : ''} ${state.sidebarBulkMode ? 'bulk-mode' : ''}" data-id="${j.id}">
+          ${sidebarBulkCheckbox(j.id, j.title || j.prompt || '绘画')}
           <span class="conv-item-title">${esc(j.title || j.prompt || '未命名绘画')}</span>
           <button class="conv-item-rename" type="button" title="重命名">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
@@ -1429,6 +1460,7 @@
           <button class="conv-item-delete" type="button" title="删除">&times;</button>
         </div>
       `).join('') || `<div class="sidebar-empty">没有匹配的绘画</div>`;
+      updateSidebarBulkBar();
       return;
     }
     dom.sidebarSearch.placeholder = '搜索对话...';
@@ -1446,8 +1478,11 @@
       </svg>
       新对话
     `;
+    state.sidebarVisibleIds = conversations.map(c => c.id);
+    state.sidebarSelectedIds = new Set([...state.sidebarSelectedIds].filter(id => state.sidebarVisibleIds.includes(id)));
     dom.convList.innerHTML = conversations.map(c => `
-      <div class="conv-item ${c.id === state.currentConvId ? 'active' : ''}" data-id="${c.id}">
+      <div class="conv-item ${c.id === state.currentConvId ? 'active' : ''} ${state.sidebarBulkMode ? 'bulk-mode' : ''}" data-id="${c.id}">
+        ${sidebarBulkCheckbox(c.id, c.title || '对话')}
         <span class="conv-item-title">${esc(c.title)}</span>
         <button class="conv-item-rename" type="button" title="重命名">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
@@ -1455,6 +1490,7 @@
         <button class="conv-item-delete" type="button" title="删除">&times;</button>
       </div>
     `).join('') || `<div class="sidebar-empty">没有匹配的对话</div>`;
+    updateSidebarBulkBar();
   }
 
   function updateSendBtn() {
@@ -1602,8 +1638,15 @@
     if (target && dom.modelDropdown.parentElement !== target) target.appendChild(dom.modelDropdown);
   }
 
+  function resetSidebarBulkMode() {
+    state.sidebarBulkMode = false;
+    state.sidebarSelectedIds.clear();
+    state.sidebarVisibleIds = [];
+  }
+
   function switchMode(mode) {
     pauseActivePolls();
+    if (state.mode !== mode) resetSidebarBulkMode();
     state.mode = mode;
     dom.modeChatBtn.parentElement.classList.toggle('is-image', mode === 'image');
     dom.modeChatBtn.classList.toggle('active', mode === 'chat');
@@ -1752,27 +1795,32 @@
   }
 
   // ===== Retry =====
+  function cloneMessage(msg) {
+    return JSON.parse(JSON.stringify(msg));
+  }
+
   function retryMessage(index) {
     if (state.isStreaming) return;
     const conv = currentConv();
     if (!conv) return;
     const msg = conv.messages[index];
-    let userText;
+    let userMsg;
     let includeContext = state.includeContext;
     if (msg.role === 'user') {
-      userText = typeof msg.content === 'string' ? msg.content : msg.content.find(p => p.type === 'text')?.text || '';
+      userMsg = cloneMessage(msg);
       includeContext = msg.includeContext !== false;
       conv.messages = conv.messages.slice(0, index);
     } else {
       const prev = conv.messages[index - 1];
       if (prev && prev.role === 'user') {
-        userText = prev.content;
+        userMsg = cloneMessage(prev);
         includeContext = prev.includeContext !== false;
         conv.messages = conv.messages.slice(0, index - 1);
       }
       else return;
     }
-    persist(); renderMessages(); sendMsg(userText, { includeContext });
+    userMsg.includeContext = includeContext;
+    persist(); renderMessages(); sendMsg(messageTextContent(userMsg), { includeContext, userMessage: userMsg });
   }
 
   function renderMessages() {
@@ -2082,20 +2130,25 @@
     if (!ensureModeConfigured('chat')) return;
     const conv = currentConv();
     if (!conv) return;
-    if (hasPendingFileReads()) {
+    const retryUserMsg = opts.userMessage ? cloneMessage(opts.userMessage) : null;
+    if (!retryUserMsg && hasPendingFileReads()) {
       showToast('附件还在读取中，请稍后发送');
       updateSendBtn();
       return;
     }
 
-    const inputTokens = estimateTokens(userContent);
+    const inputTokens = retryUserMsg?.tokens || estimateTokens(userContent);
     const includeContext = opts.includeContext ?? state.includeContext;
 
     // Build user message content (plain text or multimodal)
     const files = state.pendingFiles.filter(isFileReady);
-    if (!userContent.trim() && files.length === 0) return;
+    if (!retryUserMsg && !userContent.trim() && files.length === 0) return;
     let userMsgData;
-    if (files.length > 0) {
+    if (retryUserMsg) {
+      userMsgData = retryUserMsg;
+      userMsgData.includeContext = includeContext;
+      userMsgData.timestamp = Date.now();
+    } else if (files.length > 0) {
       const contentParts = [{ type: 'text', text: userContent }];
       for (const f of files) {
         if (f.base64) {
@@ -2132,12 +2185,16 @@
     const apiMessages = trimContextMessages(rawApiMessages, conv.systemPrompt?.trim() || null, conv.contextLimit);
     const requestInputTokens = apiMessagesTokenCount(apiMessages);
 
-    // Clear pending files after adding to message
-    state.pendingFiles = [];
-    renderFilePreview();
+    // Clear pending files only after a normal send. Regeneration reuses the old
+    // message attachments and should not discard the user's current draft files.
+    if (!retryUserMsg) {
+      state.pendingFiles = [];
+      renderFilePreview();
+    }
 
     state.isStreaming = true;
     state.streamingConvId = conv.id;
+    requestChatWakeLock();
     updateSendBtn();
 
     // Write stream session metadata
@@ -2303,7 +2360,9 @@
           renderMessages();
 
           state.isStreaming = false;
+          state.streamingConvId = null;
           state.chatAbortController = null;
+          releaseChatWakeLock();
           dom.userInput.focus();
           updateSendBtn();
           clearStreamSession();
@@ -2493,6 +2552,7 @@
         state.isStreaming = false;
         state.streamingConvId = null;
         state.chatAbortController = null;
+        releaseChatWakeLock();
         // Only update UI if we're still viewing this conversation
         if (currentConv()?.id === conv.id) {
           dom.userInput.focus();
@@ -2549,6 +2609,7 @@
     dom.settingsImageTab.classList.toggle('active', isImage);
     dom.settingsChatPanel.classList.toggle('hidden', isImage);
     dom.settingsImagePanel.classList.toggle('hidden', !isImage);
+    if (isImage) updateImageHistorySummary();
   }
 
   // ===== Setup Overlay =====
@@ -3044,6 +3105,26 @@
     }
   }
 
+  async function requestChatWakeLock() {
+    if (!('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+    try {
+      if (state.chatWakeLock) return;
+      state.chatWakeLock = await navigator.wakeLock.request('screen');
+      state.chatWakeLock.addEventListener('release', () => {
+        state.chatWakeLock = null;
+      });
+    } catch {
+      state.chatWakeLock = null;
+    }
+  }
+
+  async function releaseChatWakeLock() {
+    const lock = state.chatWakeLock;
+    state.chatWakeLock = null;
+    if (!lock) return;
+    try { await lock.release(); } catch { /* already released */ }
+  }
+
   async function releaseImageWakeLock() {
     const lock = state.imageWakeLock;
     state.imageWakeLock = null;
@@ -3057,6 +3138,23 @@
     } else if (!state.isGeneratingImage) {
       releaseImageWakeLock();
     }
+  }
+
+  function hasActiveChatStream() {
+    return !!state.streamingConvId || state.conversations.some(conv => conv.messages?.some(msg => msg.streaming));
+  }
+
+  function syncChatWakeLock() {
+    if ((state.isStreaming || hasActiveChatStream()) && document.visibilityState === 'visible') {
+      requestChatWakeLock();
+    } else if (!state.isStreaming && !hasActiveChatStream()) {
+      releaseChatWakeLock();
+    }
+  }
+
+  function syncWakeLocks() {
+    syncImageWakeLock();
+    syncChatWakeLock();
   }
 
   async function cancelImageGeneration(reason = '已取消生成') {
@@ -3101,46 +3199,6 @@
       return sum + imageJobReplies(job).reduce((n, reply) => n + (reply.outputs?.length || 0), 0);
     }, 0);
     dom.imageHistorySummary.textContent = `绘画历史 ${state.imageJobs.length} 条，图片 ${outputCount} 张，浏览器存储约 ${formatBytes(usage) || '未知'}`;
-  }
-
-  async function trimImageHistory(keep = 20) {
-    const sorted = state.imageJobs.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-    const keepJobs = sorted.slice(0, keep);
-    const removeJobs = sorted.slice(keep);
-    if (!removeJobs.length) {
-      showToast('无需清理');
-      updateImageHistorySummary();
-      return;
-    }
-    if (!confirm(`将删除 ${removeJobs.length} 条较早的绘画历史，确认继续？`)) return;
-    state.imageJobs = keepJobs;
-    if (state.currentImageJobId && !state.imageJobs.some(j => j.id === state.currentImageJobId)) {
-      state.currentImageJobId = state.imageJobs[0]?.id || null;
-    }
-    await Promise.allSettled(removeJobs.map(j => imageDbDeleteJob(j.id)));
-    persist();
-    updateSidebar();
-    renderImageWorkspace();
-    updateImageHistorySummary();
-    showToast('已清理绘画历史');
-  }
-
-  async function clearImageHistory() {
-    if (!state.imageJobs.length) {
-      showToast('没有绘画历史');
-      updateImageHistorySummary();
-      return;
-    }
-    if (!confirm(`确认删除全部 ${state.imageJobs.length} 条绘画历史？此操作不可恢复。`)) return;
-    const ids = state.imageJobs.map(j => j.id);
-    state.imageJobs = [];
-    state.currentImageJobId = null;
-    await Promise.allSettled(ids.map(imageDbDeleteJob));
-    persist();
-    updateSidebar();
-    renderImageWorkspace();
-    updateImageHistorySummary();
-    showToast('绘画历史已清空');
   }
 
   function renderImageWorkspace() {
@@ -3795,6 +3853,25 @@
   // Sidebar
   dom.sidebarToggle.addEventListener('click', toggleSidebar);
   dom.sidebarBackdrop.addEventListener('click', closeSidebarMobile);
+  dom.sidebarBulkToggle.addEventListener('click', () => {
+    state.sidebarBulkMode = true;
+    state.sidebarSelectedIds.clear();
+    updateSidebar();
+  });
+  dom.sidebarBulkSelectAll.addEventListener('click', () => {
+    const selected = state.sidebarVisibleIds.filter(id => state.sidebarSelectedIds.has(id)).length;
+    if (state.sidebarVisibleIds.length > 0 && selected === state.sidebarVisibleIds.length) {
+      state.sidebarVisibleIds.forEach(id => state.sidebarSelectedIds.delete(id));
+    } else {
+      state.sidebarVisibleIds.forEach(id => state.sidebarSelectedIds.add(id));
+    }
+    updateSidebar();
+  });
+  dom.sidebarBulkDelete.addEventListener('click', deleteSelectedSidebarItems);
+  dom.sidebarBulkCancel.addEventListener('click', () => {
+    resetSidebarBulkMode();
+    updateSidebar();
+  });
   let searchTimer;
   dom.sidebarSearch.addEventListener('input', () => {
     clearTimeout(searchTimer);
@@ -3930,13 +4007,20 @@
   // Restart UI poll when switching back to a conversation that's actively streaming
   function resumeStreamPollIfNeeded() {
     const conv = currentConv();
-    if (!conv) { state.isStreaming = false; updateInputState(); return; }
+    if (!conv) {
+      state.isStreaming = false;
+      state.streamingConvId = null;
+      releaseChatWakeLock();
+      updateInputState();
+      return;
+    }
 
     const streamIdx = conv.messages.findIndex(m => m.streaming);
     if (streamIdx < 0) {
       // Current conversation is not streaming
       state.isStreaming = false;
       state.streamingConvId = null;
+      syncChatWakeLock();
       updateInputState();
       renderMessages();
       return;
@@ -3960,6 +4044,7 @@
         // Session matches this conversation
         state.isStreaming = true;
         state.streamingConvId = conv.id;
+        requestChatWakeLock();
         updateSendBtn();
 
         if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
@@ -4046,6 +4131,7 @@
       // Replace the stale streamEls reference so the fallback flow updates the new DOM elements.
       state.isStreaming = true;
       state.streamingConvId = conv.id;
+      requestChatWakeLock();
       updateSendBtn();
       removeTyping();
       $('stream-el')?.remove();
@@ -4075,6 +4161,7 @@
           state.chatPollTimer = null;
           state.isStreaming = false;
           state.streamingConvId = null;
+          releaseChatWakeLock();
           $('stream-el')?.remove();
           renderMessages();
           dom.userInput.focus();
@@ -4130,6 +4217,7 @@
     state.isStreaming = false;
     state.streamingConvId = null;
     state.chatAbortController = null;
+    releaseChatWakeLock();
 
     persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
     updateModelBadge();
@@ -4159,6 +4247,7 @@
     state.isStreaming = false;
     state.streamingConvId = null;
     state.chatAbortController = null;
+    releaseChatWakeLock();
 
     persist([KEYS.conversations, KEYS.currentConvId]);
     updateSidebar();
@@ -4191,7 +4280,52 @@
     });
   }
 
+  async function deleteSelectedSidebarItems() {
+    const ids = state.sidebarVisibleIds.filter(id => state.sidebarSelectedIds.has(id));
+    if (!ids.length) return;
+    const typeLabel = state.mode === 'image' ? '绘画记录' : '对话';
+    if (!confirm(`确认删除选中的 ${ids.length} 条${typeLabel}？此操作不可恢复。`)) return;
+    const idSet = new Set(ids);
+    if (state.mode === 'image') {
+      state.imageJobs = state.imageJobs.filter(j => !idSet.has(j.id));
+      if (state.currentImageJobId && idSet.has(state.currentImageJobId)) {
+        state.currentImageJobId = state.imageJobs[0]?.id || null;
+      }
+      resetSidebarBulkMode();
+      persist();
+      await Promise.all(ids.map(id => imageDbDeleteJob(id)));
+      updateSidebar();
+      renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
+      return;
+    }
+
+    state.conversations = state.conversations.filter(c => !idSet.has(c.id));
+    if (state.currentConvId && idSet.has(state.currentConvId)) {
+      state.currentConvId = state.conversations[0]?.id || null;
+    }
+    resetSidebarBulkMode();
+    persist();
+    updateSidebar();
+    syncConvParams();
+    renderMessages();
+  }
+
   function handleSidebarItemActivate(e) {
+    const bulkCheck = e.target.closest('[data-action="bulk-check"]');
+    if (bulkCheck) {
+      return;
+    }
+    if (state.sidebarBulkMode && e.target.closest('.conv-item-check')) return;
+    if (state.sidebarBulkMode && e.target.closest('.conv-item')) {
+      const item = e.target.closest('.conv-item');
+      const id = item.dataset.id;
+      if (state.sidebarSelectedIds.has(id)) state.sidebarSelectedIds.delete(id);
+      else state.sidebarSelectedIds.add(id);
+      updateSidebar();
+      return;
+    }
+
     if (state.mode === 'image') {
       const renameBtn = e.target.closest('.conv-item-rename');
       if (renameBtn) {
@@ -4215,7 +4349,7 @@
         const item = delBtn.closest('.conv-item');
         const id = item.dataset.id;
         state.imageJobs = state.imageJobs.filter(j => j.id !== id);
-        if (state.currentImageJobId === id) state.currentImageJobId = null;
+        if (state.currentImageJobId === id) state.currentImageJobId = state.imageJobs[0]?.id || null;
         persist();
         imageDbDeleteJob(id);
         updateSidebar();
@@ -4290,7 +4424,7 @@
 
   dom.convList.addEventListener('touchend', (e) => {
     const item = e.target.closest('.conv-item');
-    if (!item || e.target.closest('.conv-item-rename, .conv-item-delete, .conv-rename-input')) return;
+    if (!item || e.target.closest('.conv-item-rename, .conv-item-delete, .conv-rename-input, .conv-item-check')) return;
     const touch = e.changedTouches?.[0];
     if (touch && sidebarTouchStart) {
       const dx = Math.abs(touch.clientX - sidebarTouchStart.x);
@@ -4301,6 +4435,15 @@
     e.preventDefault();
     handleSidebarItemActivate(e);
   }, { passive: false });
+
+  dom.convList.addEventListener('change', (e) => {
+    const bulkCheck = e.target.closest('[data-action="bulk-check"]');
+    if (!bulkCheck) return;
+    const id = bulkCheck.dataset.id;
+    if (bulkCheck.checked) state.sidebarSelectedIds.add(id);
+    else state.sidebarSelectedIds.delete(id);
+    updateSidebarBulkBar();
+  });
 
   dom.convList.addEventListener('click', handleSidebarItemActivate);
 
@@ -4359,12 +4502,8 @@
     dom.cfgImagePromptModelSelect.value = parsePromptModelRef(state.imagePromptModel).value;
   });
 
-  dom.cfgExportSafe.addEventListener('click', () => {
-    downloadJson(`ownchat-config-${Date.now()}.json`, appConfigSnapshot(false));
-  });
-  dom.cfgExportFull.addEventListener('click', () => {
-    if (!confirm('含密钥导出会把 API Key 写入 JSON 文件。确认继续？')) return;
-    downloadJson(`ownchat-config-with-keys-${Date.now()}.json`, appConfigSnapshot(true));
+  dom.cfgExportConfig.addEventListener('click', () => {
+    downloadJson(`ownchat-config-${Date.now()}.json`, appConfigSnapshot(true));
   });
   dom.cfgImportFile.addEventListener('click', () => dom.cfgImportInput.click());
   dom.cfgImportInput.addEventListener('change', () => {
@@ -4381,10 +4520,6 @@
     reader.readAsText(file);
     dom.cfgImportInput.value = '';
   });
-
-  dom.imageHistoryStats.addEventListener('click', updateImageHistorySummary);
-  dom.imageHistoryTrim.addEventListener('click', () => trimImageHistory(20));
-  dom.imageHistoryClear.addEventListener('click', clearImageHistory);
 
   dom.configImportClose.addEventListener('click', hideConfigImportConfirm);
   dom.configImportCancel.addEventListener('click', hideConfigImportConfirm);
@@ -4875,7 +5010,7 @@
       e.returnValue = hasStreamingConv ? '回复正在生成，刷新页面可通过 Service Worker 继续接收。' : '图片正在生成，刷新或关闭页面会中断当前请求。';
     }
   });
-  document.addEventListener('visibilitychange', syncImageWakeLock);
+  document.addEventListener('visibilitychange', syncWakeLocks);
 
   // Send
   dom.sendBtn.addEventListener('click', () => {
@@ -4902,6 +5037,7 @@
         state.isStreaming = false;
         state.streamingConvId = null;
         state.chatAbortController = null;
+        releaseChatWakeLock();
       }
       if (state.isStreaming) return; // was streaming current conv — just stop it, user needs to click again to send
       // If we aborted a background stream, allow sending in current conv
@@ -4979,6 +5115,7 @@
     if (session.status === 'streaming' || session.status === 'connecting') {
       state.isStreaming = true;
       state.streamingConvId = conv.id;
+      requestChatWakeLock();
       const usage = normalizeUsage(session.usage);
       const msgData = {
         role: 'assistant',
@@ -5090,6 +5227,7 @@
         streamRecoveryTimer = null;
         state.isStreaming = false;
         state.streamingConvId = null;
+        releaseChatWakeLock();
         $('recovery-el')?.remove();
         renderMessages();
         return;
@@ -5101,6 +5239,7 @@
         streamRecoveryTimer = null;
         state.isStreaming = false;
         state.streamingConvId = null;
+        releaseChatWakeLock();
         $('recovery-el')?.remove();
         renderMessages();
         return;
@@ -5123,6 +5262,7 @@
         streamRecoveryTimer = null;
         state.isStreaming = false;
         state.streamingConvId = null;
+        releaseChatWakeLock();
         $('recovery-el')?.remove();
         renderMessages();
         showToast('回复已恢复完成');
@@ -5140,6 +5280,7 @@
         streamRecoveryTimer = null;
         state.isStreaming = false;
         state.streamingConvId = null;
+        releaseChatWakeLock();
         $('recovery-el')?.remove();
         renderMessages();
         return;
@@ -5161,6 +5302,7 @@
         streamRecoveryTimer = null;
         state.isStreaming = false;
         state.streamingConvId = null;
+        releaseChatWakeLock();
         $('recovery-el')?.remove();
         renderMessages();
         return;
