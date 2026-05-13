@@ -1770,6 +1770,7 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   height: 48px;
   object-fit: cover;
   border-radius: var(--radius-xs);
+  cursor: zoom-in;
 }
 
 .file-icon {
@@ -2137,6 +2138,14 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   border-radius: var(--radius-sm);
   cursor: pointer;
   object-fit: contain;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  transition: opacity var(--transition), border-color var(--transition);
+}
+
+.msg-img:hover {
+  opacity: 0.92;
+  border-color: var(--accent);
 }
 
 .btn-refresh {

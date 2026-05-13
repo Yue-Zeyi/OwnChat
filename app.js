@@ -418,6 +418,7 @@
     imageAbortController: null,
     imageProgressTimer: null,
     imagePollTimer: null,
+    imageWakeLock: null,
     isImageHistoryLoading: false,
     isOptimizingImagePrompt: false,
     viewerImage: null,
@@ -1770,7 +1771,12 @@
           contentHtml += esc(textPart).replace(/\n/g, '<br>');
           const imgParts = msg.content.filter(p => p.type === 'image_url');
           if (imgParts.length) {
-            contentHtml += `<div class="msg-images">${imgParts.map(p => `<img src="${p.image_url.url}" class="msg-img" loading="lazy">`).join('')}</div>`;
+            const fileMeta = Array.isArray(msg.files) ? msg.files.filter(f => f.base64 || f.fileId) : [];
+            contentHtml += `<div class="msg-images">${imgParts.map((p, imgIdx) => {
+              const file = fileMeta[imgIdx] || {};
+              const name = file.name || `attachment-${imgIdx + 1}`;
+              return `<img src="${p.image_url.url}" class="msg-img" loading="lazy" data-action="view-attachment-image" data-name="${esc(name)}" alt="${esc(name)}">`;
+            }).join('')}</div>`;
           }
         }
       } else {
@@ -2730,6 +2736,32 @@
     }
   }
 
+  function attachmentImageFilename(item) {
+    const fallback = `attachment.${item.format || 'png'}`;
+    return (item.name || fallback).replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80) || fallback;
+  }
+
+  function downloadAttachmentImage(item) {
+    const a = document.createElement('a');
+    a.href = item.src;
+    a.download = attachmentImageFilename(item);
+    a.click();
+  }
+
+  async function copyAttachmentImage(item) {
+    if (!navigator.clipboard || !window.ClipboardItem) {
+      showToast('当前浏览器不支持直接复制图片');
+      return;
+    }
+    try {
+      const blob = await (await fetch(item.src)).blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || 'image/png']: blob })]);
+      showToast('图片已复制');
+    } catch {
+      showToast('复制图片失败，可先下载');
+    }
+  }
+
   function openImageViewer(job, out, replyIndex = 0) {
     const reply = imageJobReplies(job)[replyIndex];
     state.viewerImage = out.inputRef
@@ -2737,6 +2769,13 @@
       : { jobId: job.id, replyIndex, index: reply?.outputs?.indexOf(out) ?? 0 };
     resetImageViewerTransform();
     dom.imageViewerImg.src = dataUrlForImage(out, (reply?.params || job.params)?.outputFormat);
+    dom.imageViewer.classList.remove('hidden');
+  }
+
+  function openAttachmentImageViewer(src, name = 'attachment') {
+    state.viewerImage = { attachment: true, src, name };
+    resetImageViewerTransform();
+    dom.imageViewerImg.src = src;
     dom.imageViewer.classList.remove('hidden');
   }
 
@@ -2749,6 +2788,17 @@
 
   function currentViewerImage() {
     if (!state.viewerImage) return null;
+    if (state.viewerImage.attachment) {
+      const src = state.viewerImage.src;
+      const mime = src.match(/^data:([^;]+)/)?.[1] || 'image/png';
+      const format = normalizeImageFormat(mime) || 'png';
+      return {
+        attachment: true,
+        src,
+        name: state.viewerImage.name || `attachment.${format}`,
+        format,
+      };
+    }
     const job = state.imageJobs.find(j => j.id === state.viewerImage.jobId);
     if (state.viewerImage.inputRef) {
       const inputImage = state.viewerImage.inputImage || job?.inputImage;
@@ -2917,6 +2967,34 @@
     state.imageProgressTimer = null;
   }
 
+  async function requestImageWakeLock() {
+    if (!('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+    try {
+      if (state.imageWakeLock) return;
+      state.imageWakeLock = await navigator.wakeLock.request('screen');
+      state.imageWakeLock.addEventListener('release', () => {
+        state.imageWakeLock = null;
+      });
+    } catch {
+      state.imageWakeLock = null;
+    }
+  }
+
+  async function releaseImageWakeLock() {
+    const lock = state.imageWakeLock;
+    state.imageWakeLock = null;
+    if (!lock) return;
+    try { await lock.release(); } catch { /* already released */ }
+  }
+
+  function syncImageWakeLock() {
+    if (state.isGeneratingImage && document.visibilityState === 'visible') {
+      requestImageWakeLock();
+    } else if (!state.isGeneratingImage) {
+      releaseImageWakeLock();
+    }
+  }
+
   async function cancelImageGeneration(reason = '已取消生成') {
     const job = state.imageJobs.find(j => j.status === 'generating');
     if (!job) return;
@@ -2936,6 +3014,7 @@
     }
     state.isGeneratingImage = false;
     state.imageAbortController = null;
+    releaseImageWakeLock();
     stopImageProgressTimer();
     persist();
     imageDbPutJob(job);
@@ -3419,6 +3498,7 @@
     state.isGeneratingImage = true;
     const controller = new AbortController();
     state.imageAbortController = controller;
+    requestImageWakeLock();
     updateImageGenerateBtn();
     const startedAt = Date.now();
     const refSource = refOverride !== undefined ? refOverride : state.imageRef;
@@ -3493,6 +3573,7 @@
     function finishImageJob() {
       state.isGeneratingImage = false;
       state.imageAbortController = null;
+      releaseImageWakeLock();
       stopImageProgressTimer();
       if (state.imagePollTimer) {
         clearInterval(state.imagePollTimer);
@@ -4372,6 +4453,12 @@
 
   // Message action buttons & thinking toggle
   dom.messages.addEventListener('click', (e) => {
+    const attachmentImage = e.target.closest('.msg-img[data-action="view-attachment-image"]');
+    if (attachmentImage) {
+      openAttachmentImageViewer(attachmentImage.src, attachmentImage.dataset.name || attachmentImage.alt || 'attachment');
+      return;
+    }
+
     const thinkingToggle = e.target.closest('.thinking-toggle');
     if (thinkingToggle) {
       closeCopyMenus();
@@ -4468,13 +4555,19 @@
     dom.filePreview.classList.remove('hidden');
     dom.filePreview.innerHTML = state.pendingFiles.map((f, i) => {
       const inner = f.base64
-        ? `<img src="${f.base64}" class="file-thumb">`
+        ? `<img src="${f.base64}" class="file-thumb" data-action="preview-attachment-image" data-index="${i}" alt="${esc(f.name)}">`
         : `<div class="file-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>`;
       return `<div class="file-preview-item" data-index="${i}">${inner}<span class="file-name">${esc(f.name)}</span><button class="file-remove" data-index="${i}" type="button">&times;</button></div>`;
     }).join('');
   }
 
   dom.filePreview.addEventListener('click', (e) => {
+    const img = e.target.closest('[data-action="preview-attachment-image"]');
+    if (img) {
+      const file = state.pendingFiles[parseInt(img.dataset.index, 10)];
+      if (file?.base64) openAttachmentImageViewer(file.base64, file.name);
+      return;
+    }
     const btn = e.target.closest('.file-remove');
     if (!btn) return;
     const idx = parseInt(btn.dataset.index);
@@ -4667,11 +4760,15 @@
   dom.imageViewerImg.addEventListener('touchcancel', endImageViewerTouch);
   dom.imageViewerCopy.addEventListener('click', () => {
     const current = currentViewerImage();
-    if (current) copyImage(current.job, current.out);
+    if (!current) return;
+    if (current.attachment) copyAttachmentImage(current);
+    else copyImage(current.job, current.out);
   });
   dom.imageViewerDownload.addEventListener('click', () => {
     const current = currentViewerImage();
-    if (current) downloadImage(current.job, current.out);
+    if (!current) return;
+    if (current.attachment) downloadAttachmentImage(current);
+    else downloadImage(current.job, current.out);
   });
 
   window.addEventListener('beforeunload', (e) => {
@@ -4691,6 +4788,7 @@
       e.returnValue = hasStreamingConv ? '回复正在生成，刷新页面可通过 Service Worker 继续接收。' : '图片正在生成，刷新或关闭页面会中断当前请求。';
     }
   });
+  document.addEventListener('visibilitychange', syncImageWakeLock);
 
   // Send
   dom.sendBtn.addEventListener('click', () => {
@@ -5120,6 +5218,7 @@
       if (activeReply) activeReply.status = 'generating';
       state.isGeneratingImage = true;
       state.currentImageJobId = job.id;
+      requestImageWakeLock();
       startImageProgressTimer();
       persist();
       imageDbPutJob(job);
@@ -5133,6 +5232,7 @@
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
           state.isGeneratingImage = false;
+          releaseImageWakeLock();
           stopImageProgressTimer();
           updateImageGenerateBtn();
           return;
@@ -5142,6 +5242,7 @@
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
           state.isGeneratingImage = false;
+          releaseImageWakeLock();
           stopImageProgressTimer();
           applyRecoveredImageSession(job, s);
           persist(); imageDbPutJob(job);
@@ -5152,6 +5253,7 @@
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
           state.isGeneratingImage = false;
+          releaseImageWakeLock();
           stopImageProgressTimer();
           applyRecoveredImageSession(job, s);
           persist(); imageDbPutJob(job);
@@ -5162,6 +5264,7 @@
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
           state.isGeneratingImage = false;
+          releaseImageWakeLock();
           stopImageProgressTimer();
           applyRecoveredImageSession(job, Object.assign({}, s, { status: 'timeout' }));
           persist(); imageDbPutJob(job);
