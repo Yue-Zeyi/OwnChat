@@ -444,7 +444,31 @@
       const stateName = Object.keys(KEYS).find(n => KEYS[n] === k);
       if (stateName) save(k, state[stateName]);
     }
-    for (const f of fileMap) fileDbPut(f);
+    return saveFileMap(fileMap);
+  }
+
+  async function persistDurable(keys) {
+    if (!keys) keys = Object.values(KEYS);
+    let strippedConversations = null;
+    let fileResult = { total: 0, failed: 0 };
+    if (keys.includes(KEYS.conversations)) {
+      const { stripped, fileMap } = stripFilesFromConversations(state.conversations);
+      strippedConversations = stripped;
+      fileResult = await saveFileMap(fileMap);
+    }
+    if (strippedConversations) save(KEYS.conversations, strippedConversations);
+    for (const k of keys) {
+      if (k === KEYS.conversations) continue;
+      const stateName = Object.keys(KEYS).find(n => KEYS[n] === k);
+      if (stateName) save(k, state[stateName]);
+    }
+    return fileResult;
+  }
+
+  async function saveFileMap(fileMap) {
+    if (!fileMap.length) return { total: 0, failed: 0 };
+    const results = await Promise.all(fileMap.map(fileDbPut));
+    return { total: results.length, failed: results.filter(ok => !ok).length };
   }
 
   function cleanConfigUrl() {
@@ -966,8 +990,10 @@
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
       });
+      return true;
     } catch (e) {
       console.warn('File attachment save failed:', e);
+      return false;
     }
   }
 
@@ -1017,6 +1043,14 @@
 
   function generateFileId(convId, msgIndex, partIndex) {
     return `${convId}_${msgIndex}_${partIndex}`;
+  }
+
+  function isFileReady(file) {
+    return !!(file && !file.loading && (file.base64 || typeof file.text === 'string'));
+  }
+
+  function hasPendingFileReads() {
+    return state.pendingFiles.some(f => f.loading || !isFileReady(f));
   }
 
   // ===== Stream Session IndexedDB (shared with Service Worker) =====
@@ -1137,34 +1171,46 @@
   // Strip base64 from messages for localStorage, store in IndexedDB instead
   function stripFilesFromConversations(conversations) {
     const fileMap = [];
+    const queuedFileIds = new Set();
+    const queueFile = fileData => {
+      if (!fileData?.id || queuedFileIds.has(fileData.id)) return;
+      queuedFileIds.add(fileData.id);
+      fileMap.push(fileData);
+    };
     const stripped = conversations.map(conv => {
       const strippedConv = Object.assign({}, conv);
       strippedConv.messages = conv.messages.map((msg, msgIdx) => {
+        const imageFileIds = [];
+        let changed = false;
+        const strippedMsg = Object.assign({}, msg);
         if (msg.files && msg.files.length) {
-          const strippedMsg = Object.assign({}, msg);
           strippedMsg.files = msg.files.map((f, fIdx) => {
-            const fileId = generateFileId(conv.id, msgIdx, fIdx);
+            const fileId = f.fileId || generateFileId(conv.id, msgIdx, fIdx);
             if (f.base64) {
-              fileMap.push({ id: fileId, base64: f.base64, name: f.name, type: f.type });
+              queueFile({ id: fileId, base64: f.base64, name: f.name, type: f.type });
+              imageFileIds.push(fileId);
+              changed = true;
               return { name: f.name, type: f.type, fileId: fileId };
             }
+            if (f.fileId) imageFileIds.push(f.fileId);
             return f;
           });
-          return strippedMsg;
         }
         if (Array.isArray(msg.content)) {
-          const strippedMsg = Object.assign({}, msg);
+          let imageIdx = 0;
           strippedMsg.content = msg.content.map((part, partIdx) => {
             if (part.type === 'image_url' && part.image_url?.url?.startsWith('data:')) {
-              const fileId = generateFileId(conv.id, msgIdx, partIdx);
-              fileMap.push({ id: fileId, base64: part.image_url.url, name: '', type: 'image_url' });
+              const fileId = part.image_url.fileId || imageFileIds[imageIdx] || generateFileId(conv.id, msgIdx, partIdx);
+              imageIdx += 1;
+              queueFile({ id: fileId, base64: part.image_url.url, name: '', type: 'image_url' });
+              changed = true;
               return Object.assign({}, part, { image_url: { url: fileId, fileId: fileId } });
             }
+            if (part.type === 'image_url' && part.image_url?.fileId) imageIdx += 1;
             return part;
           });
-          return strippedMsg;
         }
-        return msg;
+        return changed ? strippedMsg : msg;
       });
       return strippedConv;
     });
@@ -1412,11 +1458,15 @@
   }
 
   function updateSendBtn() {
-    dom.sendBtn.disabled = !state.isStreaming && !dom.userInput.value.trim();
+    const hasText = !!dom.userInput.value.trim();
+    const hasReadyFiles = state.pendingFiles.some(isFileReady);
+    const hasLoadingFiles = hasPendingFileReads();
+    dom.sendBtn.disabled = !state.isStreaming && (!configured() || hasLoadingFiles || (!hasText && !hasReadyFiles));
     dom.sendBtn.classList.toggle('is-stopping', state.isStreaming);
-    dom.sendBtn.title = state.isStreaming ? '停止生成' : '发送';
+    const label = state.isStreaming ? '停止生成' : (hasLoadingFiles ? '附件读取中' : '发送');
+    dom.sendBtn.title = label;
     dom.sendBtn.setAttribute('aria-label', state.isStreaming ? '停止生成' : '发送');
-    dom.sendBtn.dataset.tooltip = state.isStreaming ? '停止生成' : '发送';
+    dom.sendBtn.dataset.tooltip = label;
   }
 
   function updateThinkingToggleBtn() {
@@ -2032,12 +2082,18 @@
     if (!ensureModeConfigured('chat')) return;
     const conv = currentConv();
     if (!conv) return;
+    if (hasPendingFileReads()) {
+      showToast('附件还在读取中，请稍后发送');
+      updateSendBtn();
+      return;
+    }
 
     const inputTokens = estimateTokens(userContent);
     const includeContext = opts.includeContext ?? state.includeContext;
 
     // Build user message content (plain text or multimodal)
-    const files = state.pendingFiles;
+    const files = state.pendingFiles.filter(isFileReady);
+    if (!userContent.trim() && files.length === 0) return;
     let userMsgData;
     if (files.length > 0) {
       const contentParts = [{ type: 'text', text: userContent }];
@@ -2058,6 +2114,14 @@
     }
 
     renderMessages();
+    const userMessageSaved = await persistDurable([KEYS.conversations, KEYS.currentConvId]);
+    if (userMessageSaved.failed) {
+      conv.messages.pop();
+      renderMessages();
+      showToast('附件保存失败，未发送');
+      updateSendBtn();
+      return;
+    }
 
     // Build API messages with context window trimming
     const sourceMessages = includeContext ? conv.messages : [userMsgData];
@@ -4524,21 +4588,40 @@
   dom.fileInput.addEventListener('change', () => {
     for (const file of dom.fileInput.files) {
       if (state.pendingFiles.find(f => f.name === file.name && f.size === file.size)) continue;
-      const entry = { name: file.name, size: file.size, type: file.type };
+      const entry = { name: file.name, size: file.size, type: file.type, loading: true };
+      state.pendingFiles.push(entry);
+      renderFilePreview();
+      updateSendBtn();
       if (file.type.startsWith('image/')) {
         const reader = new FileReader();
         reader.onload = (ev) => {
           entry.base64 = ev.target.result;
-          state.pendingFiles.push(entry);
+          entry.loading = false;
+          delete entry.error;
           renderFilePreview();
+          updateSendBtn();
+        };
+        reader.onerror = () => {
+          entry.loading = false;
+          entry.error = true;
+          renderFilePreview();
+          updateSendBtn();
         };
         reader.readAsDataURL(file);
       } else {
         const reader = new FileReader();
         reader.onload = (ev) => {
           entry.text = ev.target.result;
-          state.pendingFiles.push(entry);
+          entry.loading = false;
+          delete entry.error;
           renderFilePreview();
+          updateSendBtn();
+        };
+        reader.onerror = () => {
+          entry.loading = false;
+          entry.error = true;
+          renderFilePreview();
+          updateSendBtn();
         };
         reader.readAsText(file);
       }
@@ -4554,10 +4637,13 @@
     }
     dom.filePreview.classList.remove('hidden');
     dom.filePreview.innerHTML = state.pendingFiles.map((f, i) => {
-      const inner = f.base64
+      const inner = f.loading
+        ? `<div class="file-icon file-loading"><span></span></div>`
+        : f.base64
         ? `<img src="${f.base64}" class="file-thumb" data-action="preview-attachment-image" data-index="${i}" alt="${esc(f.name)}">`
         : `<div class="file-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>`;
-      return `<div class="file-preview-item" data-index="${i}">${inner}<span class="file-name">${esc(f.name)}</span><button class="file-remove" data-index="${i}" type="button">&times;</button></div>`;
+      const status = f.error ? '<span class="file-status">失败</span>' : (f.loading ? '<span class="file-status">读取中</span>' : '');
+      return `<div class="file-preview-item ${f.loading ? 'is-loading' : ''} ${f.error ? 'is-error' : ''}" data-index="${i}">${inner}<span class="file-name">${esc(f.name)}</span>${status}<button class="file-remove" data-index="${i}" type="button">&times;</button></div>`;
     }).join('');
   }
 
@@ -4573,6 +4659,7 @@
     const idx = parseInt(btn.dataset.index);
     state.pendingFiles.splice(idx, 1);
     renderFilePreview();
+    updateSendBtn();
   });
 
   dom.imagePrompt.addEventListener('input', updateImageGenerateBtn);
@@ -4821,7 +4908,12 @@
     }
     const text = dom.userInput.value.trim();
     if (!ensureModeConfigured('chat')) return;
-    if (!text) return;
+    if (hasPendingFileReads()) {
+      showToast('附件还在读取中，请稍后发送');
+      updateSendBtn();
+      return;
+    }
+    if (!text && !state.pendingFiles.some(isFileReady)) return;
     if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); }
     dom.userInput.value = '';
     autoResize();

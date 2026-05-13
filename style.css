@@ -1782,6 +1782,19 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   color: var(--text-3);
 }
 
+.file-loading span {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: toolbar-spin 0.8s linear infinite;
+}
+
+.file-preview-item.is-error {
+  border-color: var(--danger);
+}
+
 .file-name {
   font-size: 11px;
   color: var(--text-2);
@@ -1789,6 +1802,16 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
+}
+
+.file-status {
+  font-size: 10px;
+  color: var(--text-3);
+  line-height: 1;
+}
+
+.file-preview-item.is-error .file-status {
+  color: var(--danger);
 }
 
 .file-remove {
