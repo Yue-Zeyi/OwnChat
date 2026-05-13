@@ -507,7 +507,7 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   color: var(--text-3);
   font-size: 11px;
   line-height: 1.4;
-  white-space: nowrap;
+  text-align: center;
 }
 
 .conv-token-summary-inner::before,
@@ -524,6 +524,7 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--bg-input);
+  min-width: 0;
 }
 
 .conv-token-summary-inner .conv-token-warn {
@@ -2325,13 +2326,7 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   .conv-token-summary-inner {
     justify-content: center;
     gap: 5px;
-    overflow-x: auto;
-    scrollbar-width: none;
     font-size: 10px;
-  }
-
-  .conv-token-summary-inner::-webkit-scrollbar {
-    display: none;
   }
 
   .conv-token-summary-inner span {

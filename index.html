@@ -169,7 +169,7 @@
                   <path d="M8.5 14.5A6 6 0 1 1 15.5 14.5c-.9.7-1.5 1.7-1.5 2.5h-4c0-.8-.6-1.8-1.5-2.5z" />
                 </svg>
               </button>
-              <button id="context-toggle-btn" class="toolbar-btn active" type="button" title="携带上下文" data-tooltip="携带上下文">
+              <button id="context-toggle-btn" class="toolbar-btn active" type="button" title="携带上文" data-tooltip="携带上文">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
                   <path d="M8 10h8" />
@@ -229,9 +229,9 @@
               <span class="param-hint">单位 K tokens，限制单次回答长度</span>
             </div>
             <div class="conv-settings-row">
-              <label>上下文上限</label>
-              <input type="number" id="param-context-limit" min="0" max="512" step="1" value="128" title="上下文上限">
-              <span class="param-hint">单位 K tokens，超出时裁剪，0=不裁剪</span>
+              <label>携带上文上限</label>
+              <input type="number" id="param-context-limit" min="0" max="512" step="1" value="128" title="携带上文上限">
+              <span class="param-hint">单位 K tokens，限制本次请求携带的历史消息，0=不裁剪</span>
             </div>
           </div>
         </div>

@@ -1427,7 +1427,7 @@
 
   function updateContextToggleBtn() {
     dom.contextToggleBtn.classList.toggle('active', state.includeContext);
-    const label = state.includeContext ? '携带上下文' : '不带上下文';
+    const label = state.includeContext ? '携带上文' : '不带上文';
     dom.contextToggleBtn.title = label;
     dom.contextToggleBtn.setAttribute('aria-label', label);
     dom.contextToggleBtn.dataset.tooltip = label;
@@ -1483,25 +1483,26 @@
       return;
     }
     const contextLimit = Number.isFinite(Number(conv?.contextLimit)) ? Number(conv.contextLimit) : DEFAULT_CONTEXT_LIMIT;
-    let remainingHtml = '';
+    let summaryText = '';
+    let summaryClass = '';
+    let summaryTitle = '这是携带上文裁剪额度，不代表模型可输出长度';
+    const usedText = formatTokenCount(totals.total);
     if (contextLimit === 0) {
-      remainingHtml = '<span class="conv-token-unlimited">剩余 不限制</span>';
+      summaryClass = 'conv-token-unlimited';
+      summaryText = `上文已用 ${usedText}，当前不裁剪`;
+      summaryTitle = '携带上文不裁剪，不代表模型可输出无限长度';
     } else {
       const remaining = contextLimit - totals.total;
       const ratio = contextLimit > 0 ? remaining / contextLimit : 1;
-      const cls = remaining < 0 ? 'conv-token-over' : ratio <= 0.1 ? 'conv-token-warn' : '';
-      const label = remaining < 0
-        ? `超出 ${formatTokenCount(Math.abs(remaining))}`
-        : `剩余 ${formatTokenCount(remaining)}`;
-      remainingHtml = `<span class="${cls}">${label}</span>`;
+      summaryClass = remaining < 0 ? 'conv-token-over' : ratio <= 0.1 ? 'conv-token-warn' : '';
+      summaryText = remaining < 0
+        ? `上文已用 ${usedText}，已超出 ${formatTokenCount(Math.abs(remaining))}，本轮会裁剪`
+        : `上文已用 ${usedText}，再增加 ${formatTokenCount(remaining)} 会裁剪`;
     }
     dom.convTokenSummary.classList.remove('hidden');
     dom.convTokenSummary.innerHTML = `
       <div class="conv-token-summary-inner">
-        <span>输入 ${formatTokenCount(totals.input)}</span>
-        <span>输出 ${formatTokenCount(totals.output)}</span>
-        <span>总计 ${formatTokenCount(totals.total)}</span>
-        ${remainingHtml}
+        <span class="${summaryClass}" title="${summaryTitle}">${summaryText}</span>
       </div>
     `;
   }
@@ -1784,7 +1785,7 @@
         metaParts.push(`<span class="msg-meta-item">${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}</span>`);
       }
       if (isUser && msg.includeContext === false) {
-        metaParts.push('<span class="msg-meta-item">未带上下文</span>');
+        metaParts.push('<span class="msg-meta-item">未带上文</span>');
       }
       if (!isUser && msg.firstTokenMs !== undefined) {
         metaParts.push(`<span class="msg-meta-item">首字 ${formatShortDuration(msg.firstTokenMs)}</span>`);
@@ -2047,7 +2048,7 @@
     }
     conv.messages.push(userMsgData);
     if (includeContext && conversationContextExceeded(conv)) {
-      showToast('上下文已超出上限，本次将自动裁剪旧消息');
+      showToast('携带上文已超出上限，本次将自动裁剪旧消息');
     }
 
     renderMessages();
@@ -3762,7 +3763,7 @@
     state.includeContext = !state.includeContext;
     persist([KEYS.includeContext]);
     updateContextToggleBtn();
-    showToast(state.includeContext ? '发送时将携带上下文' : '发送时不携带上下文');
+    showToast(state.includeContext ? '发送时将携带上文' : '发送时不携带上文');
   });
   dom.imageSettingsBtn.addEventListener('click', toggleImageSettings);
   dom.paramTemperature.addEventListener('change', saveConvParams);
