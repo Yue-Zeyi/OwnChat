@@ -1931,12 +1931,22 @@
       } else {
         const mainText = typeof mainContent === 'string' ? mainContent : '';
         if (msg.streaming && !mainText.trim() && !reasoningText) {
-          contentHtml += `
-            <div class="stream-waiting">
-              <span>正在思考</span>
-              <div class="typing-dots"><span></span><span></span><span></span></div>
-            </div>
-          `;
+          contentHtml += showThinking
+            ? `
+              <div class="thinking-block">
+                <button class="thinking-toggle" type="button">
+                  <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                  <span>思考中...</span>
+                </button>
+                <div class="thinking-content"><div class="msg-md"></div></div>
+              </div>
+            `
+            : `
+              <div class="stream-waiting">
+                <span>正在思考</span>
+                <div class="typing-dots"><span></span><span></span><span></span></div>
+              </div>
+            `;
         }
         contentHtml += `<div class="msg-md">${renderMd(mainText)}</div>`;
       }
@@ -2019,15 +2029,16 @@
     const el = document.createElement('div');
     el.className = 'chat-msg ai';
     el.id = 'stream-el';
+    const showThinking = conversationShowThinking();
     el.innerHTML = `
       <div class="chat-msg-inner">
         <div class="chat-msg-avatar">${AI_AVATAR}</div>
         <div class="chat-msg-body">
-          <div class="stream-waiting">
+          <div class="stream-waiting ${showThinking ? 'hidden' : ''}">
             <span>正在思考</span>
             <div class="typing-dots"><span></span><span></span><span></span></div>
           </div>
-          <div class="thinking-block hidden">
+          <div class="thinking-block ${showThinking ? '' : 'hidden'}">
             <button class="thinking-toggle" type="button">
               <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
               <span class="thinking-label">思考中...</span>
@@ -2062,13 +2073,29 @@
       streamEls.waiting?.classList.add('hidden');
       if (streamEls.thinkingBlock.classList.contains('hidden')) {
         streamEls.thinkingBlock.classList.remove('hidden');
-        streamEls.thinkingBlock.classList.add('expanded');
       }
+      if (!streamEls.thinkingDone) streamEls.thinkingBlock.classList.add('expanded');
       const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
-      streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+      if (!streamEls.thinkingDone) streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
       streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
       dom.messages.scrollTop = dom.messages.scrollHeight;
     });
+  }
+
+  function finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, endedAt = Date.now(), reasoningContent = '') {
+    if (!streamEls?.thinkingBlock || streamEls.thinkingBlock.classList.contains('hidden')) return null;
+    streamEls.thinkingDone = true;
+    streamEls.thinkingBlock.classList.remove('expanded');
+    const thinkingMs = endedAt - (reasoningStartTime || streamStartTime);
+    if (reasoningContent) streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
+    streamEls.thinkingLabel.textContent = `思考过程 · ${formatShortDuration(thinkingMs)}`;
+    return thinkingMs;
+  }
+
+  function hideEmptyThinkingStream(streamEls) {
+    if (!streamEls?.thinkingBlock || streamEls.thinkingMd?.textContent?.trim()) return;
+    streamEls.thinkingBlock.classList.add('hidden');
+    streamEls.thinkingBlock.classList.remove('expanded');
   }
 
   // ===== Model Dropdown =====
@@ -2326,15 +2353,15 @@
           outputStartTime = Date.now();
         }
 
-        // Update thinking block
-        if (conversationShowThinking(conv) && reasoning) {
+        // Update thinking block until the answer body starts, then keep its duration fixed.
+        if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
           if (reasoningStartTime === null) reasoningStartTime = Date.now();
           if (streamEls.thinkingBlock.classList.contains('hidden')) {
             streamEls.thinkingBlock.classList.remove('hidden');
-            streamEls.thinkingBlock.classList.add('expanded');
           }
+          streamEls.thinkingBlock.classList.add('expanded');
           const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
-          streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+          streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
           streamEls.thinkingMd.innerHTML = renderMd(reasoning);
         }
 
@@ -2357,9 +2384,9 @@
         // Collapse thinking block when reasoning is done and content starts
         if (conversationShowThinking(conv) && reasoning && content && reasoningEndTime === null) {
           reasoningEndTime = Date.now();
-          streamEls.thinkingBlock.classList.remove('expanded');
-          const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
-          streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+          finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, reasoningEndTime, reasoning);
+        } else if (content && !reasoning) {
+          hideEmptyThinkingStream(streamEls);
         }
 
         // Handle stream completion
@@ -2519,15 +2546,16 @@
               reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
               if (reasoningContent) {
                 if (reasoningStartTime === null) reasoningStartTime = Date.now();
-                updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv);
+                if (reasoningEndTime === null) updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv);
               }
               if (reasoningContent && !splitContent.openThink && reasoningEndTime === null) {
                 reasoningEndTime = Date.now();
-                streamEls.thinkingBlock.classList.remove('expanded');
-                const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
-                streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+                finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, reasoningEndTime, reasoningContent);
+              } else if (!reasoningContent) {
+                hideEmptyThinkingStream(streamEls);
               }
-              streamEls.waiting?.classList.toggle('hidden', !!splitContent.content.trim());
+              if (conversationShowThinking(conv)) streamEls.waiting?.classList.add('hidden');
+              else streamEls.waiting?.classList.toggle('hidden', !!splitContent.content.trim());
               updateStream(streamEls.contentMd, splitContent.content);
               if (conv.messages[streamMsgIdx]?.streaming) {
                 conv.messages[streamMsgIdx].content = splitContent.content;
@@ -4268,29 +4296,30 @@
             outputStartTime = Date.now();
           }
 
-          if (conversationShowThinking(conv) && reasoning) {
+          if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
             if (reasoningStartTime === null) reasoningStartTime = Date.now();
             if (streamEls.thinkingBlock.classList.contains('hidden')) {
               streamEls.thinkingBlock.classList.remove('hidden');
-              streamEls.thinkingBlock.classList.add('expanded');
             }
+            streamEls.thinkingBlock.classList.add('expanded');
             const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
-            streamEls.thinkingLabel.textContent = `思考中... · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+            streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
             streamEls.thinkingMd.innerHTML = renderMd(reasoning);
           }
 
           if (content !== lastContent) {
             lastContent = content;
-            streamEls.waiting?.classList.toggle('hidden', !!content.trim());
+            if (conversationShowThinking(conv)) streamEls.waiting?.classList.add('hidden');
+            else streamEls.waiting?.classList.toggle('hidden', !!content.trim());
             streamEls.contentMd.innerHTML = renderMd(content);
             dom.messages.scrollTop = dom.messages.scrollHeight;
           }
 
           if (conversationShowThinking(conv) && reasoning && content && reasoningEndTime === null) {
             reasoningEndTime = Date.now();
-            streamEls.thinkingBlock.classList.remove('expanded');
-            const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
-            streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
+            finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, reasoningEndTime, reasoning);
+          } else if (content && !reasoning) {
+            hideEmptyThinkingStream(streamEls);
           }
 
           if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
@@ -5438,19 +5467,20 @@
       const el = document.createElement('div');
       el.className = 'chat-msg ai';
       el.id = 'recovery-el';
-      const hasReasoning = conversationShowThinking(conv) && !!msg.reasoningContent;
+      const showThinking = conversationShowThinking(conv);
+      const hasReasoning = showThinking && !!msg.reasoningContent;
       el.innerHTML = `
         <div class="chat-msg-inner">
           <div class="chat-msg-avatar">${AI_AVATAR}</div>
           <div class="chat-msg-body">
-            <div class="stream-waiting">
+            <div class="stream-waiting ${showThinking ? 'hidden' : ''}">
               <span>正在思考</span>
               <div class="typing-dots"><span></span><span></span><span></span></div>
             </div>
-            ${hasReasoning ? `<div class="thinking-block expanded">
+            ${showThinking ? `<div class="thinking-block ${hasReasoning ? 'expanded' : ''}">
               <button class="thinking-toggle" type="button">
                 <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-                <span class="thinking-label">正在恢复思考过程...</span>
+                <span class="thinking-label">${hasReasoning ? '正在恢复思考过程...' : '思考中...'}</span>
               </button>
               <div class="thinking-content"><div class="msg-md"></div></div>
             </div>` : ''}
@@ -5465,6 +5495,7 @@
         contentMd: el.querySelector('.chat-msg-body > .msg-md'),
         thinkingMd: el.querySelector('.thinking-content .msg-md'),
         thinkingLabel: el.querySelector('.thinking-label'),
+        thinkingBlock: el.querySelector('.thinking-block'),
         waiting: el.querySelector('.stream-waiting'),
         metaRow: el.querySelector('.msg-meta'),
       };
@@ -5574,13 +5605,19 @@
         scheduleStreamRender(() => {
           recoveryEls.waiting?.classList.add('hidden');
           recoveryEls.thinkingMd.innerHTML = renderMd(msg.reasoningContent);
-          recoveryEls.thinkingLabel.textContent = `正在恢复思考过程...`;
+          recoveryEls.thinkingLabel.textContent = msg.content?.trim() ? '思考过程' : '正在恢复思考过程...';
+          if (msg.content?.trim()) recoveryEls.thinkingBlock?.classList.remove('expanded');
           recoveryEls.contentMd.innerHTML = renderMd(msg.content);
           dom.messages.scrollTop = dom.messages.scrollHeight;
         });
       } else {
         scheduleStreamRender(() => {
-          recoveryEls.waiting?.classList.toggle('hidden', !!(msg.content || '').trim());
+          if (conversationShowThinking(conv)) {
+            recoveryEls.waiting?.classList.add('hidden');
+            if ((msg.content || '').trim()) hideEmptyThinkingStream(recoveryEls);
+          } else {
+            recoveryEls.waiting?.classList.toggle('hidden', !!(msg.content || '').trim());
+          }
           recoveryEls.contentMd.innerHTML = renderMd(msg.content);
           dom.messages.scrollTop = dom.messages.scrollHeight;
         });
