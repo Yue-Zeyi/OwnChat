@@ -586,6 +586,11 @@
     const raw = params.get('config') || params.get('oc_config');
     const rawB64 = params.get('config_b64') || params.get('oc_config_b64');
     if (!raw && !rawB64) return false;
+    if (configured() || imageConfigured()) {
+      cleanConfigUrl();
+      showToast('已存在本地配置，已忽略 URL 配置');
+      return false;
+    }
     try {
       const text = rawB64 ? decodeBase64Url(rawB64) : raw;
       showConfigImportConfirm(parseImportConfig(text));
@@ -1358,6 +1363,9 @@
     imageViewer: $('image-viewer'),
     imageViewerImg: $('image-viewer-img'),
     imageViewerClose: $('image-viewer-close'),
+    imageViewerPrev: $('image-viewer-prev'),
+    imageViewerNext: $('image-viewer-next'),
+    imageViewerCounter: $('image-viewer-counter'),
     imageViewerCopy: $('image-viewer-copy'),
     imageViewerDownload: $('image-viewer-download'),
     cfgSave: $('cfg-save'),
@@ -2947,20 +2955,61 @@
     }
   }
 
+  function imageViewerItemsForJob(job, scope = 'outputs') {
+    if (!job) return [];
+    const items = [];
+    imageJobReplies(job).forEach((reply, replyIndex) => {
+      if (scope === 'inputs' && reply.inputImage?.base64) {
+        const format = (reply.inputImage.type || '').replace(/^image\//, '') || (reply.params || job.params)?.outputFormat || 'png';
+        items.push({
+          jobId: job.id,
+          inputRef: true,
+          inputImage: reply.inputImage,
+          replyIndex,
+          src: reply.inputImage.base64,
+          out: { b64: reply.inputImage.base64.split(',').pop(), format },
+        });
+      }
+      if (scope !== 'outputs') return;
+      (reply.outputs || []).forEach((output, index) => {
+        items.push({
+          jobId: job.id,
+          replyIndex,
+          index,
+          src: dataUrlForImage(output, (reply.params || job.params)?.outputFormat),
+          out: output,
+        });
+      });
+    });
+    return items;
+  }
+
   function openImageViewer(job, out, replyIndex = 0) {
+    const scope = out.inputRef ? 'inputs' : 'outputs';
+    const items = imageViewerItemsForJob(job, scope);
     const reply = imageJobReplies(job)[replyIndex];
-    state.viewerImage = out.inputRef
-      ? { jobId: job.id, inputRef: true, inputImage: out.inputImage || null, replyIndex }
-      : { jobId: job.id, replyIndex, index: reply?.outputs?.indexOf(out) ?? 0 };
+    let itemIndex = items.findIndex(item => {
+      if (out.inputRef) return item.inputRef && item.replyIndex === replyIndex && item.inputImage === (out.inputImage || null);
+      return !item.inputRef && item.replyIndex === replyIndex && item.out === out;
+    });
+    if (itemIndex < 0 && !out.inputRef) {
+      const outputIndex = reply?.outputs?.indexOf(out) ?? 0;
+      itemIndex = items.findIndex(item => !item.inputRef && item.replyIndex === replyIndex && item.index === outputIndex);
+    }
+    state.viewerImage = {
+      jobId: job.id,
+      items,
+      itemIndex: Math.max(0, itemIndex),
+    };
     resetImageViewerTransform();
-    dom.imageViewerImg.src = dataUrlForImage(out, (reply?.params || job.params)?.outputFormat);
+    syncImageViewer();
     dom.imageViewer.classList.remove('hidden');
   }
 
   function openAttachmentImageViewer(src, name = 'attachment') {
     state.viewerImage = { attachment: true, src, name };
     resetImageViewerTransform();
-    dom.imageViewerImg.src = src;
+    syncImageViewer();
     dom.imageViewer.classList.remove('hidden');
   }
 
@@ -2969,6 +3018,11 @@
     dom.imageViewerImg.src = '';
     state.viewerImage = null;
     state.imageViewerDragging = null;
+    state.imageViewerTouch = null;
+    dom.imageViewerCounter.textContent = '';
+    dom.imageViewerCounter.classList.add('hidden');
+    dom.imageViewerPrev.classList.add('hidden');
+    dom.imageViewerNext.classList.add('hidden');
   }
 
   function currentViewerImage() {
@@ -2984,6 +3038,11 @@
         format,
       };
     }
+    if (Array.isArray(state.viewerImage.items)) {
+      const item = state.viewerImage.items[state.viewerImage.itemIndex || 0];
+      const job = state.imageJobs.find(j => j.id === item?.jobId);
+      return job && item?.out ? { job, out: item.out } : null;
+    }
     const job = state.imageJobs.find(j => j.id === state.viewerImage.jobId);
     if (state.viewerImage.inputRef) {
       const inputImage = state.viewerImage.inputImage || job?.inputImage;
@@ -2997,6 +3056,38 @@
     }
     const { reply, out } = imageReplyOutput(job, state.viewerImage.replyIndex || 0, state.viewerImage.index);
     return job && out ? { job, out } : null;
+  }
+
+  function syncImageViewer() {
+    const viewer = state.viewerImage;
+    if (!viewer) return;
+    if (viewer.attachment) {
+      dom.imageViewerImg.src = viewer.src;
+      dom.imageViewerCounter.textContent = '';
+      dom.imageViewerCounter.classList.add('hidden');
+      dom.imageViewerPrev.classList.add('hidden');
+      dom.imageViewerNext.classList.add('hidden');
+      return;
+    }
+    if (!Array.isArray(viewer.items)) return;
+    const total = viewer.items.length;
+    const itemIndex = Math.min(Math.max(viewer.itemIndex || 0, 0), Math.max(total - 1, 0));
+    viewer.itemIndex = itemIndex;
+    const item = viewer.items[itemIndex];
+    if (item) dom.imageViewerImg.src = item.src;
+    dom.imageViewerCounter.textContent = total > 1 ? `${itemIndex + 1} / ${total}` : '';
+    dom.imageViewerCounter.classList.toggle('hidden', total <= 1);
+    dom.imageViewerPrev.classList.toggle('hidden', total <= 1);
+    dom.imageViewerNext.classList.toggle('hidden', total <= 1);
+  }
+
+  function switchImageViewerImage(direction) {
+    const viewer = state.viewerImage;
+    if (!viewer || !Array.isArray(viewer.items) || viewer.items.length <= 1) return;
+    const total = viewer.items.length;
+    viewer.itemIndex = (viewer.itemIndex + direction + total) % total;
+    resetImageViewerTransform();
+    syncImageViewer();
   }
 
   function clampImageScale(scale) {
@@ -5109,6 +5200,8 @@
 
   dom.imageViewerClose.addEventListener('click', closeImageViewer);
   dom.imageViewer.querySelector('.image-viewer-backdrop').addEventListener('click', closeImageViewer);
+  dom.imageViewerPrev.addEventListener('click', () => switchImageViewerImage(-1));
+  dom.imageViewerNext.addEventListener('click', () => switchImageViewerImage(1));
   dom.imageViewerImg.addEventListener('wheel', zoomImageViewer, { passive: false });
   dom.imageViewerImg.addEventListener('pointerdown', startImageViewerDrag);
   dom.imageViewer.addEventListener('pointermove', moveImageViewerDrag);
@@ -5130,6 +5223,19 @@
     if (!current) return;
     if (current.attachment) downloadAttachmentImage(current);
     else downloadImage(current.job, current.out);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (dom.imageViewer.classList.contains('hidden')) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeImageViewer();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      switchImageViewerImage(-1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      switchImageViewerImage(1);
+    }
   });
 
   window.addEventListener('beforeunload', (e) => {

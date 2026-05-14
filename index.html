@@ -504,9 +504,20 @@
             <line x1="6" y1="6" x2="18" y2="18" />
           </svg>
         </button>
+        <button id="image-viewer-prev" class="image-viewer-nav image-viewer-prev" type="button" title="上一张" aria-label="上一张">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+        <button id="image-viewer-next" class="image-viewer-nav image-viewer-next" type="button" title="下一张" aria-label="下一张">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
         <img id="image-viewer-img" src="" alt="生成图片预览">
         <div class="image-viewer-toolbar">
           <button id="image-viewer-copy" class="btn-secondary" type="button">复制</button>
+          <span id="image-viewer-counter" class="image-viewer-counter hidden"></span>
           <button id="image-viewer-download" class="btn-primary" type="button">下载</button>
         </div>
       </div>

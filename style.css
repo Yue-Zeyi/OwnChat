@@ -1555,11 +1555,100 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   z-index: 2;
 }
 
+.image-viewer-nav {
+  position: absolute;
+  top: 50%;
+  width: 44px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  transform: translateY(-50%);
+  color: #fff;
+  background: rgba(17, 24, 39, 0.62);
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  z-index: 2;
+  transition: background var(--transition), border-color var(--transition), opacity var(--transition);
+}
+
+.image-viewer-nav:hover {
+  background: rgba(17, 24, 39, 0.82);
+  border-color: rgba(255,255,255,0.32);
+}
+
+.image-viewer-prev {
+  left: 8px;
+}
+
+.image-viewer-next {
+  right: 8px;
+}
+
 .image-viewer-toolbar {
   display: flex;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
   justify-content: center;
+  min-height: 40px;
+  padding: 4px;
+  background: rgba(17, 24, 39, 0.72);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
   z-index: 2;
+}
+
+.image-viewer-toolbar .btn-primary,
+.image-viewer-toolbar .btn-secondary {
+  min-width: 72px;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.image-viewer-toolbar .btn-primary {
+  color: #fff;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.16);
+}
+
+.image-viewer-toolbar .btn-primary:hover {
+  background: rgba(255,255,255,0.14);
+}
+
+.image-viewer-toolbar .btn-secondary {
+  color: #fff;
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.16);
+}
+
+.image-viewer-toolbar .btn-secondary:hover {
+  background: rgba(255,255,255,0.14);
+}
+
+.image-viewer-counter {
+  min-width: 58px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  color: rgba(255,255,255,0.78);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: var(--radius-xs);
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 #image-input-area {
@@ -2602,6 +2691,33 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 
   .image-result-actions {
     opacity: 1;
+  }
+
+  .image-viewer-content {
+    width: 100vw;
+    height: 100dvh;
+    padding: 48px 12px 18px;
+  }
+
+  .image-viewer-content img {
+    max-width: 100%;
+    max-height: calc(100dvh - 124px);
+  }
+
+  .image-viewer-nav {
+    top: auto;
+    bottom: 18px;
+    width: 42px;
+    height: 42px;
+    transform: none;
+  }
+
+  .image-viewer-prev {
+    left: 12px;
+  }
+
+  .image-viewer-next {
+    right: 12px;
   }
 
   .image-progress {
