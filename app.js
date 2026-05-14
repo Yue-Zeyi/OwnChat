@@ -2074,7 +2074,9 @@
       if (streamEls.thinkingBlock.classList.contains('hidden')) {
         streamEls.thinkingBlock.classList.remove('hidden');
       }
-      if (!streamEls.thinkingDone) streamEls.thinkingBlock.classList.add('expanded');
+      if (!streamEls.thinkingDone && streamEls.thinkingBlock.dataset.userToggled !== 'true') {
+        streamEls.thinkingBlock.classList.add('expanded');
+      }
       const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
       if (!streamEls.thinkingDone) streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
       streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
@@ -2084,11 +2086,8 @@
 
   function finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, endedAt = Date.now(), reasoningContent = '') {
     if (!streamEls?.thinkingBlock || streamEls.thinkingBlock.classList.contains('hidden')) return null;
-    streamEls.thinkingDone = true;
-    streamEls.thinkingBlock.classList.remove('expanded');
     const thinkingMs = endedAt - (reasoningStartTime || streamStartTime);
-    if (reasoningContent) streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
-    streamEls.thinkingLabel.textContent = `思考过程 · ${formatShortDuration(thinkingMs)}`;
+    applyThinkingDoneLabel(streamEls, thinkingMs, reasoningContent);
     return thinkingMs;
   }
 
@@ -2096,6 +2095,17 @@
     if (!streamEls?.thinkingBlock || streamEls.thinkingMd?.textContent?.trim()) return;
     streamEls.thinkingBlock.classList.add('hidden');
     streamEls.thinkingBlock.classList.remove('expanded');
+    delete streamEls.thinkingBlock.dataset.userToggled;
+  }
+
+  function applyThinkingDoneLabel(streamEls, thinkingMs, reasoningContent = '') {
+    if (!streamEls?.thinkingBlock) return;
+    streamEls.thinkingDone = true;
+    streamEls.thinkingBlock.classList.remove('expanded');
+    delete streamEls.thinkingBlock.dataset.userToggled;
+    if (reasoningContent) streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
+    if (Number.isFinite(thinkingMs)) streamEls.thinkingLabel.textContent = `思考过程 · ${formatShortDuration(thinkingMs)}`;
+    else streamEls.thinkingLabel.textContent = '思考过程';
   }
 
   // ===== Model Dropdown =====
@@ -2352,14 +2362,17 @@
           firstTokenTime = Date.now() - streamStartTime;
           outputStartTime = Date.now();
         }
+        if (reasoning && reasoningStartTime === null) reasoningStartTime = Date.now();
+        if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
 
         // Update thinking block until the answer body starts, then keep its duration fixed.
         if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
-          if (reasoningStartTime === null) reasoningStartTime = Date.now();
           if (streamEls.thinkingBlock.classList.contains('hidden')) {
             streamEls.thinkingBlock.classList.remove('hidden');
           }
-          streamEls.thinkingBlock.classList.add('expanded');
+          if (streamEls.thinkingBlock.dataset.userToggled !== 'true') {
+            streamEls.thinkingBlock.classList.add('expanded');
+          }
           const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
           streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
           streamEls.thinkingMd.innerHTML = renderMd(reasoning);
@@ -2375,6 +2388,7 @@
             if (usage) conv.messages[streamMsgIdx].usage = usage;
             if (reasoning) conv.messages[streamMsgIdx].reasoningContent = reasoning;
             if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
+            if (reasoningEndTime !== null) conv.messages[streamMsgIdx].reasoningTimeMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
           }
           updateConversationTokenSummary();
           streamEls.contentMd.innerHTML = renderMd(content);
@@ -2382,8 +2396,7 @@
         }
 
         // Collapse thinking block when reasoning is done and content starts
-        if (conversationShowThinking(conv) && reasoning && content && reasoningEndTime === null) {
-          reasoningEndTime = Date.now();
+        if (conversationShowThinking(conv) && reasoning && content) {
           finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, reasoningEndTime, reasoning);
         } else if (content && !reasoning) {
           hideEmptyThinkingStream(streamEls);
@@ -2563,6 +2576,7 @@
                 if (streamUsage) conv.messages[streamMsgIdx].usage = streamUsage;
                 if (reasoningContent) conv.messages[streamMsgIdx].reasoningContent = reasoningContent;
                 if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
+                if (reasoningEndTime !== null) conv.messages[streamMsgIdx].reasoningTimeMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
               }
               updateConversationTokenSummary();
               const now = Date.now();
@@ -4156,13 +4170,18 @@
         if (reasoning && state.streamEls?.thinkingBlock) {
           state.streamEls.waiting?.classList.add('hidden');
           state.streamEls.thinkingBlock.classList.remove('hidden');
+          delete state.streamEls.thinkingBlock.dataset.userToggled;
           state.streamEls.thinkingBlock.classList.add('expanded');
           state.streamEls.thinkingMd.innerHTML = renderMd(reasoning);
+          if (streamingMsg?.reasoningTimeMs != null) {
+            applyThinkingDoneLabel(state.streamEls, streamingMsg.reasoningTimeMs, reasoning);
+          }
         }
       } else {
         dom.messages.querySelectorAll('.thinking-block').forEach(el => {
           el.classList.add('hidden');
           el.classList.remove('expanded');
+          delete el.dataset.userToggled;
         });
         state.streamEls?.waiting?.classList.toggle('hidden', streamingHasContent);
       }
@@ -4172,6 +4191,7 @@
       dom.messages.querySelectorAll('.thinking-block').forEach(el => {
         el.classList.add('hidden');
         el.classList.remove('expanded');
+        delete el.dataset.userToggled;
       });
     }
     showToast(showThinking ? '已显示思考过程' : '已隐藏思考过程');
@@ -4295,13 +4315,16 @@
             firstTokenTime = Date.now() - streamStartTime;
             outputStartTime = Date.now();
           }
+          if (reasoning && reasoningStartTime === null) reasoningStartTime = Date.now();
+          if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
 
           if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
-            if (reasoningStartTime === null) reasoningStartTime = Date.now();
             if (streamEls.thinkingBlock.classList.contains('hidden')) {
               streamEls.thinkingBlock.classList.remove('hidden');
             }
-            streamEls.thinkingBlock.classList.add('expanded');
+            if (streamEls.thinkingBlock.dataset.userToggled !== 'true') {
+              streamEls.thinkingBlock.classList.add('expanded');
+            }
             const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
             streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
             streamEls.thinkingMd.innerHTML = renderMd(reasoning);
@@ -4315,8 +4338,7 @@
             dom.messages.scrollTop = dom.messages.scrollHeight;
           }
 
-          if (conversationShowThinking(conv) && reasoning && content && reasoningEndTime === null) {
-            reasoningEndTime = Date.now();
+          if (conversationShowThinking(conv) && reasoning && content) {
             finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, reasoningEndTime, reasoning);
           } else if (content && !reasoning) {
             hideEmptyThinkingStream(streamEls);
@@ -4355,7 +4377,9 @@
       if (conversationShowThinking(conv) && existingReasoning) {
         state.streamEls.waiting?.classList.add('hidden');
         state.streamEls.thinkingBlock.classList.remove('hidden');
-        state.streamEls.thinkingBlock.classList.add('expanded');
+        if (state.streamEls.thinkingBlock.dataset.userToggled !== 'true') {
+          state.streamEls.thinkingBlock.classList.add('expanded');
+        }
         state.streamEls.thinkingMd.innerHTML = renderMd(existingReasoning);
       }
       dom.messages.scrollTop = dom.messages.scrollHeight;
@@ -4882,7 +4906,9 @@
     const thinkingToggle = e.target.closest('.thinking-toggle');
     if (thinkingToggle) {
       closeCopyMenus();
-      thinkingToggle.closest('.thinking-block').classList.toggle('expanded');
+      const block = thinkingToggle.closest('.thinking-block');
+      block.dataset.userToggled = 'true';
+      block.classList.toggle('expanded');
       return;
     }
 
