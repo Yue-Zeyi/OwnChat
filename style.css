@@ -1378,6 +1378,13 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   white-space: nowrap;
 }
 
+.image-progress-elapsed {
+  display: inline-block;
+  min-width: 72px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
 .image-progress-note {
   margin-top: 7px;
   font-size: 12px;

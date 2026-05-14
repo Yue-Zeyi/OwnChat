@@ -602,8 +602,16 @@
     return state.conversations.find(c => c.id === state.currentConvId);
   }
 
+  function conversationShowThinking(conv = currentConv()) {
+    return conv?.showThinking !== undefined ? conv.showThinking !== false : state.showThinking !== false;
+  }
+
+  function conversationIncludeContext(conv = currentConv()) {
+    return conv?.includeContextDefault !== undefined ? conv.includeContextDefault !== false : true;
+  }
+
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: DEFAULT_MAX_TOKENS, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '' };
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: DEFAULT_MAX_TOKENS, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: state.showThinking !== false, includeContextDefault: true };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -1506,15 +1514,17 @@
   }
 
   function updateThinkingToggleBtn() {
-    dom.thinkingToggleBtn.classList.toggle('active', state.showThinking);
-    dom.thinkingToggleBtn.title = state.showThinking ? '隐藏思考过程' : '显示思考过程';
-    dom.thinkingToggleBtn.setAttribute('aria-label', state.showThinking ? '隐藏思考过程' : '显示思考过程');
-    dom.thinkingToggleBtn.dataset.tooltip = state.showThinking ? '隐藏思考过程' : '显示思考过程';
+    const enabled = conversationShowThinking();
+    dom.thinkingToggleBtn.classList.toggle('active', enabled);
+    dom.thinkingToggleBtn.title = enabled ? '隐藏思考过程' : '显示思考过程';
+    dom.thinkingToggleBtn.setAttribute('aria-label', enabled ? '隐藏思考过程' : '显示思考过程');
+    dom.thinkingToggleBtn.dataset.tooltip = enabled ? '隐藏思考过程' : '显示思考过程';
   }
 
   function updateContextToggleBtn() {
-    dom.contextToggleBtn.classList.toggle('active', state.includeContext);
-    const label = state.includeContext ? '携带上文' : '不带上文';
+    const enabled = conversationIncludeContext();
+    dom.contextToggleBtn.classList.toggle('active', enabled);
+    const label = enabled ? '携带上文' : '不带上文';
     dom.contextToggleBtn.title = label;
     dom.contextToggleBtn.setAttribute('aria-label', label);
     dom.contextToggleBtn.dataset.tooltip = label;
@@ -1805,7 +1815,7 @@
     if (!conv) return;
     const msg = conv.messages[index];
     let userMsg;
-    let includeContext = state.includeContext;
+    let includeContext = conversationIncludeContext(conv);
     if (msg.role === 'user') {
       userMsg = cloneMessage(msg);
       includeContext = msg.includeContext !== false;
@@ -1837,12 +1847,13 @@
     dom.welcome.classList.add('hidden');
     dom.messages.classList.add('has-messages');
     updateConversationTokenSummary();
+    const showThinking = conversationShowThinking(conv);
 
     dom.messages.innerHTML = conv.messages.map((msg, i) => {
       const isUser = msg.role === 'user';
       const avatar = isUser ? SVG_PERSON : AI_AVATAR;
       const splitContent = !isUser && typeof msg.content === 'string' ? splitThinkTags(msg.content) : null;
-      const reasoningText = state.showThinking && !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
+      const reasoningText = showThinking && !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
       const mainContent = splitContent?.reasoning ? splitContent.content : msg.content;
 
       // Build content: thinking block + main content
@@ -1991,8 +2002,8 @@
     });
   }
 
-  function updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime) {
-    if (!state.showThinking) return;
+  function updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv = currentConv()) {
+    if (!conversationShowThinking(conv)) return;
     scheduleStreamRender(() => {
       if (streamEls.thinkingBlock.classList.contains('hidden')) {
         streamEls.thinkingBlock.classList.remove('hidden');
@@ -2138,7 +2149,7 @@
     }
 
     const inputTokens = retryUserMsg?.tokens || estimateTokens(userContent);
-    const includeContext = opts.includeContext ?? state.includeContext;
+    const includeContext = opts.includeContext ?? conversationIncludeContext(conv);
 
     // Build user message content (plain text or multimodal)
     const files = state.pendingFiles.filter(isFileReady);
@@ -2261,7 +2272,7 @@
         }
 
         // Update thinking block
-        if (state.showThinking && reasoning) {
+        if (conversationShowThinking(conv) && reasoning) {
           if (reasoningStartTime === null) reasoningStartTime = Date.now();
           if (streamEls.thinkingBlock.classList.contains('hidden')) {
             streamEls.thinkingBlock.classList.remove('hidden');
@@ -2288,7 +2299,7 @@
         }
 
         // Collapse thinking block when reasoning is done and content starts
-        if (state.showThinking && reasoning && content && reasoningEndTime === null) {
+        if (conversationShowThinking(conv) && reasoning && content && reasoningEndTime === null) {
           reasoningEndTime = Date.now();
           streamEls.thinkingBlock.classList.remove('expanded');
           const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
@@ -2438,7 +2449,7 @@
               if (reasoningStartTime === null) reasoningStartTime = Date.now();
               apiReasoningContent += reasoningDelta;
               reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
-              updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
+              updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv);
             }
 
             if (contentDelta) {
@@ -2452,7 +2463,7 @@
               reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
               if (reasoningContent) {
                 if (reasoningStartTime === null) reasoningStartTime = Date.now();
-                updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime);
+                updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv);
               }
               if (reasoningContent && !splitContent.openThink && reasoningEndTime === null) {
                 reasoningEndTime = Date.now();
@@ -3081,7 +3092,7 @@
     stopImageProgressTimer();
     state.imageProgressTimer = setInterval(() => {
       if (state.mode === 'image' && state.imageJobs.some(job => job.status === 'generating')) {
-        renderImageWorkspace();
+        updateImageProgressElapsed();
       }
     }, 1000);
   }
@@ -3090,6 +3101,16 @@
     if (!state.imageProgressTimer) return;
     clearInterval(state.imageProgressTimer);
     state.imageProgressTimer = null;
+  }
+
+  function updateImageProgressElapsed() {
+    if (state.mode !== 'image' || !dom.imageGallery) return;
+    dom.imageGallery.querySelectorAll('.image-progress[data-job]').forEach(el => {
+      const job = state.imageJobs.find(j => j.id === el.dataset.job);
+      const elapsedEl = el.querySelector('.image-progress-elapsed');
+      if (!job || !elapsedEl) return;
+      elapsedEl.textContent = `耗时 ${formatDuration(Date.now() - (job.startedAt || job.createdAt || Date.now()))}`;
+    });
   }
 
   async function requestImageWakeLock() {
@@ -3284,19 +3305,17 @@
         `;
       }).join('');
       const waitedMs = Date.now() - (job.startedAt || job.createdAt);
-      const estimatedMs = (job.estimatedSeconds || estimateImageSeconds(job.params || DEFAULT_IMAGE_PARAMS)) * 1000;
       const progress = job.status === 'generating'
-        ? `<div class="image-progress">
+        ? `<div class="image-progress" data-job="${esc(job.id)}">
             <div class="image-progress-indicator">
               <div class="image-spinner"></div>
             </div>
             <div class="image-progress-body">
               <div class="image-progress-title">正在生成图片</div>
               <div class="image-progress-stats">
-                <span>已等待 ${formatDuration(waitedMs)}</span>
-                <span>预计约 ${formatDuration(estimatedMs)}</span>
+                <span class="image-progress-elapsed">耗时 ${formatDuration(waitedMs)}</span>
               </div>
-              <div class="image-progress-note">高峰期、参考图编辑或高质量图片可能更久。请勿刷新或关闭页面。</div>
+              <div class="image-progress-note">生成图片较慢，请耐心等待，请勿关闭或刷新页面。</div>
             </div>
             <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${job.id}" type="button">取消</button>
           </div>`
@@ -3917,6 +3936,8 @@
       dom.convRenameInput.value = conv.title;
       dom.convRoleInput.value = conv.systemPrompt || '';
     }
+    updateThinkingToggleBtn();
+    updateContextToggleBtn();
   }
 
   function saveConvParams() {
@@ -3952,11 +3973,14 @@
 
   dom.convSettingsBtn.addEventListener('click', toggleConvSettings);
   dom.thinkingToggleBtn.addEventListener('click', () => {
-    state.showThinking = !state.showThinking;
-    persist([KEYS.showThinking]);
+    const conv = currentConv();
+    if (!conv) return;
+    conv.showThinking = !conversationShowThinking(conv);
+    const showThinking = conversationShowThinking(conv);
+    persist([KEYS.conversations]);
     updateThinkingToggleBtn();
     if (state.isStreaming) {
-      if (state.showThinking) {
+      if (showThinking) {
         dom.messages.querySelectorAll('.thinking-block.hidden').forEach(el => el.classList.remove('hidden'));
         const streamingMsg = currentConv()?.messages.find(m => m.streaming);
         const reasoning = streamingMsg?.reasoningContent || '';
@@ -3971,7 +3995,7 @@
           el.classList.remove('expanded');
         });
       }
-    } else if (state.showThinking) {
+    } else if (showThinking) {
       renderMessages();
     } else {
       dom.messages.querySelectorAll('.thinking-block').forEach(el => {
@@ -3979,13 +4003,16 @@
         el.classList.remove('expanded');
       });
     }
-    showToast(state.showThinking ? '已显示思考过程' : '已隐藏思考过程');
+    showToast(showThinking ? '已显示思考过程' : '已隐藏思考过程');
   });
   dom.contextToggleBtn.addEventListener('click', () => {
-    state.includeContext = !state.includeContext;
-    persist([KEYS.includeContext]);
+    const conv = currentConv();
+    if (!conv) return;
+    conv.includeContextDefault = !conversationIncludeContext(conv);
+    const includeContext = conversationIncludeContext(conv);
+    persist([KEYS.conversations]);
     updateContextToggleBtn();
-    showToast(state.includeContext ? '发送时将携带上文' : '发送时不携带上文');
+    showToast(includeContext ? '发送时将携带上文' : '发送时不携带上文');
   });
   dom.imageSettingsBtn.addEventListener('click', toggleImageSettings);
   dom.paramTemperature.addEventListener('change', saveConvParams);
@@ -4069,7 +4096,7 @@
         const initialContent = session.assistantContent || '';
         const initialReasoning = session.reasoningContent || '';
         if (initialContent) { streamEls.contentMd.innerHTML = renderMd(initialContent); lastContent = initialContent; }
-        if (state.showThinking && initialReasoning) {
+        if (conversationShowThinking(conv) && initialReasoning) {
           streamEls.thinkingBlock.classList.remove('hidden');
           streamEls.thinkingBlock.classList.add('expanded');
           streamEls.thinkingMd.innerHTML = renderMd(initialReasoning);
@@ -4093,7 +4120,7 @@
             outputStartTime = Date.now();
           }
 
-          if (state.showThinking && reasoning) {
+          if (conversationShowThinking(conv) && reasoning) {
             if (reasoningStartTime === null) reasoningStartTime = Date.now();
             if (streamEls.thinkingBlock.classList.contains('hidden')) {
               streamEls.thinkingBlock.classList.remove('hidden');
@@ -4110,7 +4137,7 @@
             dom.messages.scrollTop = dom.messages.scrollHeight;
           }
 
-          if (state.showThinking && reasoning && content && reasoningEndTime === null) {
+          if (conversationShowThinking(conv) && reasoning && content && reasoningEndTime === null) {
             reasoningEndTime = Date.now();
             streamEls.thinkingBlock.classList.remove('expanded');
             const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
@@ -4144,7 +4171,7 @@
       const existingContent = conv.messages[streamIdx].content || '';
       const existingReasoning = conv.messages[streamIdx].reasoningContent || '';
       if (existingContent) state.streamEls.contentMd.innerHTML = renderMd(existingContent);
-      if (state.showThinking && existingReasoning) {
+      if (conversationShowThinking(conv) && existingReasoning) {
         state.streamEls.thinkingBlock.classList.remove('hidden');
         state.streamEls.thinkingBlock.classList.add('expanded');
         state.streamEls.thinkingMd.innerHTML = renderMd(existingReasoning);
@@ -4171,7 +4198,7 @@
         const c = placeholder.content || '';
         const r = placeholder.reasoningContent || '';
         if (c) state.streamEls.contentMd.innerHTML = renderMd(c);
-        if (state.showThinking && r) state.streamEls.thinkingMd.innerHTML = renderMd(r);
+        if (conversationShowThinking(conv) && r) state.streamEls.thinkingMd.innerHTML = renderMd(r);
         dom.messages.scrollTop = dom.messages.scrollHeight;
       }, 500);
     }
@@ -4395,6 +4422,7 @@
       }
       persist();
       updateSidebar();
+      syncConvParams();
       renderMessages();
       return;
     }
@@ -4408,6 +4436,7 @@
       syncConvParams();
       closeSidebarMobile();
       resumeStreamPollIfNeeded();
+      renderMessages();
     }
   }
 
@@ -4829,8 +4858,7 @@
     const prompt = dom.imagePrompt.value.trim();
     if (!ensureModeConfigured('image')) return;
     if (!prompt) return;
-    const editJob = state.imageRef && state.currentImageJobId ? currentImageJob() : null;
-    generateImage(prompt, state.imageDefaults, editJob);
+    generateImage(prompt, state.imageDefaults, currentImageJob());
     dom.imagePrompt.value = '';
     updateImageGenerateBtn();
   });
@@ -5193,7 +5221,7 @@
       const el = document.createElement('div');
       el.className = 'chat-msg ai';
       el.id = 'recovery-el';
-      const hasReasoning = state.showThinking && !!msg.reasoningContent;
+      const hasReasoning = conversationShowThinking(conv) && !!msg.reasoningContent;
       el.innerHTML = `
         <div class="chat-msg-inner">
           <div class="chat-msg-avatar">${AI_AVATAR}</div>
@@ -5320,7 +5348,7 @@
       // Skip UI update while SW is still connecting
       if (session.status === 'connecting' || !recoveryEls) return;
 
-      if (state.showThinking && msg.reasoningContent && recoveryEls.thinkingMd) {
+      if (conversationShowThinking(conv) && msg.reasoningContent && recoveryEls.thinkingMd) {
         scheduleStreamRender(() => {
           recoveryEls.thinkingMd.innerHTML = renderMd(msg.reasoningContent);
           recoveryEls.thinkingLabel.textContent = `正在恢复思考过程...`;
@@ -5506,8 +5534,8 @@
           await clearImageSession();
         }
 
-        // Keep progress UI updated
-        renderImageWorkspace();
+        // Keep elapsed time updated without rebuilding the whole image thread.
+        updateImageProgressElapsed();
       }, 1000);
       return true;
     }
