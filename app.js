@@ -1931,22 +1931,11 @@
       } else {
         const mainText = typeof mainContent === 'string' ? mainContent : '';
         if (msg.streaming && !mainText.trim() && !reasoningText) {
-          contentHtml += showThinking
-            ? `
-              <div class="thinking-block">
-                <button class="thinking-toggle" type="button">
-                  <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-                  <span>思考中...</span>
-                </button>
-                <div class="thinking-content"><div class="msg-md"></div></div>
-              </div>
-            `
-            : `
-              <div class="stream-waiting">
-                <span>正在思考</span>
-                <div class="typing-dots"><span></span><span></span><span></span></div>
-              </div>
-            `;
+          contentHtml += `
+            <div class="stream-waiting">
+              <div class="typing-dots"><span></span><span></span><span></span></div>
+            </div>
+          `;
         }
         contentHtml += `<div class="msg-md">${renderMd(mainText)}</div>`;
       }
@@ -2029,16 +2018,14 @@
     const el = document.createElement('div');
     el.className = 'chat-msg ai';
     el.id = 'stream-el';
-    const showThinking = conversationShowThinking();
     el.innerHTML = `
       <div class="chat-msg-inner">
         <div class="chat-msg-avatar">${AI_AVATAR}</div>
         <div class="chat-msg-body">
-          <div class="stream-waiting ${showThinking ? 'hidden' : ''}">
-            <span>正在思考</span>
+          <div class="stream-waiting">
             <div class="typing-dots"><span></span><span></span><span></span></div>
           </div>
-          <div class="thinking-block ${showThinking ? '' : 'hidden'}">
+          <div class="thinking-block hidden">
             <button class="thinking-toggle" type="button">
               <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
               <span class="thinking-label">思考中...</span>
@@ -2364,6 +2351,7 @@
         }
         if (reasoning && reasoningStartTime === null) reasoningStartTime = Date.now();
         if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
+        if (conversationShowThinking(conv) && reasoning) streamEls.waiting?.classList.add('hidden');
 
         // Update thinking block until the answer body starts, then keep its duration fixed.
         if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
@@ -2381,7 +2369,7 @@
         // Update content
         if (content !== lastContent) {
           lastContent = content;
-          streamEls.waiting?.classList.toggle('hidden', !!content.trim());
+          streamEls.waiting?.classList.toggle('hidden', !!(content.trim() || (conversationShowThinking(conv) && reasoning)));
           if (conv.messages[streamMsgIdx]?.streaming) {
             conv.messages[streamMsgIdx].content = content;
             conv.messages[streamMsgIdx].tokens = usageOutputTokens(usage, estimateTokens(content));
@@ -4317,6 +4305,7 @@
           }
           if (reasoning && reasoningStartTime === null) reasoningStartTime = Date.now();
           if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
+          if (conversationShowThinking(conv) && reasoning) streamEls.waiting?.classList.add('hidden');
 
           if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
             if (streamEls.thinkingBlock.classList.contains('hidden')) {
@@ -5499,14 +5488,13 @@
         <div class="chat-msg-inner">
           <div class="chat-msg-avatar">${AI_AVATAR}</div>
           <div class="chat-msg-body">
-            <div class="stream-waiting ${showThinking ? 'hidden' : ''}">
-              <span>正在思考</span>
+            <div class="stream-waiting ${hasReasoning ? 'hidden' : ''}">
               <div class="typing-dots"><span></span><span></span><span></span></div>
             </div>
-            ${showThinking ? `<div class="thinking-block ${hasReasoning ? 'expanded' : ''}">
+            ${showThinking ? `<div class="thinking-block ${hasReasoning ? 'expanded' : 'hidden'}">
               <button class="thinking-toggle" type="button">
                 <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-                <span class="thinking-label">${hasReasoning ? '正在恢复思考过程...' : '思考中...'}</span>
+                <span class="thinking-label">${hasReasoning ? '正在恢复思考过程...' : ''}</span>
               </button>
               <div class="thinking-content"><div class="msg-md"></div></div>
             </div>` : ''}
