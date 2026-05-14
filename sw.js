@@ -168,6 +168,7 @@ async function startStream(data) {
           status: 'stopped',
           updatedAt: stoppedAt,
         });
+        activeStreamAbort = null;
         return;
       }
       const erroredAt = Date.now();
@@ -184,7 +185,11 @@ async function startStream(data) {
       });
     }
   } catch (e) {
-    if (e?.name === 'AbortError') { activeStreamAbort = null; return; }
+    if (e?.name === 'AbortError') {
+      await updateStreamData({ status: 'stopped', updatedAt: Date.now() });
+      activeStreamAbort = null;
+      return;
+    }
     await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `Fetch failed: ${e.message || String(e)}` });
   }
   activeStreamAbort = null;

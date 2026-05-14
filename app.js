@@ -1053,6 +1053,25 @@
     }
   }
 
+  function collectConversationFileIds(conversations) {
+    const ids = new Set();
+    for (const conv of conversations || []) {
+      if (!conv) continue;
+      for (const msg of conv.messages || []) {
+        if (Array.isArray(msg.files)) {
+          msg.files.forEach(f => { if (f?.fileId) ids.add(f.fileId); });
+        }
+        if (Array.isArray(msg.content)) {
+          msg.content.forEach(part => {
+            const fileId = part?.type === 'image_url' ? part.image_url?.fileId : null;
+            if (fileId) ids.add(fileId);
+          });
+        }
+      }
+    }
+    return Array.from(ids);
+  }
+
   function generateFileId(convId, msgIndex, partIndex) {
     return `${convId}_${msgIndex}_${partIndex}`;
   }
@@ -1239,7 +1258,12 @@
           for (const f of msg.files) {
             if (f.fileId) {
               const stored = fileById.get(f.fileId);
-              if (stored) f.base64 = stored.base64;
+              if (stored) {
+                f.base64 = stored.base64;
+                delete f.missing;
+              } else {
+                f.missing = true;
+              }
             }
           }
         }
@@ -1247,7 +1271,12 @@
           for (const part of msg.content) {
             if (part.type === 'image_url' && part.image_url?.fileId) {
               const stored = fileById.get(part.image_url.fileId);
-              if (stored) part.image_url.url = stored.base64;
+              if (stored) {
+                part.image_url.url = stored.base64;
+                delete part.image_url.missing;
+              } else {
+                part.image_url.missing = true;
+              }
             }
           }
         }
@@ -1884,12 +1913,24 @@
             contentHtml += `<div class="msg-images">${imgParts.map((p, imgIdx) => {
               const file = fileMeta[imgIdx] || {};
               const name = file.name || `attachment-${imgIdx + 1}`;
+              if (p.image_url.missing || file.missing) {
+                return `<div class="msg-img-missing" title="${esc(name)}">附件已丢失</div>`;
+              }
               return `<img src="${p.image_url.url}" class="msg-img" loading="lazy" data-action="view-attachment-image" data-name="${esc(name)}" alt="${esc(name)}">`;
             }).join('')}</div>`;
           }
         }
       } else {
-        contentHtml += `<div class="msg-md">${renderMd(mainContent)}</div>`;
+        const mainText = typeof mainContent === 'string' ? mainContent : '';
+        if (msg.streaming && !mainText.trim() && !reasoningText) {
+          contentHtml += `
+            <div class="stream-waiting">
+              <span>正在思考</span>
+              <div class="typing-dots"><span></span><span></span><span></span></div>
+            </div>
+          `;
+        }
+        contentHtml += `<div class="msg-md">${renderMd(mainText)}</div>`;
       }
 
       // Build meta row: timestamp + latency + tokens + model + actions
@@ -1974,6 +2015,10 @@
       <div class="chat-msg-inner">
         <div class="chat-msg-avatar">${AI_AVATAR}</div>
         <div class="chat-msg-body">
+          <div class="stream-waiting">
+            <span>正在思考</span>
+            <div class="typing-dots"><span></span><span></span><span></span></div>
+          </div>
           <div class="thinking-block hidden">
             <button class="thinking-toggle" type="button">
               <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
@@ -1992,6 +2037,7 @@
       thinkingBlock: el.querySelector('.thinking-block'),
       thinkingLabel: el.querySelector('.thinking-label'),
       contentMd: el.querySelector('.chat-msg-body > .msg-md'),
+      waiting: el.querySelector('.stream-waiting'),
     };
   }
 
@@ -2005,6 +2051,7 @@
   function updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv = currentConv()) {
     if (!conversationShowThinking(conv)) return;
     scheduleStreamRender(() => {
+      streamEls.waiting?.classList.add('hidden');
       if (streamEls.thinkingBlock.classList.contains('hidden')) {
         streamEls.thinkingBlock.classList.remove('hidden');
         streamEls.thinkingBlock.classList.add('expanded');
@@ -2286,6 +2333,7 @@
         // Update content
         if (content !== lastContent) {
           lastContent = content;
+          streamEls.waiting?.classList.toggle('hidden', !!content.trim());
           if (conv.messages[streamMsgIdx]?.streaming) {
             conv.messages[streamMsgIdx].content = content;
             conv.messages[streamMsgIdx].tokens = usageOutputTokens(usage, estimateTokens(content));
@@ -2471,6 +2519,7 @@
                 const thinkingMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
                 streamEls.thinkingLabel.textContent = `思考过程 · ${thinkingMs >= 1000 ? (thinkingMs / 1000).toFixed(1) + 's' : thinkingMs + 'ms'}`;
               }
+              streamEls.waiting?.classList.toggle('hidden', !!splitContent.content.trim());
               updateStream(streamEls.contentMd, splitContent.content);
               if (conv.messages[streamMsgIdx]?.streaming) {
                 conv.messages[streamMsgIdx].content = splitContent.content;
@@ -3238,7 +3287,7 @@
           <div class="image-chat-msg user">
             <div class="image-chat-inner">
               <div class="image-chat-avatar">${SVG_PERSON}</div>
-              <div class="image-chat-bubble">
+              <div class="image-chat-bubble image-chat-bubble-prompt">
                 <div class="image-chat-prompt">${esc(prompt || '')}</div>
                 ${inputRef}
                 <div class="image-msg-meta">
@@ -3291,7 +3340,7 @@
           <div class="image-chat-msg ai">
             <div class="image-chat-inner">
               <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
-              <div class="image-chat-bubble">
+              <div class="image-chat-bubble image-chat-bubble-result">
                 ${reply.error ? `<div class="image-error">${esc(reply.error)}</div>` : ''}
                 <div class="image-results">${outputs}</div>
                 <div class="image-msg-meta">${aiMetaParts}</div>
@@ -3315,7 +3364,7 @@
               <div class="image-progress-stats">
                 <span class="image-progress-elapsed">耗时 ${formatDuration(waitedMs)}</span>
               </div>
-              <div class="image-progress-note">生成图片较慢，请耐心等待，请勿关闭或刷新页面。</div>
+              <div class="image-progress-note">正在生成，请勿关闭页面</div>
             </div>
             <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${job.id}" type="button">取消</button>
           </div>`
@@ -3324,7 +3373,7 @@
         ? `<div class="image-chat-msg ai">
             <div class="image-chat-inner">
               <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
-              <div class="image-chat-bubble">${progress}</div>
+              <div class="image-chat-bubble image-chat-bubble-progress">${progress}</div>
             </div>
           </div>`
         : '';
@@ -3980,11 +4029,13 @@
     persist([KEYS.conversations]);
     updateThinkingToggleBtn();
     if (state.isStreaming) {
+      const streamingMsg = currentConv()?.messages.find(m => m.streaming);
+      const streamingHasContent = !!(streamingMsg?.content || '').trim();
       if (showThinking) {
         dom.messages.querySelectorAll('.thinking-block.hidden').forEach(el => el.classList.remove('hidden'));
-        const streamingMsg = currentConv()?.messages.find(m => m.streaming);
         const reasoning = streamingMsg?.reasoningContent || '';
         if (reasoning && state.streamEls?.thinkingBlock) {
+          state.streamEls.waiting?.classList.add('hidden');
           state.streamEls.thinkingBlock.classList.remove('hidden');
           state.streamEls.thinkingBlock.classList.add('expanded');
           state.streamEls.thinkingMd.innerHTML = renderMd(reasoning);
@@ -3994,6 +4045,7 @@
           el.classList.add('hidden');
           el.classList.remove('expanded');
         });
+        state.streamEls?.waiting?.classList.toggle('hidden', streamingHasContent);
       }
     } else if (showThinking) {
       renderMessages();
@@ -4095,8 +4147,13 @@
         // Show already-accumulated content
         const initialContent = session.assistantContent || '';
         const initialReasoning = session.reasoningContent || '';
-        if (initialContent) { streamEls.contentMd.innerHTML = renderMd(initialContent); lastContent = initialContent; }
+        if (initialContent) {
+          streamEls.waiting?.classList.add('hidden');
+          streamEls.contentMd.innerHTML = renderMd(initialContent);
+          lastContent = initialContent;
+        }
         if (conversationShowThinking(conv) && initialReasoning) {
+          streamEls.waiting?.classList.add('hidden');
           streamEls.thinkingBlock.classList.remove('hidden');
           streamEls.thinkingBlock.classList.add('expanded');
           streamEls.thinkingMd.innerHTML = renderMd(initialReasoning);
@@ -4133,6 +4190,7 @@
 
           if (content !== lastContent) {
             lastContent = content;
+            streamEls.waiting?.classList.toggle('hidden', !!content.trim());
             streamEls.contentMd.innerHTML = renderMd(content);
             dom.messages.scrollTop = dom.messages.scrollHeight;
           }
@@ -4170,8 +4228,12 @@
       // periodic persist of conv.messages[streamMsgIdx] which we could poll if needed.
       const existingContent = conv.messages[streamIdx].content || '';
       const existingReasoning = conv.messages[streamIdx].reasoningContent || '';
-      if (existingContent) state.streamEls.contentMd.innerHTML = renderMd(existingContent);
+      if (existingContent) {
+        state.streamEls.waiting?.classList.add('hidden');
+        state.streamEls.contentMd.innerHTML = renderMd(existingContent);
+      }
       if (conversationShowThinking(conv) && existingReasoning) {
+        state.streamEls.waiting?.classList.add('hidden');
         state.streamEls.thinkingBlock.classList.remove('hidden');
         state.streamEls.thinkingBlock.classList.add('expanded');
         state.streamEls.thinkingMd.innerHTML = renderMd(existingReasoning);
@@ -4197,8 +4259,14 @@
         }
         const c = placeholder.content || '';
         const r = placeholder.reasoningContent || '';
-        if (c) state.streamEls.contentMd.innerHTML = renderMd(c);
-        if (conversationShowThinking(conv) && r) state.streamEls.thinkingMd.innerHTML = renderMd(r);
+        if (c) {
+          state.streamEls.waiting?.classList.add('hidden');
+          state.streamEls.contentMd.innerHTML = renderMd(c);
+        }
+        if (conversationShowThinking(conv) && r) {
+          state.streamEls.waiting?.classList.add('hidden');
+          state.streamEls.thinkingMd.innerHTML = renderMd(r);
+        }
         dom.messages.scrollTop = dom.messages.scrollHeight;
       }, 500);
     }
@@ -4327,12 +4395,14 @@
       return;
     }
 
+    const deletedConvs = state.conversations.filter(c => idSet.has(c.id));
     state.conversations = state.conversations.filter(c => !idSet.has(c.id));
     if (state.currentConvId && idSet.has(state.currentConvId)) {
       state.currentConvId = state.conversations[0]?.id || null;
     }
     resetSidebarBulkMode();
     persist();
+    Promise.allSettled(collectConversationFileIds(deletedConvs).map(fileDbDelete));
     updateSidebar();
     syncConvParams();
     renderMessages();
@@ -4416,11 +4486,13 @@
     if (delBtn) {
       const item = delBtn.closest('.conv-item');
       const id = item.dataset.id;
+      const deletedConv = state.conversations.find(c => c.id === id);
       state.conversations = state.conversations.filter(c => c.id !== id);
       if (state.currentConvId === id) {
         state.currentConvId = state.conversations[0]?.id || null;
       }
       persist();
+      Promise.allSettled(collectConversationFileIds([deletedConv]).map(fileDbDelete));
       updateSidebar();
       syncConvParams();
       renderMessages();
@@ -4749,47 +4821,77 @@
   // File upload
   dom.attachBtn.addEventListener('click', () => { dom.fileInput.click(); });
 
-  dom.fileInput.addEventListener('change', () => {
-    for (const file of dom.fileInput.files) {
-      if (state.pendingFiles.find(f => f.name === file.name && f.size === file.size)) continue;
-      const entry = { name: file.name, size: file.size, type: file.type, loading: true };
-      state.pendingFiles.push(entry);
+  function pastedImageName(file, index = 0) {
+    const rawExt = (file.type || 'image/png').split('/')[1] || 'png';
+    const ext = rawExt === 'jpeg' ? 'jpg' : rawExt.replace(/[^a-z0-9.+-]/gi, '') || 'png';
+    const suffix = index ? `-${index + 1}` : '';
+    return `pasted-image-${Date.now()}${suffix}.${ext}`;
+  }
+
+  function clipboardImageFiles(event) {
+    const data = event.clipboardData;
+    if (!data) return [];
+    const itemFiles = Array.from(data.items || [])
+      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .map(item => item.getAsFile())
+      .filter(Boolean);
+    if (itemFiles.length) return itemFiles;
+    return Array.from(data.files || []).filter(file => file.type.startsWith('image/'));
+  }
+
+  function addChatAttachmentFile(file, opts = {}) {
+    const name = opts.name || file.name || pastedImageName(file, opts.index || 0);
+    if (state.pendingFiles.find(f => f.name === name && f.size === file.size)) return false;
+    const entry = { name, size: file.size, type: file.type, loading: true };
+    state.pendingFiles.push(entry);
+    renderFilePreview();
+    updateSendBtn();
+
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      if (file.type.startsWith('image/')) entry.base64 = ev.target.result;
+      else entry.text = ev.target.result;
+      entry.loading = false;
+      delete entry.error;
       renderFilePreview();
       updateSendBtn();
-      if (file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          entry.base64 = ev.target.result;
-          entry.loading = false;
-          delete entry.error;
-          renderFilePreview();
-          updateSendBtn();
-        };
-        reader.onerror = () => {
-          entry.loading = false;
-          entry.error = true;
-          renderFilePreview();
-          updateSendBtn();
-        };
-        reader.readAsDataURL(file);
-      } else {
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          entry.text = ev.target.result;
-          entry.loading = false;
-          delete entry.error;
-          renderFilePreview();
-          updateSendBtn();
-        };
-        reader.onerror = () => {
-          entry.loading = false;
-          entry.error = true;
-          renderFilePreview();
-          updateSendBtn();
-        };
-        reader.readAsText(file);
-      }
-    }
+    };
+    reader.onerror = () => {
+      entry.loading = false;
+      entry.error = true;
+      renderFilePreview();
+      updateSendBtn();
+    };
+    if (file.type.startsWith('image/')) reader.readAsDataURL(file);
+    else reader.readAsText(file);
+    return true;
+  }
+
+  function addChatAttachmentFiles(files, opts = {}) {
+    let added = 0;
+    Array.from(files || []).forEach((file, index) => {
+      const name = opts.pasted ? pastedImageName(file, index) : file.name;
+      if (addChatAttachmentFile(file, { name, index })) added += 1;
+    });
+    return added;
+  }
+
+  function setImageReferenceFile(file, opts = {}) {
+    if (!file || !file.type.startsWith('image/')) return false;
+    const name = opts.name || file.name || pastedImageName(file, opts.index || 0);
+    const reader = new FileReader();
+    reader.onload = ev => {
+      state.imageRef = { name, type: file.type, base64: ev.target.result };
+      renderImageRefPreview();
+      updateImageGenerateBtn();
+    };
+    reader.onerror = () => showToast('参考图读取失败');
+    reader.readAsDataURL(file);
+    return true;
+  }
+
+  dom.fileInput.addEventListener('change', () => {
+    addChatAttachmentFiles(dom.fileInput.files);
     dom.fileInput.value = '';
   });
 
@@ -4827,18 +4929,27 @@
   });
 
   dom.imagePrompt.addEventListener('input', updateImageGenerateBtn);
+  dom.userInput.addEventListener('paste', (e) => {
+    const files = clipboardImageFiles(e);
+    if (!files.length) return;
+    e.preventDefault();
+    const added = addChatAttachmentFiles(files, { pasted: true });
+    if (added) showToast(added > 1 ? `已添加 ${added} 张粘贴图片` : '已添加粘贴图片');
+  });
+  dom.imagePrompt.addEventListener('paste', (e) => {
+    const files = clipboardImageFiles(e);
+    if (!files.length) return;
+    e.preventDefault();
+    if (setImageReferenceFile(files[0], { name: files[0].name || pastedImageName(files[0]) })) {
+      showToast(files.length > 1 ? '已使用第一张粘贴图片作为参考图' : '已添加粘贴参考图');
+    }
+  });
   dom.imageRefBtn.addEventListener('click', () => dom.imageRefInput.click());
   dom.imageOptimizeBtn.addEventListener('click', optimizeImagePrompt);
   dom.imageRefInput.addEventListener('change', () => {
     const file = dom.imageRefInput.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      state.imageRef = { name: file.name, type: file.type, base64: ev.target.result };
-      renderImageRefPreview();
-      updateImageGenerateBtn();
-    };
-    reader.readAsDataURL(file);
+    setImageReferenceFile(file);
     dom.imageRefInput.value = '';
   });
   dom.imageRefPreview.addEventListener('click', (e) => {
@@ -5226,6 +5337,10 @@
         <div class="chat-msg-inner">
           <div class="chat-msg-avatar">${AI_AVATAR}</div>
           <div class="chat-msg-body">
+            <div class="stream-waiting">
+              <span>正在思考</span>
+              <div class="typing-dots"><span></span><span></span><span></span></div>
+            </div>
             ${hasReasoning ? `<div class="thinking-block expanded">
               <button class="thinking-toggle" type="button">
                 <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
@@ -5244,6 +5359,7 @@
         contentMd: el.querySelector('.chat-msg-body > .msg-md'),
         thinkingMd: el.querySelector('.thinking-content .msg-md'),
         thinkingLabel: el.querySelector('.thinking-label'),
+        waiting: el.querySelector('.stream-waiting'),
         metaRow: el.querySelector('.msg-meta'),
       };
     }
@@ -5350,6 +5466,7 @@
 
       if (conversationShowThinking(conv) && msg.reasoningContent && recoveryEls.thinkingMd) {
         scheduleStreamRender(() => {
+          recoveryEls.waiting?.classList.add('hidden');
           recoveryEls.thinkingMd.innerHTML = renderMd(msg.reasoningContent);
           recoveryEls.thinkingLabel.textContent = `正在恢复思考过程...`;
           recoveryEls.contentMd.innerHTML = renderMd(msg.content);
@@ -5357,6 +5474,7 @@
         });
       } else {
         scheduleStreamRender(() => {
+          recoveryEls.waiting?.classList.toggle('hidden', !!(msg.content || '').trim());
           recoveryEls.contentMd.innerHTML = renderMd(msg.content);
           dom.messages.scrollTop = dom.messages.scrollHeight;
         });
@@ -5388,7 +5506,7 @@
   function applyRecoveredImageSession(job, session) {
     const activeReply = currentImageActiveReply(job);
     if (!activeReply) return;
-    const durationMs = Date.now() - (job.startedAt || activeReply?.startedAt || job.createdAt || Date.now());
+    const durationMs = Date.now() - (activeReply.startedAt || job.startedAt || job.createdAt || Date.now());
     if (session.status === 'complete') {
       const outputs = JSON.parse(session.outputs || '[]');
       if (outputs.length === 0) {
