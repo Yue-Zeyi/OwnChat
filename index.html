@@ -123,22 +123,8 @@
       <!-- Welcome Screen (hidden by default, shown via JS when no messages) -->
       <div id="welcome" class="welcome hidden">
         <div class="welcome-inner">
-          <h1>OwnChat</h1>
-          <p>选择一个提示开始，或直接输入你的问题。</p>
-          <div class="welcome-tips">
-            <button class="tip-card" type="button" data-prompt="帮我把下面这段内容整理成清晰的要点：">
-              整理要点
-            </button>
-            <button class="tip-card" type="button" data-prompt="请以资深工程师的视角 review 下面这段代码：">
-              代码 Review
-            </button>
-            <button class="tip-card" type="button" data-prompt="帮我写一封简洁、礼貌、目标明确的邮件，背景如下：">
-              写邮件
-            </button>
-            <button class="tip-card" type="button" data-prompt="请一步步解释这个问题，并给出可执行的解决方案：">
-              拆解问题
-            </button>
-          </div>
+          <h1>对话模式</h1>
+          <p>发送消息开始对话，支持上下文、文件附件和思考过程显示。</p>
         </div>
       </div>
 
@@ -404,6 +390,12 @@
               <input type="text" id="cfg-model-manual" class="model-manual-input" placeholder="手动填写模型" spellcheck="false">
               <div class="field-hint">手动填写优先，适合未出现在模型列表里的服务</div>
             </div>
+            <div class="settings-storage-tools" aria-live="polite">
+              <div class="settings-storage-item">
+                <span class="settings-storage-label">对话统计</span>
+                <span id="chat-storage-summary" class="settings-storage-summary">正在统计...</span>
+              </div>
+            </div>
           </div>
           <div id="settings-image-panel" class="settings-panel hidden">
             <div class="form-group">
@@ -436,8 +428,8 @@
                   </svg>
                 </button>
               </div>
-              <input type="text" id="cfg-image-model-manual" class="model-manual-input" placeholder="手动填写模型，如 gpt-image-2" spellcheck="false">
-              <div class="field-hint">手动填写优先；推荐默认 gpt-image-2</div>
+              <input type="text" id="cfg-image-model-manual" class="model-manual-input" placeholder="手动填写适配 OpenAI Image 协议的模型" spellcheck="false">
+              <div class="field-hint">手动填写优先；适配 OpenAI Image 协议的绘画接口</div>
             </div>
             <div class="form-group">
               <label>映射模型</label>
@@ -445,7 +437,6 @@
                 <select id="cfg-image-map-model-select" title="选择映射模型"></select>
               </div>
               <input type="text" id="cfg-image-map-model-manual" class="model-manual-input" placeholder="可选，如 chat:gpt-5.5 或 image:gpt-image-2" spellcheck="false">
-              <div class="field-hint">对话模型调用对话配置，绘画模型调用绘画配置</div>
             </div>
             <div class="form-group">
               <label>提示词优化模型</label>
@@ -453,12 +444,11 @@
                 <select id="cfg-image-prompt-model-select" title="选择提示词优化模型"></select>
               </div>
               <input type="text" id="cfg-image-prompt-model-manual" class="model-manual-input" placeholder="可选，如 chat:gpt-5.5 或 image:gpt-image-2" spellcheck="false">
-              <div class="field-hint">对话模型调用对话配置，绘画模型调用绘画配置</div>
             </div>
-            <div class="image-history-tools">
-              <div class="image-history-info">
-                <div class="image-history-title">绘画历史</div>
-                <div id="image-history-summary" class="image-history-summary">正在统计绘画历史...</div>
+            <div class="settings-storage-tools" aria-live="polite">
+              <div class="settings-storage-item">
+                <span class="settings-storage-label">绘画统计</span>
+                <span id="image-storage-summary" class="settings-storage-summary">正在统计...</span>
               </div>
             </div>
           </div>

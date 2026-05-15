@@ -951,20 +951,6 @@
     return Array.from(map.values());
   }
 
-  async function estimateImageDbUsage() {
-    if (navigator.storage?.estimate) {
-      try {
-        const estimate = await navigator.storage.estimate();
-        return estimate.usage || 0;
-      } catch { /* ignore */ }
-    }
-    return state.imageJobs.reduce((sum, job) => {
-      return sum + imageJobReplies(job).reduce((n, reply) => {
-        return n + (reply.outputs || []).reduce((m, out) => m + imageByteSize(out), 0);
-      }, 0);
-    }, 0);
-  }
-
   async function imageDbPutJob(job) {
     try {
       const db = await openImageDb();
@@ -1075,6 +1061,12 @@
       }
     }
     return Array.from(ids);
+  }
+
+  function collectDeletedOnlyFileIds(deletedConversations) {
+    const deletedIds = new Set(collectConversationFileIds(deletedConversations));
+    const remainingIds = new Set(collectConversationFileIds(state.conversations));
+    return Array.from(deletedIds).filter(id => !remainingIds.has(id));
   }
 
   function generateFileId(convId, msgIndex, partIndex) {
@@ -1373,7 +1365,8 @@
     cfgExportConfig: $('cfg-export-config'),
     cfgImportFile: $('cfg-import-file'),
     cfgImportInput: $('cfg-import-input'),
-    imageHistorySummary: $('image-history-summary'),
+    chatStorageSummary: $('chat-storage-summary'),
+    imageStorageSummary: $('image-storage-summary'),
     configImportModal: $('config-import-modal'),
     configImportPreview: $('config-import-preview'),
     configImportClose: $('config-import-close'),
@@ -2682,7 +2675,9 @@
     populateSelectFromCache(dom.cfgImageModelSelect, { image: true });
     dom.cfgImageModelSelect.value = state.imageModel;
     dom.cfgImageModelManual.value = '';
-    dom.cfgImageModelManual.placeholder = `手动填写模型，当前 ${state.imageModel || 'gpt-image-2'}`;
+    dom.cfgImageModelManual.placeholder = state.imageModel
+      ? `手动填写模型，当前 ${state.imageModel}`
+      : '手动填写适配 OpenAI Image 协议的模型';
     populateImageMapModelSelect();
     dom.cfgImageMapModelSelect.value = parseMapModelRef(state.imageMapModel).value;
     dom.cfgImageMapModelManual.value = '';
@@ -2695,6 +2690,7 @@
     dom.cfgImagePromptModelManual.placeholder = promptRef.model ? `当前 ${promptRef.source}:${promptRef.model}` : '可选，如 chat:gpt-5.5 或 image:gpt-image-2';
     switchSettingsTab(tab === 'image' ? 'image' : 'chat');
     dom.settingsModal.classList.remove('hidden');
+    updateStorageStats();
   }
 
   function hideSettings() {
@@ -2707,7 +2703,6 @@
     dom.settingsImageTab.classList.toggle('active', isImage);
     dom.settingsChatPanel.classList.toggle('hidden', isImage);
     dom.settingsImagePanel.classList.toggle('hidden', !isImage);
-    if (isImage) updateImageHistorySummary();
   }
 
   // ===== Setup Overlay =====
@@ -2863,6 +2858,14 @@
     const clean = out.b64.replace(/\s/g, '');
     const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
     return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
+  }
+
+  function storedTextBytes(value) {
+    if (value == null) return 0;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    if (!text) return 0;
+    if (typeof Blob !== 'undefined') return new Blob([text]).size;
+    return new TextEncoder().encode(text).length;
   }
 
   function formatBytes(bytes) {
@@ -3384,12 +3387,60 @@
     setTimeout(() => clearImageSessionForJob(job.id, ['stopped']), 1000);
   }
 
-  async function updateImageHistorySummary() {
-    const usage = await estimateImageDbUsage();
-    const outputCount = state.imageJobs.reduce((sum, job) => {
+  function storageText(bytes) {
+    return formatBytes(bytes) || '0 B';
+  }
+
+  function isSettingsOpen() {
+    return dom.settingsModal && !dom.settingsModal.classList.contains('hidden');
+  }
+
+  async function collectStorageStats() {
+    const chatJson = localStorage.getItem(KEYS.conversations) || '[]';
+    const allFiles = await fileDbGetAll();
+    const attachmentBytes = allFiles.reduce((sum, file) => sum + storedTextBytes(file), 0);
+    const attachmentIds = new Set(allFiles.map(file => file?.id).filter(Boolean));
+    const referencedIds = new Set(collectConversationFileIds(state.conversations));
+    const orphanAttachmentCount = allFiles.reduce((sum, file) => {
+      return sum + (file?.id && !referencedIds.has(file.id) ? 1 : 0);
+    }, 0);
+    const jobs = state.imageJobs.length ? state.imageJobs : await imageDbGetAllJobs();
+    const outputCount = jobs.reduce((sum, job) => {
       return sum + imageJobReplies(job).reduce((n, reply) => n + (reply.outputs?.length || 0), 0);
     }, 0);
-    dom.imageHistorySummary.textContent = `绘画历史 ${state.imageJobs.length} 条，图片 ${outputCount} 张，浏览器存储约 ${formatBytes(usage) || '未知'}`;
+    return {
+      conversationCount: state.conversations.length,
+      chatBytes: storedTextBytes(chatJson) + attachmentBytes,
+      attachmentCount: attachmentIds.size,
+      orphanAttachmentCount,
+      imageJobCount: jobs.length,
+      imageOutputCount: outputCount,
+      imageBytes: storedTextBytes(jobs),
+    };
+  }
+
+  async function updateStorageStats() {
+    if (!dom.chatStorageSummary || !dom.imageStorageSummary) return;
+    const token = Date.now();
+    state.storageStatsToken = token;
+    dom.chatStorageSummary.textContent = '正在统计...';
+    dom.imageStorageSummary.textContent = '正在统计...';
+    try {
+      const stats = await collectStorageStats();
+      if (state.storageStatsToken !== token) return;
+      const orphanText = stats.orphanAttachmentCount ? `，待清理附件 ${stats.orphanAttachmentCount} 个` : '';
+      dom.chatStorageSummary.textContent = `${stats.conversationCount} 条对话，附件 ${stats.attachmentCount} 个${orphanText}，占用 ${storageText(stats.chatBytes)}`;
+      dom.imageStorageSummary.textContent = `${stats.imageJobCount} 条绘画，图片 ${stats.imageOutputCount} 张，占用 ${storageText(stats.imageBytes)}`;
+    } catch (e) {
+      console.warn('Storage stats failed:', e);
+      if (state.storageStatsToken !== token) return;
+      dom.chatStorageSummary.textContent = '统计失败';
+      dom.imageStorageSummary.textContent = '统计失败';
+    }
+  }
+
+  function updateStorageStatsIfOpen() {
+    if (isSettingsOpen()) updateStorageStats();
   }
 
   function renderImageWorkspace() {
@@ -4525,6 +4576,7 @@
       updateSidebar();
       renderImageWorkspace();
       scrollImageWorkspaceToBottom(false);
+      updateStorageStatsIfOpen();
       return;
     }
 
@@ -4535,13 +4587,14 @@
     }
     resetSidebarBulkMode();
     persist();
-    Promise.allSettled(collectConversationFileIds(deletedConvs).map(fileDbDelete));
+    await Promise.allSettled(collectDeletedOnlyFileIds(deletedConvs).map(fileDbDelete));
     updateSidebar();
     syncConvParams();
     renderMessages();
+    updateStorageStatsIfOpen();
   }
 
-  function handleSidebarItemActivate(e) {
+  async function handleSidebarItemActivate(e) {
     const bulkCheck = e.target.closest('[data-action="bulk-check"]');
     if (bulkCheck) {
       return;
@@ -4581,10 +4634,11 @@
         state.imageJobs = state.imageJobs.filter(j => j.id !== id);
         if (state.currentImageJobId === id) state.currentImageJobId = state.imageJobs[0]?.id || null;
         persist();
-        imageDbDeleteJob(id);
+        await imageDbDeleteJob(id);
         updateSidebar();
         renderImageWorkspace();
         scrollImageWorkspaceToBottom(false);
+        updateStorageStatsIfOpen();
         return;
       }
       const item = e.target.closest('.conv-item');
@@ -4625,10 +4679,11 @@
         state.currentConvId = state.conversations[0]?.id || null;
       }
       persist();
-      Promise.allSettled(collectConversationFileIds([deletedConv]).map(fileDbDelete));
+      await Promise.allSettled(collectDeletedOnlyFileIds([deletedConv]).map(fileDbDelete));
       updateSidebar();
       syncConvParams();
       renderMessages();
+      updateStorageStatsIfOpen();
       return;
     }
 
@@ -4941,16 +4996,6 @@
       dom.userInput.focus();
       autoResize();
     }
-  });
-
-  // Welcome tip cards
-  dom.welcome.addEventListener('click', (e) => {
-    const card = e.target.closest('.tip-card');
-    if (!card) return;
-    dom.userInput.value = card.dataset.prompt;
-    autoResize();
-    updateSendBtn();
-    dom.userInput.focus();
   });
 
   // File upload
