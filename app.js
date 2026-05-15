@@ -385,6 +385,7 @@
   // ===== State =====
   const DEFAULT_IMAGE_MODELS = ['gpt-image-2', 'gpt-image-2-2026-04-21', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-3', 'dall-e-2'];
   const DEFAULT_IMAGE_PARAMS = { size: 'auto', quality: 'auto', outputFormat: 'png', background: 'auto' };
+  const MAX_IMAGE_REFS = 4;
   let serviceWorkerRegistrationPromise = null;
 
   const state = {
@@ -428,6 +429,7 @@
     imageViewerTouch: null,
     textareaResize: null,
     imageRef: null,
+    imageRefs: [],
     pendingFiles: [],
     sidebarSearch: '',
     sidebarBulkMode: false,
@@ -1640,9 +1642,10 @@
 
   function updateImageGenerateBtn() {
     dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage;
-    dom.imageGenerateBtn.title = state.imageRef ? '编辑图片' : '生成图片';
-    dom.imageGenerateBtn.setAttribute('aria-label', state.imageRef ? '编辑图片' : '生成图片');
-    dom.imageGenerateBtn.dataset.tooltip = state.imageRef ? '编辑图片' : '生成图片';
+    const hasRefs = imageReferenceList().length > 0;
+    dom.imageGenerateBtn.title = hasRefs ? '编辑图片' : '生成图片';
+    dom.imageGenerateBtn.setAttribute('aria-label', hasRefs ? '编辑图片' : '生成图片');
+    dom.imageGenerateBtn.dataset.tooltip = hasRefs ? '编辑图片' : '生成图片';
     dom.imageOptimizeBtn.disabled = !dom.imagePrompt.value.trim() || state.isOptimizingImagePrompt || state.isGeneratingImage;
     dom.imageOptimizeBtn.title = state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词';
     dom.imageOptimizeBtn.setAttribute('aria-label', state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词');
@@ -1732,23 +1735,41 @@
     return true;
   }
 
+  function imageReferenceList(refs = state.imageRefs) {
+    const explicitRefs = arguments.length > 0;
+    const list = Array.isArray(refs) ? refs.slice() : (refs ? [refs] : []);
+    if (!explicitRefs && state.imageRef && !list.some(ref => ref?.base64 === state.imageRef.base64)) list.push(state.imageRef);
+    return list.filter(ref => ref?.base64).slice(0, MAX_IMAGE_REFS);
+  }
+
+  function setImageReferences(refs) {
+    state.imageRefs = imageReferenceList(refs);
+    state.imageRef = state.imageRefs[0] || null;
+  }
+
+  function imageReferencePayload(refs) {
+    return imageReferenceList(refs).map(ref => ({ name: ref.name, type: ref.type, base64: ref.base64 }));
+  }
+
   function renderImageRefPreview() {
-    if (!state.imageRef) {
+    const refs = imageReferenceList();
+    setImageReferences(refs);
+    if (!refs.length) {
       dom.imageRefPreview.classList.add('hidden');
       dom.imageRefPreview.innerHTML = '';
       return;
     }
     dom.imageRefPreview.classList.remove('hidden');
-    dom.imageRefPreview.innerHTML = `
-      <div class="image-ref-card">
-        <img src="${esc(state.imageRef.base64)}" alt="${esc(state.imageRef.name || '参考图')}">
+    dom.imageRefPreview.innerHTML = refs.map((ref, index) => `
+      <div class="image-ref-card" data-index="${index}">
+        <img src="${esc(ref.base64)}" alt="${esc(ref.name || '参考图')}">
         <div class="image-ref-info">
-          <div class="image-ref-name">${esc(state.imageRef.name || '参考图')}</div>
-          <div class="image-ref-hint">将基于这张图片进行编辑</div>
+          <div class="image-ref-name">${esc(ref.name || `参考图 ${index + 1}`)}</div>
+          <div class="image-ref-hint">${index + 1}/${MAX_IMAGE_REFS} · 将基于参考图编辑</div>
         </div>
         <button class="image-ref-remove" type="button" title="移除参考图">&times;</button>
       </div>
-    `;
+    `).join('');
   }
 
   function moveModelDropdown() {
@@ -2953,6 +2974,7 @@
       mapModel: job.mapModel,
       prompt: job.prompt,
       inputImage: job.inputImage || null,
+      inputImages: imageReferencePayload(job.inputImages || job.inputImage),
       params: job.params || DEFAULT_IMAGE_PARAMS,
       outputs: job.outputs || [],
       error: job.error || null,
@@ -3131,15 +3153,18 @@
     if (!job) return [];
     const items = [];
     imageJobReplies(job).forEach((reply, replyIndex) => {
-      if (scope === 'inputs' && reply.inputImage?.base64) {
-        const format = (reply.inputImage.type || '').replace(/^image\//, '') || (reply.params || job.params)?.outputFormat || 'png';
-        items.push({
-          jobId: job.id,
-          inputRef: true,
-          inputImage: reply.inputImage,
-          replyIndex,
-          src: reply.inputImage.base64,
-          out: { b64: reply.inputImage.base64.split(',').pop(), format },
+      if (scope === 'inputs') {
+        imageReferencePayload(reply.inputImages || reply.inputImage || job.inputImages || job.inputImage).forEach((inputImage, refIndex) => {
+          const format = (inputImage.type || '').replace(/^image\//, '') || (reply.params || job.params)?.outputFormat || 'png';
+          items.push({
+            jobId: job.id,
+            inputRef: true,
+            inputImage,
+            replyIndex,
+            refIndex,
+            src: inputImage.base64,
+            out: { b64: inputImage.base64.split(',').pop(), format },
+          });
         });
       }
       if (scope !== 'outputs') return;
@@ -3161,7 +3186,7 @@
     const items = imageViewerItemsForJob(job, scope);
     const reply = imageJobReplies(job)[replyIndex];
     let itemIndex = items.findIndex(item => {
-      if (out.inputRef) return item.inputRef && item.replyIndex === replyIndex && item.inputImage === (out.inputImage || null);
+      if (out.inputRef) return item.inputRef && item.replyIndex === replyIndex && item.refIndex === (out.refIndex || 0);
       return !item.inputRef && item.replyIndex === replyIndex && item.out === out;
     });
     if (itemIndex < 0 && !out.inputRef) {
@@ -3217,9 +3242,9 @@
     }
     const job = state.imageJobs.find(j => j.id === state.viewerImage.jobId);
     if (state.viewerImage.inputRef) {
-      const inputImage = state.viewerImage.inputImage || job?.inputImage;
-      if (!inputImage) return null;
       const reply = imageJobReplies(job)[state.viewerImage.replyIndex || 0];
+      const inputImage = state.viewerImage.inputImage || imageReferencePayload(reply?.inputImages || reply?.inputImage || job?.inputImages || job?.inputImage)[state.viewerImage.refIndex || 0];
+      if (!inputImage) return null;
       const format = (inputImage.type || '').replace(/^image\//, '') || (reply?.params || job.params)?.outputFormat || 'png';
       return {
         job,
@@ -3377,7 +3402,7 @@
       : params.size === '1536x1024' || params.size === '1024x1536'
         ? 35
         : params.size === 'auto' ? 15 : 20;
-    const editFactor = state.imageRef ? 35 : 0;
+    const editFactor = imageReferenceList().length ? 35 : 0;
     return Math.max(60, qualityFactor + sizeFactor + editFactor);
   }
 
@@ -3662,7 +3687,7 @@
       await clearImageSession();
       state.imageJobs = [];
       state.currentImageJobId = null;
-      state.imageRef = null;
+      setImageReferences([]);
       resetSidebarBulkMode();
       persist([KEYS.currentImageJobId]);
       await imageDbClearJobs();
@@ -3682,11 +3707,16 @@
     const jobs = selected ? [selected] : [];
     dom.imageEmpty.classList.toggle('hidden', !!selected);
     dom.imageGallery.innerHTML = jobs.map(job => {
-      const renderUserMessage = (prompt, inputImage, createdAt, params = job.params || DEFAULT_IMAGE_PARAMS, replyIndex = '') => {
-        const inputRef = inputImage
-          ? `<div class="image-input-ref">
-              <img src="${esc(inputImage.base64)}" alt="${esc(inputImage.name || '参考图')}" class="image-input-preview" data-job="${esc(job.id)}" data-reply="${esc(String(replyIndex))}">
-              <span>参考图：${esc(inputImage.name || '生成图')}</span>
+      const renderUserMessage = (prompt, inputImages, createdAt, params = job.params || DEFAULT_IMAGE_PARAMS, replyIndex = '') => {
+        const refs = imageReferencePayload(inputImages);
+        const inputRef = refs.length
+          ? `<div class="image-input-ref-list">
+              ${refs.map((inputImage, refIndex) => `
+                <div class="image-input-ref">
+                  <img src="${esc(inputImage.base64)}" alt="${esc(inputImage.name || '参考图')}" class="image-input-preview" data-job="${esc(job.id)}" data-reply="${esc(String(replyIndex))}" data-ref="${refIndex}">
+                  <span>${esc(inputImage.name || `参考图 ${refIndex + 1}`)}</span>
+                </div>
+              `).join('')}
             </div>`
           : '';
         return `
@@ -3707,12 +3737,12 @@
           </div>
         `;
       };
-      const userMessage = renderUserMessage(job.prompt, job.inputImage, job.createdAt, job.params);
+      const userMessage = renderUserMessage(job.prompt, job.inputImages || job.inputImage, job.createdAt, job.params);
       const replies = imageJobReplies(job);
       const replyMessages = replies.map((reply, replyIndex) => {
         const params = reply.params || job.params || DEFAULT_IMAGE_PARAMS;
         const replyUserMessage = replyIndex > 0
-          ? renderUserMessage(reply.prompt || job.prompt, reply.inputImage || null, reply.createdAt || reply.startedAt, params, replyIndex)
+          ? renderUserMessage(reply.prompt || job.prompt, reply.inputImages || reply.inputImage || null, reply.createdAt || reply.startedAt, params, replyIndex)
           : '';
         if (reply.status === 'generating' && !(reply.outputs || []).length && !reply.error) {
           return replyUserMessage;
@@ -3858,12 +3888,13 @@
   }
 
   function mappedImageInput(prompt, ref) {
-    if (!ref) return prompt.trim();
+    const refs = imageReferenceList(ref);
+    if (!refs.length) return prompt.trim();
     return [{
       role: 'user',
       content: [
         { type: 'input_text', text: prompt.trim() },
-        { type: 'input_image', image_url: ref.base64 },
+        ...refs.map(item => ({ type: 'input_image', image_url: item.base64 })),
       ],
     }];
   }
@@ -4052,10 +4083,13 @@
     const imageApiKey = effectiveImageApiKey();
     const url = requestUrl(imageBaseUrl, '/images/edits');
     const form = new FormData();
-    const refBlob = dataUrlToBlob(ref.base64);
+    const refs = imageReferenceList(ref);
     form.append('model', state.imageModel);
     form.append('prompt', prompt.trim());
-    form.append('image', refBlob, filenameForBlob(ref.name, refBlob));
+    refs.forEach(item => {
+      const refBlob = dataUrlToBlob(item.base64);
+      form.append('image', refBlob, filenameForBlob(item.name, refBlob));
+    });
     if (params.size !== 'auto') form.append('size', params.size);
     if (params.quality !== 'auto') form.append('quality', params.quality);
     if (params.outputFormat && !/^dall-e/i.test(state.imageModel)) form.append('output_format', params.outputFormat);
@@ -4071,7 +4105,10 @@
       const fallback = new FormData();
       fallback.append('model', state.imageModel);
       fallback.append('prompt', prompt.trim());
-      fallback.append('image', refBlob, filenameForBlob(ref.name, refBlob));
+      refs.forEach(item => {
+        const refBlob = dataUrlToBlob(item.base64);
+        fallback.append('image', refBlob, filenameForBlob(item.name, refBlob));
+      });
       if (params.size !== 'auto') fallback.append('size', params.size);
       resp = await apiFetch(url, {
         method: 'POST',
@@ -4102,8 +4139,9 @@
     requestImageWakeLock();
     updateImageGenerateBtn();
     const startedAt = Date.now();
-    const refSource = refOverride !== undefined ? refOverride : state.imageRef;
-    const ref = refSource ? Object.assign({}, refSource) : null;
+    const refSource = refOverride !== undefined ? refOverride : state.imageRefs;
+    const refs = imageReferencePayload(refSource);
+    const ref = refs[0] || null;
     const estimatedSeconds = estimateImageSeconds(params);
     const job = retryJob || {
       id: startedAt.toString(),
@@ -4114,6 +4152,7 @@
       createdAt: startedAt,
       params: Object.assign({}, params),
       inputImage: ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : null,
+      inputImages: refs,
       outputs: [],
       error: null,
       status: 'generating',
@@ -4142,6 +4181,7 @@
         mapModel: state.imageMapModel,
         prompt: prompt.trim(),
         inputImage: ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : null,
+        inputImages: refs,
         params: Object.assign({}, params),
         outputs: [],
         error: null,
@@ -4204,7 +4244,7 @@
           const mapEndpoint = imageMapEndpoint();
           const body = {
             model: mapEndpoint.model,
-            input: mappedImageInput(prompt, ref),
+            input: mappedImageInput(prompt, refs),
             tools: [imageToolOptions(params)],
             tool_choice: 'required',
           };
@@ -4215,7 +4255,7 @@
             body: JSON.stringify(body),
             requestType: 'responses', outputFormat: params.outputFormat,
           };
-        } else if (ref) {
+        } else if (refs.length) {
           swData = {
             type: 'start-image', jobId: job.id,
             url: requestUrl(imageBaseUrl, '/images/edits'),
@@ -4223,7 +4263,7 @@
             requestType: 'edit', outputFormat: params.outputFormat,
             formParams: {
               model: state.imageModel, prompt: prompt.trim(),
-              imageBase64: ref.base64, imageFilename: ref.name,
+              images: refs.map(item => ({ base64: item.base64, filename: item.name })),
               size: params.size, quality: params.quality,
               outputFormat: params.outputFormat, background: params.background,
             },
@@ -4245,7 +4285,7 @@
           if (!session || (session.jobId && session.jobId !== job.id)) return false;
           if (session.status === 'complete') {
             completeImageJobFromSession(job, activeReply, session, startedAt);
-            if (ref) { state.imageRef = null; renderImageRefPreview(); }
+            if (refs.length) { setImageReferences([]); renderImageRefPreview(); }
             showToast(job.status === 'done' ? '图片已生成' : '生成失败');
             finishImageJob();
             await clearImageSession();
@@ -4318,9 +4358,9 @@
         // === Fallback: no SW, direct fetch ===
         timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
         const nextOutputs = state.imageMapModel
-          ? await requestMappedImage(prompt, params, ref, controller.signal)
-          : ref
-            ? await requestImageEdit(prompt, params, ref, controller.signal)
+          ? await requestMappedImage(prompt, params, refs, controller.signal)
+          : refs.length
+            ? await requestImageEdit(prompt, params, refs, controller.signal)
             : await requestOneImage(prompt, params, controller.signal);
         if (nextOutputs.length === 0) throw new Error('接口未返回可显示的图片数据');
         activeReply.outputs = nextOutputs;
@@ -4331,7 +4371,7 @@
         job.error = null;
         job.status = 'done';
         job.durationMs = activeReply.durationMs;
-        if (ref) { state.imageRef = null; renderImageRefPreview(); }
+        if (refs.length) { setImageReferences([]); renderImageRefPreview(); }
         showToast('图片已生成');
         finishImageJob();
       }
@@ -4385,7 +4425,7 @@
     if (state.mode === 'image') {
       state.currentImageJobId = null;
       dom.imagePrompt.value = '';
-      state.imageRef = null;
+      setImageReferences([]);
       renderImageRefPreview();
       persist();
       updateSidebar();
@@ -5329,16 +5369,28 @@
 
   function setImageReferenceFile(file, opts = {}) {
     if (!file || !file.type.startsWith('image/')) return false;
+    if (imageReferenceList().length >= MAX_IMAGE_REFS) return false;
     const name = opts.name || file.name || pastedImageName(file, opts.index || 0);
     const reader = new FileReader();
     reader.onload = ev => {
-      state.imageRef = { name, type: file.type, base64: ev.target.result };
+      setImageReferences([...imageReferenceList(), { name, type: file.type, base64: ev.target.result }]);
       renderImageRefPreview();
       updateImageGenerateBtn();
     };
     reader.onerror = () => showToast('参考图读取失败');
     reader.readAsDataURL(file);
     return true;
+  }
+
+  function addImageReferenceFiles(files, opts = {}) {
+    let added = 0;
+    Array.from(files || []).some((file, index) => {
+      if (imageReferenceList().length >= MAX_IMAGE_REFS) return true;
+      const name = opts.pasted ? (file.name || pastedImageName(file, index)) : file.name;
+      if (setImageReferenceFile(file, { name, index })) added += 1;
+      return false;
+    });
+    return added;
   }
 
   dom.fileInput.addEventListener('change', () => {
@@ -5391,21 +5443,25 @@
     const files = clipboardImageFiles(e);
     if (!files.length) return;
     e.preventDefault();
-    if (setImageReferenceFile(files[0], { name: files[0].name || pastedImageName(files[0]) })) {
-      showToast(files.length > 1 ? '已使用第一张粘贴图片作为参考图' : '已添加粘贴参考图');
-    }
+    const added = addImageReferenceFiles(files, { pasted: true });
+    if (added) showToast(`已添加 ${added} 张参考图`);
+    else showToast(`最多添加 ${MAX_IMAGE_REFS} 张参考图`);
   });
   dom.imageRefBtn.addEventListener('click', () => dom.imageRefInput.click());
   dom.imageOptimizeBtn.addEventListener('click', optimizeImagePrompt);
   dom.imageRefInput.addEventListener('change', () => {
-    const file = dom.imageRefInput.files?.[0];
-    if (!file) return;
-    setImageReferenceFile(file);
+    const added = addImageReferenceFiles(dom.imageRefInput.files);
+    if (!added && dom.imageRefInput.files?.length) showToast(`最多添加 ${MAX_IMAGE_REFS} 张参考图`);
     dom.imageRefInput.value = '';
   });
   dom.imageRefPreview.addEventListener('click', (e) => {
-    if (!e.target.closest('.image-ref-remove')) return;
-    state.imageRef = null;
+    const btn = e.target.closest('.image-ref-remove');
+    if (!btn) return;
+    const card = btn.closest('.image-ref-card');
+    const index = parseInt(card?.dataset.index || '-1', 10);
+    const refs = imageReferenceList();
+    if (index >= 0) refs.splice(index, 1);
+    setImageReferences(refs);
     renderImageRefPreview();
     updateImageGenerateBtn();
   });
@@ -5436,11 +5492,13 @@
       const job = state.imageJobs.find(j => j.id === inputPreview.dataset.job);
       const replyIndex = parseInt(inputPreview.dataset.reply || '', 10);
       const reply = Number.isFinite(replyIndex) ? imageJobReplies(job)[replyIndex] : null;
-      const inputImage = reply?.inputImage || job?.inputImage;
+      const refIndex = parseInt(inputPreview.dataset.ref || '0', 10);
+      const inputImage = imageReferencePayload(reply?.inputImages || reply?.inputImage || job?.inputImages || job?.inputImage)[refIndex];
       if (inputImage) {
         openImageViewer(job, {
           inputRef: true,
           inputImage,
+          refIndex,
           b64: inputImage.base64.split(',').pop(),
           format: (inputImage.type || '').replace(/^image\//, '') || (reply?.params || job.params)?.outputFormat || 'png',
         }, Number.isFinite(replyIndex) ? replyIndex : 0);
@@ -5484,7 +5542,7 @@
       const reply = imageJobReplies(job)[Number.isFinite(replyIndex) ? replyIndex : 0] || null;
       const retryPrompt = reply?.prompt || job.prompt || '';
       const retryParams = Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {}, reply?.params || {});
-      const retryRef = reply?.inputImage || job.inputImage || null;
+      const retryRef = reply?.inputImages || reply?.inputImage || job.inputImages || job.inputImage || null;
       state.currentImageJobId = job.id;
       generateImage(retryPrompt, retryParams, job, retryRef);
     } else if (btn.dataset.action === 'cancel') {
@@ -5504,11 +5562,11 @@
         showToast('链接图片无法直接作为参考图，请先下载后上传');
         return;
       }
-      state.imageRef = {
+      setImageReferences([{
         name: imageFilename(job, out),
         type: `image/${out.format || reply?.params?.outputFormat || job.params?.outputFormat || 'png'}`,
         base64: dataUrlForImage(out, (reply?.params || job.params)?.outputFormat),
-      };
+      }]);
       dom.imagePrompt.value = '基于参考图进行编辑：';
       state.currentImageJobId = job.id;
       renderImageRefPreview();
@@ -5525,11 +5583,11 @@
         showToast('链接图片无法直接作为参考图，请先下载后上传');
         return;
       }
-      state.imageRef = {
+      setImageReferences([{
         name: imageFilename(job, out),
         type: `image/${out.format || reply?.params?.outputFormat || job.params?.outputFormat || 'png'}`,
         base64: dataUrlForImage(out, (reply?.params || job.params)?.outputFormat),
-      };
+      }]);
       dom.imagePrompt.value = '基于参考图进行编辑：';
       state.currentImageJobId = job.id;
       renderImageRefPreview();

@@ -1309,6 +1309,17 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   font-size: 12px;
 }
 
+.image-input-ref-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.image-input-ref-list .image-input-ref {
+  margin-top: 0;
+}
+
 .image-input-ref img {
   width: 34px;
   height: 34px;
@@ -1719,6 +1730,9 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 }
 
 .image-ref-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   padding: 4px 16px 0;
   margin-bottom: 0;
 }
@@ -1737,8 +1751,8 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 }
 
 .image-ref-card img {
-  width: 52px;
-  height: 52px;
+  width: 48px;
+  height: 48px;
   object-fit: cover;
   border-radius: var(--radius-xs);
 }

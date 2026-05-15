@@ -290,9 +290,13 @@ async function startImage(data) {
       const params = data.formParams;
       form.append('model', params.model);
       form.append('prompt', params.prompt);
-      // Convert base64 back to Blob for the image field
-      const imageBlob = dataUrlToBlob(params.imageBase64);
-      form.append('image', imageBlob, params.imageFilename);
+      const images = Array.isArray(params.images) && params.images.length
+        ? params.images
+        : (params.imageBase64 ? [{ base64: params.imageBase64, filename: params.imageFilename }] : []);
+      images.forEach(item => {
+        const imageBlob = dataUrlToBlob(item.base64);
+        form.append('image', imageBlob, item.filename || 'reference.png');
+      });
       if (params.size && params.size !== 'auto') form.append('size', params.size);
       if (params.quality && params.quality !== 'auto') form.append('quality', params.quality);
       if (params.outputFormat && !/^dall-e/i.test(params.model)) form.append('output_format', params.outputFormat);
@@ -309,8 +313,10 @@ async function startImage(data) {
         const fallback = new FormData();
         fallback.append('model', params.model);
         fallback.append('prompt', params.prompt);
-        const refBlob2 = dataUrlToBlob(params.imageBase64);
-        fallback.append('image', refBlob2, params.imageFilename);
+        images.forEach(item => {
+          const refBlob2 = dataUrlToBlob(item.base64);
+          fallback.append('image', refBlob2, item.filename || 'reference.png');
+        });
         if (params.size && params.size !== 'auto') fallback.append('size', params.size);
         resp = await fetch(data.url, {
           method: 'POST',
