@@ -18,6 +18,18 @@ function keepAlive(event, promise) {
   }
 }
 
+async function notifyClients(message) {
+  try {
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    clients.forEach(client => client.postMessage(message));
+  } catch { /* ignore */ }
+}
+
+async function updateImageSession(session) {
+  await updateStreamData(session);
+  await notifyClients({ type: 'image-session', session });
+}
+
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'start-stream') {
     keepAlive(event, startStream(event.data));
@@ -310,14 +322,20 @@ async function startImage(data) {
     }
 
     if (!resp) {
-      await updateStreamData({ id: IMAGE_KEY, status: 'error', updatedAt: Date.now(), error: 'No response received' });
+      await updateImageSession({
+        id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
+        status: 'error', updatedAt: Date.now(), error: 'No response received',
+      });
       activeImageAbort = null;
       return;
     }
 
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
-      await updateStreamData({ id: IMAGE_KEY, status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
+      await updateImageSession({
+        id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
+        status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}`,
+      });
       activeImageAbort = null;
       return;
     }
@@ -326,43 +344,45 @@ async function startImage(data) {
 
     // Parse outputs based on request type
     let outputs;
-    if (requestType === 'generations' || requestType === 'edit') {
-      outputs = (result.data || []).map(item => ({
-        b64: item.b64_json || '',
-        url: item.url || '',
-        revisedPrompt: item.revised_prompt || '',
-        format: normalizeImageFormat(item.output_format || item.mime_type || data.outputFormat || 'png'),
-        bytes: item.b64_json ? Math.ceil(item.b64_json.length * 3 / 4) : 0,
+    const pushImageOutput = value => {
+      if (!value || typeof value !== 'object') return;
+      const b64 = value.b64_json || value.b64 || value.image_base64 || value.result || '';
+      const url = value.url || value.image_url || '';
+      if (!b64 && !url) return;
+      outputs.push({
+        b64,
+        url,
+        revisedPrompt: value.revised_prompt || value.revisedPrompt || '',
+        format: normalizeImageFormat(value.output_format || value.mime_type || data.outputFormat || 'png'),
+        bytes: b64 ? Math.ceil(b64.length * 3 / 4) : 0,
         createdAt: Date.now(),
-      })).filter(item => item.b64 || item.url);
+      });
+    };
+    if (requestType === 'generations' || requestType === 'edit') {
+      outputs = [];
+      (result.data || []).forEach(pushImageOutput);
     } else if (requestType === 'responses') {
       outputs = [];
       const scan = value => {
         if (!value) return;
         if (Array.isArray(value)) { value.forEach(scan); return; }
         if (typeof value !== 'object') return;
-        if ((value.type === 'image_generation_call' || value.type === 'image_generation') && value.result) {
-          outputs.push({
-            b64: value.result, url: '', revisedPrompt: '',
-            format: normalizeImageFormat(value.output_format || value.mime_type || data.outputFormat || 'png'),
-            bytes: Math.ceil(value.result.length * 3 / 4),
-            createdAt: Date.now(),
-          });
-        }
+        pushImageOutput(value);
         Object.keys(value).forEach(k => scan(value[k]));
       };
       scan(result.output || result);
     }
 
-    await updateStreamData({
-      id: IMAGE_KEY, status: 'complete', updatedAt: Date.now(),
+    await updateImageSession({
+      id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
+      status: 'complete', updatedAt: Date.now(),
       outputs: JSON.stringify(outputs || []),
     });
   } catch (e) {
     if (e?.name === 'AbortError') {
       const status = requestTimedOut || activeImageStopStatus === 'timeout' ? 'timeout' : 'stopped';
-      await updateStreamData({
-        id: IMAGE_KEY,
+      await updateImageSession({
+        id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
         status,
         updatedAt: Date.now(),
         error: status === 'timeout' ? '生成超时' : '',
@@ -370,7 +390,10 @@ async function startImage(data) {
       activeImageAbort = null;
       return;
     }
-    await updateStreamData({ id: IMAGE_KEY, status: 'error', updatedAt: Date.now(), error: String(e.message || e) });
+    await updateImageSession({
+      id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
+      status: 'error', updatedAt: Date.now(), error: String(e.message || e),
+    });
   } finally {
     clearInterval(heartbeat);
     clearTimeout(timeout);

@@ -3308,6 +3308,37 @@
     return 10 * 60 * 1000;
   }
 
+  function completeImageJobFromSession(job, activeReply, session, startedAt) {
+    const nextOutputs = parseImageSessionOutputs(session);
+    if (nextOutputs.length === 0) {
+      activeReply.error = '接口未返回可显示的图片数据';
+      activeReply.status = 'error';
+      job.error = activeReply.error;
+      job.status = 'error';
+    } else {
+      activeReply.outputs = nextOutputs;
+      activeReply.error = null;
+      activeReply.status = 'done';
+      job.outputs = nextOutputs;
+      job.error = null;
+      job.status = 'done';
+    }
+    const durationMs = Date.now() - (startedAt || activeReply.startedAt || job.startedAt || job.createdAt || Date.now());
+    activeReply.durationMs = durationMs;
+    job.durationMs = durationMs;
+  }
+
+  function failImageJobFromSession(job, activeReply, message, status = 'error', startedAt = null) {
+    const isCancelled = status === 'cancelled';
+    const durationMs = Date.now() - (startedAt || activeReply.startedAt || job.startedAt || job.createdAt || Date.now());
+    activeReply.error = message || (isCancelled ? '请求已中断' : '生成失败');
+    activeReply.status = isCancelled ? 'cancelled' : 'error';
+    activeReply.durationMs = durationMs;
+    job.error = activeReply.error;
+    job.status = activeReply.status;
+    job.durationMs = durationMs;
+  }
+
   function startImageProgressTimer() {
     stopImageProgressTimer();
     state.imageProgressTimer = setInterval(() => {
@@ -4030,14 +4061,7 @@
     let timeoutId = null;
     const requestTimeoutMs = imageTimeoutMs(params);
     const failImageJob = (message, status = 'error') => {
-      const isCancelled = status === 'cancelled';
-      const durationMs = Date.now() - startedAt;
-      activeReply.error = message || (isCancelled ? '请求已中断' : '生成失败');
-      activeReply.status = isCancelled ? 'cancelled' : 'error';
-      activeReply.durationMs = durationMs;
-      job.error = activeReply.error;
-      job.status = activeReply.status;
-      job.durationMs = durationMs;
+      failImageJobFromSession(job, activeReply, message, status, startedAt);
     };
 
     function finishImageJob() {
@@ -4116,6 +4140,50 @@
         swData.timeoutMs = requestTimeoutMs;
         swTarget.postMessage(swData);
 
+        const handleImageSession = async session => {
+          if (!session || (session.jobId && session.jobId !== job.id)) return false;
+          if (session.status === 'complete') {
+            completeImageJobFromSession(job, activeReply, session, startedAt);
+            if (ref) { state.imageRef = null; renderImageRefPreview(); }
+            showToast(job.status === 'done' ? '图片已生成' : '生成失败');
+            finishImageJob();
+            await clearImageSession();
+            return true;
+          }
+          if (session.status === 'error') {
+            failImageJob(session.error || '生成失败');
+            showToast('生成失败');
+            finishImageJob();
+            await clearImageSession();
+            return true;
+          }
+          if (session.status === 'timeout') {
+            failImageJob(session.error || '生成超时，请稍后重试。');
+            showToast('生成超时');
+            finishImageJob();
+            await clearImageSession();
+            return true;
+          }
+          if (session.status === 'stopped') {
+            failImageJob('请求已中断', 'cancelled');
+            showToast('生成已中断');
+            finishImageJob();
+            await clearImageSession();
+            return true;
+          }
+          return false;
+        };
+        const onImageSessionMessage = event => {
+          if (event.data?.type !== 'image-session') return;
+          handleImageSession(normalizeImageSession(event.data.session)).then(done => {
+            if (done) removeImageSessionMessage();
+          });
+        };
+        navigator.serviceWorker.addEventListener('message', onImageSessionMessage);
+        const removeImageSessionMessage = () => {
+          try { navigator.serviceWorker.removeEventListener('message', onImageSessionMessage); } catch { /* ignore */ }
+        };
+
         // Poll IndexedDB for image result (every 500ms)
         state.imagePollTimer = setInterval(async () => {
           const session = await getImageSession();
@@ -4133,48 +4201,14 @@
           }
           if (session.jobId && session.jobId !== job.id) return;
 
-          if (session.status === 'complete') {
-            const nextOutputs = parseImageSessionOutputs(session);
-            if (nextOutputs.length === 0) {
-              activeReply.error = '接口未返回可显示的图片数据';
-              activeReply.status = 'error';
-              job.error = activeReply.error;
-              job.status = 'error';
-            } else {
-              activeReply.outputs = nextOutputs;
-              activeReply.error = null;
-              activeReply.status = 'done';
-              job.outputs = nextOutputs;
-              job.error = null;
-              job.status = 'done';
-            }
-            activeReply.durationMs = Date.now() - startedAt;
-            job.durationMs = activeReply.durationMs;
-            if (ref) { state.imageRef = null; renderImageRefPreview(); }
-            if (job.status === 'done') showToast('图片已生成');
-            else showToast('生成失败');
-            finishImageJob();
-            await clearImageSession();
-          } else if (session.status === 'error') {
-            failImageJob(session.error || '生成失败');
-            showToast('生成失败');
-            finishImageJob();
-            await clearImageSession();
-          } else if (session.status === 'timeout') {
-            failImageJob(session.error || '生成超时，请稍后重试。');
-            showToast('生成超时');
-            finishImageJob();
-            await clearImageSession();
-          } else if (session.status === 'stopped') {
-            failImageJob('请求已中断', 'cancelled');
-            showToast('生成已中断');
-            finishImageJob();
-            await clearImageSession();
+          if (await handleImageSession(session)) {
+            removeImageSessionMessage();
           } else if (timedOut || Date.now() - (session.updatedAt || sessionStartedAt) > imageStaleTimeoutMs()) {
             stopSwImage('timeout');
             failImageJob('生成超时，请稍后重试。');
             showToast('生成超时');
             finishImageJob();
+            removeImageSessionMessage();
             await clearImageSession();
           }
         }, 500);
