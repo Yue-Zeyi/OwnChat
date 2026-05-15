@@ -1761,6 +1761,10 @@
     } else {
       syncImageParams();
       renderImageWorkspace();
+      if (state.imageJobs.some(job => job.status === 'generating')) {
+        startImageProgressTimer();
+        requestAnimationFrame(updateImageProgressElapsed);
+      }
       scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
       dom.imagePrompt.focus();
@@ -3775,6 +3779,11 @@
     }
   }
 
+  function isImageWorkspaceNearBottom(threshold = 120) {
+    if (!dom.imageWorkspace) return true;
+    return dom.imageWorkspace.scrollHeight - dom.imageWorkspace.scrollTop - dom.imageWorkspace.clientHeight <= threshold;
+  }
+
   function parseImageOutputs(data, format) {
     return (data.data || []).map(item => ({
       b64: item.b64_json || '',
@@ -5500,10 +5509,11 @@
   dom.imageGallery.addEventListener('load', (e) => {
     const img = e.target.closest?.('.image-preview');
     if (!img) return;
+    const shouldKeepBottom = isImageWorkspaceNearBottom();
     const result = img.closest('.image-result');
     if (!result) return;
     updateImageOutputMeta(result.dataset.job, parseInt(result.dataset.index, 10), img);
-    if (state.mode === 'image') scrollImageWorkspaceToBottom(false);
+    if (state.mode === 'image' && shouldKeepBottom) scrollImageWorkspaceToBottom(false);
   }, true);
 
   dom.imageViewerClose.addEventListener('click', closeImageViewer);
