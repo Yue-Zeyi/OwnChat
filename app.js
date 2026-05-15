@@ -545,6 +545,7 @@
     if (summary.hasImagePromptModel) state.imagePromptModel = summary.imagePromptModel;
     if (summary.imageDefaults) state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, summary.imageDefaults);
     state.modelsCache = mergeUnique([state.model], summary.chatModels, state.modelsCache);
+    if (summary.chatModel && currentConv() && !currentConv().model) currentConv().model = summary.chatModel;
     state.imageModelsCache = mergeUnique(
       [state.imageModel],
       summary.imageModels,
@@ -608,6 +609,15 @@
     return state.conversations.find(c => c.id === state.currentConvId);
   }
 
+  function conversationModel(conv = currentConv()) {
+    return conv?.model || state.model || '';
+  }
+
+  function ensureConversationModel(conv = currentConv()) {
+    if (conv && !conv.model && state.model) conv.model = state.model;
+    return conversationModel(conv);
+  }
+
   function conversationShowThinking(conv = currentConv()) {
     return conv?.showThinking !== undefined ? conv.showThinking !== false : state.showThinking !== false;
   }
@@ -617,7 +627,7 @@
   }
 
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: null, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: state.showThinking !== false, includeContextDefault: true };
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), model: state.model, temperature: 0.7, topP: 1, maxTokens: null, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: state.showThinking !== false, includeContextDefault: true };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -632,7 +642,7 @@
     return (state.imageApiKey || state.apiKey || '').trim();
   }
 
-  function configured() { return state.baseUrl && state.apiKey && state.model; }
+  function configured() { return state.baseUrl && state.apiKey && (state.model || conversationModel()); }
   function imageConfigured() { return effectiveImageBaseUrl() && effectiveImageApiKey() && state.imageModel; }
   function parseSourcedModelRef(value, fallback = 'image') {
     const raw = (value || '').trim();
@@ -640,7 +650,7 @@
     if (match) return { source: match[1].toLowerCase(), model: match[2].trim(), value: `${match[1].toLowerCase()}:${match[2].trim()}` };
 
     const hasImageModel = state.imageModelsCache.includes(raw) || DEFAULT_IMAGE_MODELS.includes(raw);
-    const hasChatModel = state.modelsCache.includes(raw) || raw === state.model;
+    const hasChatModel = state.modelsCache.includes(raw) || raw === state.model || raw === conversationModel();
     const source = hasChatModel && !hasImageModel ? 'chat' : fallback;
     return { source, model: raw, value: raw ? `${source}:${raw}` : '' };
   }
@@ -762,6 +772,20 @@
     if (sysMsg) result.push(sysMsg);
     result.push(...head, ...keepTail);
     return result;
+  }
+
+  function contextMessagesForRequest(conv, currentUserMsg, includeContext) {
+    if (!includeContext) return [currentUserMsg];
+    const messages = conv?.messages || [];
+    const currentIdx = messages.lastIndexOf(currentUserMsg);
+    const searchEnd = currentIdx >= 0 ? currentIdx - 1 : messages.length - 1;
+    for (let i = searchEnd; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg?.role === 'user' && msg.includeContext === false) {
+        return messages.slice(i);
+      }
+    }
+    return messages;
   }
 
   function apiMessagesTokenCount(messages) {
@@ -890,7 +914,7 @@
       `HTTP 状态: ${status}`,
       `错误信息: ${message || `HTTP ${status}`}`,
       `当前模式: ${state.mode}`,
-      `对话模型: ${state.model || '未配置'}`,
+      `对话模型: ${conversationModel() || '未配置'}`,
       `绘画模型: ${state.imageModel || '未配置'}`,
     ].join('\n');
     return error;
@@ -1472,7 +1496,7 @@
   function updateModelBadge() {
     dom.currentModel.textContent = state.mode === 'image'
       ? (state.imageMapModel ? `映射 ${formatSourcedModel(state.imageMapModel)}` : (state.imageModel || '未配置'))
-      : (state.model || '未配置');
+      : (conversationModel() || '未配置');
   }
 
   function applyTheme() {
@@ -1756,6 +1780,7 @@
     updateModelBadge();
     updateSidebar();
     if (mode === 'chat') {
+      syncConvParams();
       resumeStreamPollIfNeeded();
       dom.userInput.focus();
     } else {
@@ -2150,8 +2175,8 @@
   function renderModelDropdown() {
     const models = state.mode === 'image'
       ? mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS)
-      : state.modelsCache;
-    const current = state.mode === 'image' ? state.imageModel : state.model;
+      : mergeUnique([conversationModel()], state.modelsCache);
+    const current = state.mode === 'image' ? state.imageModel : conversationModel();
     dom.modelDropdownList.innerHTML = `
       <div class="model-dropdown-header">选择模型</div>
       <div class="model-dropdown-scroll">
@@ -2205,7 +2230,7 @@
   function populateImageMapModelSelect() {
     const current = parseMapModelRef(state.imageMapModel);
     dom.cfgImageMapModelSelect.innerHTML = '<option value="">关闭映射，使用绘画模型</option>';
-    mergeUnique([state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
+    mergeUnique([conversationModel(), state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `chat:${m}`;
       opt.textContent = `${m} · 对话`;
@@ -2224,7 +2249,7 @@
   function populateImagePromptModelSelect() {
     const current = parsePromptModelRef(state.imagePromptModel);
     dom.cfgImagePromptModelSelect.innerHTML = '<option value="">关闭提示词优化</option>';
-    mergeUnique([state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
+    mergeUnique([conversationModel(), state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `chat:${m}`;
       opt.textContent = `${m} · 对话`;
@@ -2271,6 +2296,12 @@
     if (!ensureModeConfigured('chat')) return;
     const conv = currentConv();
     if (!conv) return;
+    const chatModel = ensureConversationModel(conv);
+    if (!chatModel) {
+      showSettings('chat');
+      showToast('请先选择对话模型');
+      return;
+    }
     const retryUserMsg = opts.userMessage ? cloneMessage(opts.userMessage) : null;
     if (!retryUserMsg && hasPendingFileReads()) {
       showToast('附件还在读取中，请稍后发送');
@@ -2318,7 +2349,7 @@
     }
 
     // Build API messages with context window trimming
-    const sourceMessages = includeContext ? conv.messages : [userMsgData];
+    const sourceMessages = contextMessagesForRequest(conv, userMsgData, includeContext);
     const rawApiMessages = sourceMessages.map(m => {
       if (typeof m.content === 'string') return { role: m.role, content: m.content };
       return { role: m.role, content: m.content };
@@ -2339,18 +2370,18 @@
     updateSendBtn();
 
     // Write stream session metadata
-    await writeStreamSession({ convId: conv.id, model: state.model, requestInputTokens, includeContext, startTime: Date.now() });
+    await writeStreamSession({ convId: conv.id, model: chatModel, requestInputTokens, includeContext, startTime: Date.now() });
 
     addTyping();
 
     // Add a placeholder streaming message to conv.messages for crash recovery
-    const streamPlaceholder = { role: 'assistant', content: '', tokens: 0, model: state.model, requestInputTokens, streaming: true };
+    const streamPlaceholder = { role: 'assistant', content: '', tokens: 0, model: chatModel, requestInputTokens, streaming: true };
     conv.messages.push(streamPlaceholder);
     const streamMsgIdx = conv.messages.length - 1;
     persist([KEYS.conversations, KEYS.currentConvId]);
 
     // Build request params for the Service Worker to make the ONLY API call
-    const reqBody = { model: state.model, messages: apiMessages, stream: true };
+    const reqBody = { model: chatModel, messages: apiMessages, stream: true };
     reqBody.temperature = conv.temperature;
     reqBody.top_p = conv.topP;
     const maxTokens = explicitMaxTokens(conv);
@@ -2367,7 +2398,7 @@
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
         body: JSON.stringify(reqBody),
         convId: conv.id,
-        model: state.model,
+        model: chatModel,
         requestInputTokens,
         includeContext,
       });
@@ -2462,18 +2493,18 @@
 
           if (finalSession.status === 'error') {
             const detail = finalSession.error ? `\n\n\`\`\`text\n${finalSession.error}\n\`\`\`` : '';
-            msgData = { role: 'assistant', content: `**错误**: 请求失败${detail}`, tokens: 0, model: state.model };
+            msgData = { role: 'assistant', content: `**错误**: 请求失败${detail}`, tokens: 0, model: chatModel };
           } else if (finalSession.status === 'stopped') {
             const stoppedContent = finalContent.trim()
               ? `${finalContent}\n\n_已停止生成_`
               : '**已停止生成**';
-            msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: state.model };
+            msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: chatModel };
             if (finalUsage) msgData.usage = finalUsage;
             if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
             if (finalReasoning) msgData.reasoningContent = finalReasoning;
             if (Number.isFinite(outputTimeMs)) msgData.outputTimeMs = outputTimeMs;
           } else {
-            msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: state.model };
+            msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: chatModel };
             if (finalUsage) msgData.usage = finalUsage;
             if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
             if (Number.isFinite(outputTimeMs)) msgData.outputTimeMs = outputTimeMs;
@@ -2650,7 +2681,7 @@
         const outputTokens = usageOutputTokens(streamUsage, estimateTokens(finalContent));
         const outputEndTime = Date.now();
         const outputTimeMs = outputStartTime ? outputEndTime - outputStartTime : null;
-        const msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: state.model };
+        const msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: chatModel };
         if (streamUsage) msgData.usage = streamUsage;
         if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
         if (outputTimeMs !== null) msgData.outputTimeMs = outputTimeMs;
@@ -2686,7 +2717,7 @@
           const stoppedContent = assistantContent.trim()
             ? `${assistantContent}\n\n_已停止生成_`
             : '**已停止生成**';
-          const stoppedMsg = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(assistantContent), model: state.model };
+          const stoppedMsg = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(assistantContent), model: chatModel };
           if (firstTokenTime !== null) stoppedMsg.firstTokenMs = firstTokenTime;
           if (outputStartTime) stoppedMsg.outputTimeMs = Date.now() - outputStartTime;
           if (reasoningContent) stoppedMsg.reasoningContent = reasoningContent;
@@ -2694,7 +2725,7 @@
           else conv.messages.push(stoppedMsg);
         } else {
           const detail = e.diagnostics ? `\n\n\`\`\`text\n${e.diagnostics}\n\`\`\`` : '';
-          const errMsg = { role: 'assistant', content: `**错误**: ${e.message}${detail}`, tokens: 0 };
+          const errMsg = { role: 'assistant', content: `**错误**: ${e.message}${detail}`, tokens: 0, model: chatModel };
           if (conv.messages[streamMsgIdx]?.streaming) conv.messages[streamMsgIdx] = errMsg;
           else conv.messages.push(errMsg);
         }
@@ -4376,6 +4407,9 @@
   function syncConvParams() {
     const conv = currentConv();
     if (conv) {
+      const hadModel = !!conv.model;
+      ensureConversationModel(conv);
+      if (!hadModel && conv.model) persist([KEYS.conversations]);
       dom.paramTemperature.value = conv.temperature;
       dom.paramTopP.value = conv.topP;
       dom.paramMaxTokens.value = tokensToK(explicitMaxTokens(conv), '');
@@ -4383,6 +4417,7 @@
       dom.convRenameInput.value = conv.title;
       dom.convRoleInput.value = conv.systemPrompt || '';
     }
+    updateModelBadge();
     updateThinkingToggleBtn();
     updateContextToggleBtn();
   }
@@ -4689,17 +4724,18 @@
     const usage = normalizeUsage(session.usage);
     const outputTokens = usageOutputTokens(usage, estimateTokens(content));
     const requestInputTokens = Number(session.requestInputTokens || conv.messages[streamIdx]?.requestInputTokens || 0);
+    const chatModel = session.model || conversationModel(conv);
     let msgData;
     if (session.status === 'error') {
       const detail = session.error ? `\n\n\`\`\`text\n${session.error}\n\`\`\`` : '';
-      msgData = { role: 'assistant', content: `**错误**: 请求失败${detail}`, tokens: 0, model: state.model };
+      msgData = { role: 'assistant', content: `**错误**: 请求失败${detail}`, tokens: 0, model: chatModel };
     } else if (session.status === 'stopped') {
       const stoppedContent = content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**';
-      msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: state.model };
+      msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: chatModel };
       if (usage) msgData.usage = usage;
       if (reasoning) msgData.reasoningContent = reasoning;
     } else {
-      msgData = { role: 'assistant', content, tokens: outputTokens, model: state.model };
+      msgData = { role: 'assistant', content, tokens: outputTokens, model: chatModel };
       if (usage) msgData.usage = usage;
       if (reasoning) { msgData.reasoningContent = reasoning; }
     }
@@ -4738,7 +4774,7 @@
   // Finalize a streaming placeholder as a stopped message (no active stream available)
   function finalizeStreamingPlaceholder(conv, streamIdx, content, reasoning) {
     const stoppedContent = content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**';
-    const msgData = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(content), model: state.model };
+    const msgData = { role: 'assistant', content: stoppedContent, tokens: estimateTokens(content), model: conv.messages[streamIdx]?.model || conversationModel(conv) };
     if (reasoning) msgData.reasoningContent = reasoning;
     if (conv.messages[streamIdx]?.streaming) conv.messages[streamIdx] = msgData;
     else conv.messages.push(msgData);
@@ -5086,6 +5122,7 @@
       state.apiKey = k;
       state.model = m;
       state.modelsCache = mergeUnique([m], state.modelsCache);
+      if (currentConv() && !currentConv().model) currentConv().model = m;
     }
     if (needImage || ib || ik || dom.cfgImageModelManual.value.trim()) {
       if (!ib || !ik || !im) { alert('绘画配置需要同时填写 Base URL、API Key 和模型'); return; }
@@ -5116,6 +5153,7 @@
     state.baseUrl = normalizeUrl(b);
     state.apiKey = k;
     state.model = m;
+    if (currentConv() && !currentConv().model) currentConv().model = m;
     persist();
     updateModelBadge();
     hideSetup();
@@ -5145,14 +5183,19 @@
     if (!opt) return;
     if (state.mode === 'image') {
       state.imageModel = opt.dataset.model;
+      persist([KEYS.imageModel]);
     }
-    else state.model = opt.dataset.model;
-    persist();
+    else {
+      const conv = currentConv() || newConv();
+      conv.model = opt.dataset.model;
+      state.modelsCache = mergeUnique([conv.model], state.modelsCache);
+      persist([KEYS.conversations, KEYS.currentConvId, KEYS.modelsCache]);
+    }
     updateModelBadge();
     closeModelDropdown();
     updateSendBtn();
     updateImageGenerateBtn();
-    showToast(`已切换到 ${state.mode === 'image' ? state.imageModel : state.model}`);
+    showToast(`已切换到 ${state.mode === 'image' ? state.imageModel : conversationModel()}`);
   });
 
   document.addEventListener('click', (e) => {
@@ -5590,7 +5633,7 @@
             const reasoning = oldConv.messages[streamIdx].reasoningContent || '';
             // In SW mode: the abort sends stop-stream, SW will finalize in IndexedDB.
             // We directly finalize the placeholder here since we know it was stopped.
-            oldConv.messages[streamIdx] = { role: 'assistant', content: content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**', tokens: estimateTokens(content), model: state.model };
+            oldConv.messages[streamIdx] = { role: 'assistant', content: content.trim() ? `${content}\n\n_已停止生成_` : '**已停止生成**', tokens: estimateTokens(content), model: oldConv.messages[streamIdx].model || conversationModel(oldConv) };
             if (reasoning) oldConv.messages[streamIdx].reasoningContent = reasoning;
             persist([KEYS.conversations]);
             updateSidebar();
