@@ -983,6 +983,21 @@
     }
   }
 
+  async function imageDbClearJobs() {
+    try {
+      const db = await openImageDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.store, 'readwrite');
+        tx.objectStore(IMAGE_DB.store).clear();
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('Image history clear failed:', e);
+    }
+    localStorage.removeItem('nc_image_jobs');
+  }
+
   // ===== File Attachment IndexedDB helpers =====
   async function fileDbPut(fileData) {
     try {
@@ -1041,6 +1056,20 @@
       });
     } catch (e) {
       console.warn('File attachment delete failed:', e);
+    }
+  }
+
+  async function fileDbClearAll() {
+    try {
+      const db = await openImageDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
+        tx.objectStore(IMAGE_DB.fileStore).clear();
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      console.warn('File attachments clear failed:', e);
     }
   }
 
@@ -1367,6 +1396,8 @@
     cfgImportInput: $('cfg-import-input'),
     chatStorageSummary: $('chat-storage-summary'),
     imageStorageSummary: $('image-storage-summary'),
+    clearChatStorage: $('clear-chat-storage'),
+    clearImageStorage: $('clear-image-storage'),
     configImportModal: $('config-import-modal'),
     configImportPreview: $('config-import-preview'),
     configImportClose: $('config-import-close'),
@@ -3443,6 +3474,66 @@
     if (isSettingsOpen()) updateStorageStats();
   }
 
+  async function clearChatStorage() {
+    if (!confirm('确认清空全部对话和附件存储？此操作不可恢复。')) return;
+    dom.clearChatStorage.disabled = true;
+    pauseActivePolls();
+    try {
+      if (state.chatAbortController) state.chatAbortController.abort();
+      state.isStreaming = false;
+      state.streamingConvId = null;
+      state.chatAbortController = null;
+      releaseChatWakeLock();
+      await clearStreamSession();
+      state.conversations = [];
+      state.currentConvId = null;
+      state.tokenStats = { input: 0, output: 0, total: 0 };
+      resetSidebarBulkMode();
+      persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+      await fileDbClearAll();
+      updateSidebar();
+      syncConvParams();
+      renderMessages();
+      updateSendBtn();
+      updateInputState();
+      updateStorageStats();
+      showToast('对话已清空');
+    } finally {
+      dom.clearChatStorage.disabled = false;
+    }
+  }
+
+  async function clearImageStorage() {
+    if (!confirm('确认清空全部绘画记录？此操作不可恢复。')) return;
+    dom.clearImageStorage.disabled = true;
+    try {
+      if (state.imageAbortController) state.imageAbortController.abort();
+      if (state.imagePollTimer) {
+        clearInterval(state.imagePollTimer);
+        state.imagePollTimer = null;
+      }
+      state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      releaseImageWakeLock();
+      stopImageProgressTimer();
+      await clearImageSession();
+      state.imageJobs = [];
+      state.currentImageJobId = null;
+      state.imageRef = null;
+      resetSidebarBulkMode();
+      persist([KEYS.currentImageJobId]);
+      await imageDbClearJobs();
+      updateSidebar();
+      renderImageRefPreview();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      updateStorageStats();
+      showToast('绘画记录已清空');
+    } finally {
+      dom.clearImageStorage.disabled = false;
+    }
+  }
+
   function renderImageWorkspace() {
     const selected = currentImageJob();
     const jobs = selected ? [selected] : [];
@@ -4748,6 +4839,8 @@
   dom.settingsImageTab.addEventListener('click', () => {
     switchSettingsTab('image');
   });
+  dom.clearChatStorage.addEventListener('click', clearChatStorage);
+  dom.clearImageStorage.addEventListener('click', clearImageStorage);
 
   document.querySelectorAll('[data-secret-toggle]').forEach(btn => {
     btn.addEventListener('click', () => {
