@@ -7,6 +7,7 @@ const STREAM_STORE = 'sessions';
 
 let activeStreamAbort = null;
 let activeImageAbort = null;
+let activeImageStopStatus = 'stopped';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', () => self.clients.claim());
@@ -28,7 +29,11 @@ self.addEventListener('message', (event) => {
     keepAlive(event, startImage(event.data));
   }
   if (event.data?.type === 'stop-image') {
-    if (activeImageAbort) { activeImageAbort.abort(); activeImageAbort = null; }
+    if (activeImageAbort) {
+      activeImageStopStatus = event.data?.status === 'timeout' ? 'timeout' : 'stopped';
+      activeImageAbort.abort();
+      activeImageAbort = null;
+    }
   }
 });
 
@@ -200,10 +205,18 @@ async function startImage(data) {
   const { jobId, requestType } = data;
   const controller = new AbortController();
   activeImageAbort = controller;
+  activeImageStopStatus = 'stopped';
+  const startedAt = Number(data.startedAt) || Date.now();
+  const timeoutMs = Math.max(60 * 1000, Number(data.timeoutMs) || 30 * 60 * 1000);
+  let requestTimedOut = false;
+  const timeout = setTimeout(() => {
+    requestTimedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
   await updateStreamData({
     id: IMAGE_KEY, jobId, requestType,
-    status: 'connecting', updatedAt: Date.now(), outputs: '', error: '',
+    status: 'connecting', startedAt, timeoutMs, updatedAt: Date.now(), outputs: '', error: '',
   });
   const heartbeat = setInterval(() => {
     updateStreamData({ id: IMAGE_KEY, updatedAt: Date.now() });
@@ -347,15 +360,23 @@ async function startImage(data) {
     });
   } catch (e) {
     if (e?.name === 'AbortError') {
-      await updateStreamData({ id: IMAGE_KEY, status: 'stopped', updatedAt: Date.now() });
+      const status = requestTimedOut || activeImageStopStatus === 'timeout' ? 'timeout' : 'stopped';
+      await updateStreamData({
+        id: IMAGE_KEY,
+        status,
+        updatedAt: Date.now(),
+        error: status === 'timeout' ? '生成超时' : '',
+      });
       activeImageAbort = null;
       return;
     }
     await updateStreamData({ id: IMAGE_KEY, status: 'error', updatedAt: Date.now(), error: String(e.message || e) });
   } finally {
     clearInterval(heartbeat);
+    clearTimeout(timeout);
+    if (activeImageAbort === controller) activeImageAbort = null;
+    activeImageStopStatus = 'stopped';
   }
-  activeImageAbort = null;
 }
 
 function dataUrlToBlob(dataUrl) {

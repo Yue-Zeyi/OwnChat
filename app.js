@@ -1198,6 +1198,18 @@
     return session;
   }
 
+  function parseImageSessionOutputs(session) {
+    try {
+      const raw = session?.outputs;
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw !== 'string' || !raw.trim()) return [];
+      const outputs = JSON.parse(raw);
+      return Array.isArray(outputs) ? outputs : [];
+    } catch {
+      return [];
+    }
+  }
+
   async function clearImageSession() {
     try {
       const db = await openStreamDb();
@@ -3289,7 +3301,11 @@
   }
 
   function imageTimeoutMs(params) {
-    return Math.max(10 * 60 * 1000, estimateImageSeconds(params) * 1000 * 3);
+    return Math.max(30 * 60 * 1000, estimateImageSeconds(params) * 1000 * 3);
+  }
+
+  function imageStaleTimeoutMs() {
+    return 10 * 60 * 1000;
   }
 
   function startImageProgressTimer() {
@@ -4012,6 +4028,7 @@
     scrollImageWorkspaceToBottom();
     startImageProgressTimer();
     let timeoutId = null;
+    const requestTimeoutMs = imageTimeoutMs(params);
     const failImageJob = (message, status = 'error') => {
       const isCancelled = status === 'cancelled';
       const durationMs = Date.now() - startedAt;
@@ -4047,8 +4064,11 @@
       const swTarget = await ensureServiceWorkerTarget();
       if (swTarget) {
         // === SW background mode: Service Worker owns the long image request ===
+        const stopSwImage = (status = 'stopped') => {
+          try { swTarget.postMessage({ type: 'stop-image', status }); } catch { /* ignore */ }
+        };
         state.imageAbortController = { abort: () => {
-          swTarget.postMessage({ type: 'stop-image' });
+          stopSwImage();
         }};
         const imageBaseUrl = effectiveImageBaseUrl();
         const imageApiKey = effectiveImageApiKey();
@@ -4092,14 +4112,19 @@
             requestType: 'generations', outputFormat: params.outputFormat,
           };
         }
+        swData.startedAt = startedAt;
+        swData.timeoutMs = requestTimeoutMs;
         swTarget.postMessage(swData);
 
         // Poll IndexedDB for image result (every 500ms)
         state.imagePollTimer = setInterval(async () => {
           const session = await getImageSession();
-          const timedOut = Date.now() - startedAt > imageTimeoutMs(params);
+          const sessionStartedAt = session?.startedAt || startedAt;
+          const sessionTimeoutMs = Math.max(requestTimeoutMs, Number(session?.timeoutMs) || 0);
+          const timedOut = Date.now() - sessionStartedAt > sessionTimeoutMs;
           if (!session) {
             if (timedOut) {
+              stopSwImage('timeout');
               failImageJob('生成超时，请稍后重试。');
               showToast('生成超时');
               finishImageJob();
@@ -4109,7 +4134,7 @@
           if (session.jobId && session.jobId !== job.id) return;
 
           if (session.status === 'complete') {
-            const nextOutputs = JSON.parse(session.outputs || '[]');
+            const nextOutputs = parseImageSessionOutputs(session);
             if (nextOutputs.length === 0) {
               activeReply.error = '接口未返回可显示的图片数据';
               activeReply.status = 'error';
@@ -4135,12 +4160,18 @@
             showToast('生成失败');
             finishImageJob();
             await clearImageSession();
+          } else if (session.status === 'timeout') {
+            failImageJob(session.error || '生成超时，请稍后重试。');
+            showToast('生成超时');
+            finishImageJob();
+            await clearImageSession();
           } else if (session.status === 'stopped') {
             failImageJob('请求已中断', 'cancelled');
             showToast('生成已中断');
             finishImageJob();
             await clearImageSession();
-          } else if (timedOut || Date.now() - (session.updatedAt || startedAt) > imageTimeoutMs(params)) {
+          } else if (timedOut || Date.now() - (session.updatedAt || sessionStartedAt) > imageStaleTimeoutMs()) {
+            stopSwImage('timeout');
             failImageJob('生成超时，请稍后重试。');
             showToast('生成超时');
             finishImageJob();
@@ -4150,7 +4181,7 @@
 
       } else {
         // === Fallback: no SW, direct fetch ===
-        timeoutId = setTimeout(() => controller.abort(), imageTimeoutMs(params));
+        timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
         const nextOutputs = state.imageMapModel
           ? await requestMappedImage(prompt, params, ref, controller.signal)
           : ref
@@ -5803,7 +5834,7 @@
     if (!activeReply) return;
     const durationMs = Date.now() - (activeReply.startedAt || job.startedAt || job.createdAt || Date.now());
     if (session.status === 'complete') {
-      const outputs = JSON.parse(session.outputs || '[]');
+      const outputs = parseImageSessionOutputs(session);
       if (outputs.length === 0) {
         activeReply.error = '接口未返回可显示的图片数据';
         activeReply.status = 'error';
@@ -5886,11 +5917,34 @@
       return true;
     }
 
+    if (session.status === 'timeout') {
+      applyRecoveredImageSession(job, session);
+      persist();
+      imageDbPutJob(job);
+      updateSidebar();
+      renderImageWorkspace();
+      scrollImageWorkspaceToBottom(false);
+      updateImageGenerateBtn();
+      await clearImageSession();
+      return true;
+    }
+
     // Still streaming/connecting — start polling (same pattern as chat recovery)
     if (session.status === 'streaming' || session.status === 'connecting') {
       job.status = 'generating';
       const activeReply = currentImageActiveReply(job);
       if (activeReply) activeReply.status = 'generating';
+      const recoveredStartedAt = session.startedAt || activeReply?.startedAt || job.startedAt || job.createdAt || Date.now();
+      const recoveredTimeoutMs = Math.max(
+        Number(session.timeoutMs) || 0,
+        imageTimeoutMs(activeReply?.params || job.params || state.imageDefaults),
+      );
+      const stopRecoveredSwImage = async () => {
+        try {
+          const target = await ensureServiceWorkerTarget(1000);
+          target?.postMessage({ type: 'stop-image', status: 'timeout' });
+        } catch { /* ignore */ }
+      };
       state.isGeneratingImage = true;
       state.currentImageJobId = job.id;
       requestImageWakeLock();
@@ -5913,6 +5967,8 @@
           return;
         }
 
+        const sStartedAt = s.startedAt || recoveredStartedAt;
+        const sTimeoutMs = Math.max(recoveredTimeoutMs, Number(s.timeoutMs) || 0);
         if (s.status === 'complete') {
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
@@ -5924,7 +5980,7 @@
           updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
           showToast(job.status === 'done' ? '图片已恢复完成' : '图片生成失败');
           await clearImageSession();
-        } else if (s.status === 'error' || s.status === 'stopped') {
+        } else if (s.status === 'error' || s.status === 'stopped' || s.status === 'timeout') {
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
           state.isGeneratingImage = false;
@@ -5934,13 +5990,13 @@
           persist(); imageDbPutJob(job);
           updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
           await clearImageSession();
-        } else if (Date.now() - s.updatedAt > 600000) {
-          // 10 min timeout — SW was likely killed
+        } else if (Date.now() - sStartedAt > sTimeoutMs || Date.now() - (s.updatedAt || sStartedAt) > imageStaleTimeoutMs()) {
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;
           state.isGeneratingImage = false;
           releaseImageWakeLock();
           stopImageProgressTimer();
+          await stopRecoveredSwImage();
           applyRecoveredImageSession(job, Object.assign({}, s, { status: 'timeout' }));
           persist(); imageDbPutJob(job);
           updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
