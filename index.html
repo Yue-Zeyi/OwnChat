@@ -145,6 +145,7 @@
           accept="image/*,.pdf,.txt,.md,.csv,.json,.py,.js,.ts,.jsx,.tsx,.html,.css,.xml,.yaml,.yml,.php,.java,.go,.rs,.c,.cpp,.h,.hpp,.cs,.rb,.swift,.kt,.kts,.vue,.svelte,.sh,.bash,.zsh,.sql,.toml,.ini,.env,.log" multiple title="上传文件">
         <div class="input-wrapper">
           <div id="file-preview" class="file-preview hidden"></div>
+          <div class="textarea-resize-handle" data-resize-target="user-input" aria-hidden="true"></div>
           <textarea id="user-input" placeholder="发送消息..." rows="1" maxlength="100000"></textarea>
           <div class="input-toolbar">
             <div class="toolbar-left">
@@ -217,12 +218,12 @@
             </div>
             <div class="conv-settings-row">
               <label>回复长度上限</label>
-              <input type="number" id="param-max-tokens" min="1" max="128" step="1" value="128" title="回复长度上限">
-              <span class="param-hint">单位 K tokens，限制单次回答长度</span>
+              <input type="number" id="param-max-tokens" min="1" max="128" step="1" placeholder="自动" title="回复长度上限">
+              <span class="param-hint">单位 K tokens，留空则不传 max_tokens</span>
             </div>
             <div class="conv-settings-row">
               <label>携带上文上限</label>
-              <input type="number" id="param-context-limit" min="0" max="512" step="1" value="128" title="携带上文上限">
+              <input type="number" id="param-context-limit" min="0" max="512" step="1" value="256" title="携带上文上限">
               <span class="param-hint">单位 K tokens，限制本次请求携带的历史消息，0=不裁剪</span>
             </div>
           </div>
@@ -235,6 +236,7 @@
         <input type="file" id="image-ref-input" class="hidden" accept="image/*" title="上传参考图">
         <div class="image-input-wrapper">
           <div id="image-ref-preview" class="image-ref-preview hidden"></div>
+          <div class="textarea-resize-handle" data-resize-target="image-prompt" aria-hidden="true"></div>
           <textarea id="image-prompt" placeholder="描述你想生成的图片..." rows="3" maxlength="4000"></textarea>
           <div class="image-params input-toolbar">
             <div class="toolbar-left image-toolbar-left">

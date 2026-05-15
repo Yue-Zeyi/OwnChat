@@ -426,6 +426,7 @@
     imageViewerTransform: { scale: 1, x: 0, y: 0 },
     imageViewerDragging: null,
     imageViewerTouch: null,
+    textareaResize: null,
     imageRef: null,
     pendingFiles: [],
     sidebarSearch: '',
@@ -616,7 +617,7 @@
   }
 
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: DEFAULT_MAX_TOKENS, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: state.showThinking !== false, includeContextDefault: true };
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), temperature: 0.7, topP: 1, maxTokens: null, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: state.showThinking !== false, includeContextDefault: true };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -687,20 +688,30 @@
     return !!(endpoint?.baseUrl && endpoint.apiKey && endpoint.model);
   }
 
-  const DEFAULT_CONTEXT_LIMIT = 128000;
+  const DEFAULT_CONTEXT_LIMIT = 256000;
   const DEFAULT_MAX_TOKENS = 128000;
   const TOKEN_K = 1000;
+  const LEGACY_DEFAULT_MAX_TOKENS = 128000;
 
   function tokensToK(tokens, fallback) {
+    if (tokens === null || tokens === undefined || tokens === '') return '';
     const value = Number.isFinite(Number(tokens)) ? Number(tokens) : fallback;
     return Math.round(value / TOKEN_K);
   }
 
   function kToTokens(value, fallback, opts = {}) {
+    if (value === null || value === undefined || String(value).trim() === '') return null;
     const kValue = parseFloat(value);
     if (!Number.isFinite(kValue) || kValue < 0) return fallback;
     if (opts.allowZero && kValue === 0) return 0;
     return Math.max(TOKEN_K, Math.round(kValue * TOKEN_K));
+  }
+
+  function explicitMaxTokens(conv) {
+    const value = Number(conv?.maxTokens);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    if (value === LEGACY_DEFAULT_MAX_TOKENS) return null;
+    return Math.round(value);
   }
 
   function trimContextMessages(messages, systemPrompt, maxTokens) {
@@ -2338,7 +2349,8 @@
     const reqBody = { model: state.model, messages: apiMessages, stream: true };
     reqBody.temperature = conv.temperature;
     reqBody.top_p = conv.topP;
-    reqBody.max_tokens = conv.maxTokens;
+    const maxTokens = explicitMaxTokens(conv);
+    if (maxTokens) reqBody.max_tokens = maxTokens;
     reqBody.stream_options = { include_usage: true };
     const streamUrl = requestUrl(state.baseUrl, '/chat/completions');
     const swAvailable = navigator.serviceWorker?.controller;
@@ -2400,6 +2412,7 @@
           const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
           streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
           streamEls.thinkingMd.innerHTML = renderMd(reasoning);
+          dom.messages.scrollTop = dom.messages.scrollHeight;
         }
 
         // Update content
@@ -2700,9 +2713,57 @@
   }
 
   // ===== Auto-resize =====
+  function textareaHeightLimit(el) {
+    if (el === dom.imagePrompt) return isMobile() ? 180 : 260;
+    return isMobile() ? 190 : 260;
+  }
+
   function autoResize() {
+    if (dom.userInput.dataset.manualHeight === 'true') return;
     dom.userInput.style.height = 'auto';
-    dom.userInput.style.height = Math.min(dom.userInput.scrollHeight, 150) + 'px';
+    dom.userInput.style.height = Math.min(dom.userInput.scrollHeight, textareaHeightLimit(dom.userInput)) + 'px';
+  }
+
+  function setupTextareaResizeHandles() {
+    document.querySelectorAll('.textarea-resize-handle[data-resize-target]').forEach(handle => {
+      const target = $(handle.dataset.resizeTarget);
+      if (!target) return;
+      const startDrag = event => {
+        const point = event.touches?.[0] || event;
+        state.textareaResize = {
+          handle,
+          target,
+          startY: point.clientY,
+          startHeight: target.getBoundingClientRect().height,
+        };
+        target.dataset.manualHeight = 'true';
+        handle.classList.add('is-dragging');
+        event.preventDefault();
+      };
+      handle.addEventListener('mousedown', startDrag);
+      handle.addEventListener('touchstart', startDrag, { passive: false });
+    });
+    const moveDrag = event => {
+      const drag = state.textareaResize;
+      if (!drag) return;
+      const point = event.touches?.[0] || event;
+      const delta = drag.startY - point.clientY;
+      const minHeight = drag.target === dom.imagePrompt ? 72 : 56;
+      const maxHeight = textareaHeightLimit(drag.target);
+      const nextHeight = Math.max(minHeight, Math.min(maxHeight, drag.startHeight + delta));
+      drag.target.style.height = `${nextHeight}px`;
+      event.preventDefault();
+    };
+    const endDrag = () => {
+      if (!state.textareaResize) return;
+      state.textareaResize.handle.classList.remove('is-dragging');
+      state.textareaResize = null;
+    };
+    window.addEventListener('mousemove', moveDrag);
+    window.addEventListener('touchmove', moveDrag, { passive: false });
+    window.addEventListener('mouseup', endDrag);
+    window.addEventListener('touchend', endDrag);
+    window.addEventListener('touchcancel', endDrag);
   }
 
   // ===== Settings Modal =====
@@ -4308,7 +4369,7 @@
     if (conv) {
       dom.paramTemperature.value = conv.temperature;
       dom.paramTopP.value = conv.topP;
-      dom.paramMaxTokens.value = tokensToK(conv.maxTokens, DEFAULT_MAX_TOKENS);
+      dom.paramMaxTokens.value = tokensToK(explicitMaxTokens(conv), '');
       dom.paramContextLimit.value = tokensToK(conv.contextLimit, DEFAULT_CONTEXT_LIMIT);
       dom.convRenameInput.value = conv.title;
       dom.convRoleInput.value = conv.systemPrompt || '';
@@ -4322,7 +4383,7 @@
     if (!conv) return;
     conv.temperature = parseFloat(dom.paramTemperature.value) || 0.7;
     conv.topP = parseFloat(dom.paramTopP.value) || 1;
-    conv.maxTokens = kToTokens(dom.paramMaxTokens.value, DEFAULT_MAX_TOKENS);
+    conv.maxTokens = kToTokens(dom.paramMaxTokens.value, null);
     conv.contextLimit = kToTokens(dom.paramContextLimit.value, DEFAULT_CONTEXT_LIMIT, { allowZero: true });
     conv.systemPrompt = dom.convRoleInput.value.trim();
     const newName = dom.convRenameInput.value.trim();
@@ -5544,6 +5605,7 @@
     if (!text && !state.pendingFiles.some(isFileReady)) return;
     if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); }
     dom.userInput.value = '';
+    delete dom.userInput.dataset.manualHeight;
     autoResize();
     sendMsg(text);
   });
@@ -5563,6 +5625,7 @@
 
   // ===== Init =====
   applyTheme();
+  setupTextareaResizeHandles();
 
   // Register Service Worker for long requests and refresh recovery.
   registerServiceWorker();
