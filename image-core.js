@@ -103,7 +103,6 @@
     if (Number.isFinite(normalized.input)) parts.push(`输入 ${formatCount(normalized.input)}`);
     if (Number.isFinite(normalized.output)) parts.push(`输出 ${formatCount(normalized.output)}`);
     if (Number.isFinite(normalized.total)) parts.push(`总计 ${formatCount(normalized.total)}`);
-    if (Number.isFinite(normalized.details?.outputImage)) parts.push(`图片 ${formatCount(normalized.details.outputImage)}`);
     return [{
       text: `Tokens ${formatCount(primary)}`,
       title: parts.join(' / '),
