@@ -1,392 +1,87 @@
 (function () {
   'use strict';
 
-  // ===== Storage =====
-  const KEYS = {
-    baseUrl: 'nc_base_url',
-    apiKey: 'nc_api_key',
-    model: 'nc_model',
-    modelsCache: 'nc_models_cache',
-    conversations: 'nc_conversations',
-    currentConvId: 'nc_current_conv_id',
-    tokenStats: 'nc_token_stats',
-    showThinking: 'nc_show_thinking',
-    includeContext: 'nc_include_context',
-    sidebarCollapsed: 'nc_sidebar_collapsed',
-    theme: 'nc_theme',
-    mode: 'nc_mode',
-    imageBaseUrl: 'nc_image_base_url',
-    imageApiKey: 'nc_image_api_key',
-    imageModel: 'nc_image_model',
-    imageMapModel: 'nc_image_map_model',
-    imagePromptModel: 'nc_image_prompt_model',
-    imageModelsCache: 'nc_image_models_cache',
-    currentImageJobId: 'nc_current_image_job_id',
-    imageDefaults: 'nc_image_defaults',
-  };
-
-  function save(k, v) {
-    try { localStorage.setItem(k, JSON.stringify(v)); }
-    catch (e) { console.warn('localStorage save failed:', k, e); }
-  }
-  function load(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } }
-
-  // ===== Token Estimation =====
-  function estimateTokens(text) {
-    if (!text) return 0;
-    let tokens = 0;
-    for (const char of text) {
-      const code = char.charCodeAt(0);
-      if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3040 && code <= 0x30ff) || (code >= 0xac00 && code <= 0xd7af)) {
-        tokens += 1.5;
-      } else if (code > 127) {
-        tokens += 1.2;
-      } else {
-        tokens += 0.25;
-      }
-    }
-    return Math.ceil(tokens);
-  }
-
-  // ===== Markdown Renderer =====
-  const mdCopyIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-  const MarkdownIt = window.markdownit || (typeof markdownit !== 'undefined' ? markdownit : null);
-  const mdParser = MarkdownIt ? MarkdownIt({
-    html: false,
-    linkify: true,
-    typographer: false,
-    breaks: false,
-    highlight(code, lang) {
-      const safeLang = (lang || '').trim();
-      const highlighted = highlightCode(code.replace(/\n$/, ''), safeLang);
-      return `<div class="code-block">${codeHeader(safeLang)}<pre><code>${highlighted}</code></pre></div>`;
-    },
-  }) : null;
-
-  if (mdParser) {
-    mdParser.core.ruler.after('inline', 'ownchat-task-list', (state) => {
-      const tokens = state.tokens;
-      for (let i = 2; i < tokens.length; i++) {
-        if (tokens[i].type !== 'inline') continue;
-        if (tokens[i - 1]?.type !== 'paragraph_open' || tokens[i - 2]?.type !== 'list_item_open') continue;
-
-        const match = tokens[i].content.match(/^\[([ xX])\]\s+/);
-        if (!match) continue;
-
-        const checked = match[1].trim() !== '';
-        tokens[i - 2].attrJoin('class', checked ? 'task-item task-checked' : 'task-item task-unchecked');
-        tokens[i].content = tokens[i].content.slice(match[0].length);
-        tokens[i].children = tokens[i].children || [];
-        if (tokens[i].children[0]?.type === 'text') {
-          tokens[i].children[0].content = tokens[i].children[0].content.slice(match[0].length);
-        }
-
-        const marker = new state.Token('html_inline', '', 0);
-        marker.content = `<span class="task-box">${checked ? '✓' : ''}</span>`;
-        tokens[i].children.unshift(marker);
-      }
-    });
-
-    const defaultLinkOpen = mdParser.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
-    mdParser.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-      const token = tokens[idx];
-      const hrefIdx = token.attrIndex('href');
-      if (hrefIdx >= 0) {
-        token.attrs[hrefIdx][1] = sanitizeUrlValue(token.attrs[hrefIdx][1]);
-      }
-      token.attrSet('target', '_blank');
-      token.attrSet('rel', 'noopener noreferrer');
-      return defaultLinkOpen(tokens, idx, options, env, self);
-    };
-    mdParser.renderer.rules.image = (tokens, idx) => {
-      const token = tokens[idx];
-      const src = token.attrGet('src') || '';
-      const alt = token.content || '';
-      return `<img src="${sanitizeUrl(src, { image: true })}" alt="${esc(stripMd(alt))}" loading="lazy">`;
-    };
-    mdParser.renderer.rules.fence = (tokens, idx, options, env, self) => {
-      const token = tokens[idx];
-      const lang = token.info ? token.info.trim().split(/\s+/)[0] : '';
-      const highlighted = options.highlight ? options.highlight(token.content, lang, '') : esc(token.content);
-      return highlighted || `<pre><code>${esc(token.content)}</code></pre>`;
-    };
-  }
-
-  function codeHeader(lang) {
-    const langLabel = lang ? `<span class="code-lang">${esc(lang)}</span>` : '';
-    return `<div class="code-header">${langLabel}<button class="code-copy-btn" type="button" title="复制代码">${mdCopyIcon}</button></div>`;
-  }
-
-  function renderMd(raw) {
-    if (!raw) return '';
-    if (mdParser) return mdParser.render(raw);
-
-    // Extract fenced code blocks first to protect their content
-    const codeBlocks = [];
-    let html = raw.replace(/```([\w#+.\-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
-      const idx = codeBlocks.length;
-      const highlighted = highlightCode(code.trimEnd(), lang);
-      codeBlocks.push(`<div class="code-block">${codeHeader(lang)}<pre><code>${highlighted}</code></pre></div>`);
-      return `\x00CODE${idx}\x00`;
-    });
-    // Also support tilde-fenced code blocks (~~~)
-    html = html.replace(/~~~([\w#+.\-]*)\n([\s\S]*?)~~~/g, (_, lang, code) => {
-      const idx = codeBlocks.length;
-      const highlighted = highlightCode(code.trimEnd(), lang);
-      codeBlocks.push(`<div class="code-block">${codeHeader(lang)}<pre><code>${highlighted}</code></pre></div>`);
-      return `\x00CODE${idx}\x00`;
-    });
-
-    // Extract inline code to protect from other transforms
-    const inlineCodes = [];
-    html = html.replace(/`([^`\n]+)`/g, (_, code) => {
-      const idx = inlineCodes.length;
-      inlineCodes.push(`<code>${esc(code)}</code>`);
-      return `\x00ICODE${idx}\x00`;
-    });
-
-    html = esc(html);
-
-    // Tables (must be before paragraph split)
-    html = html.replace(/^(\|.+\|)\n(\|[\s:|\-]+)\n((\|.+\|\n?)+)/gm, (_, header, sep, body) => {
-      const heads = header.split('|').filter(c => c.trim()).map(c => `<th>${renderInline(c.trim())}</th>`);
-      const rows = body.trim().split('\n').map(row => {
-        const cells = row.split('|').filter(c => c.trim()).map(c => `<td>${renderInline(c.trim())}</td>`);
-        return `<tr>${cells.join('')}</tr>`;
-      });
-      return `<table><thead><tr>${heads.join('')}</tr></thead><tbody>${rows.join('')}</tbody></table>`;
-    });
-
-    // Headings (with inline rendering)
-    html = html.replace(/^###### (.+)$/gm, (_, t) => `<h6>${renderInline(t)}</h6>`);
-    html = html.replace(/^##### (.+)$/gm, (_, t) => `<h5>${renderInline(t)}</h5>`);
-    html = html.replace(/^#### (.+)$/gm, (_, t) => `<h4>${renderInline(t)}</h4>`);
-    html = html.replace(/^### (.+)$/gm, (_, t) => `<h3>${renderInline(t)}</h3>`);
-    html = html.replace(/^## (.+)$/gm, (_, t) => `<h2>${renderInline(t)}</h2>`);
-    html = html.replace(/^# (.+)$/gm, (_, t) => `<h1>${renderInline(t)}</h1>`);
-
-    // Horizontal rules — support -, *, _ with optional spaces between
-    html = html.replace(/^[-*_](?:\s*[-*_]){2,}\s*$/gm, '<hr>');
-
-    // Blockquotes (support nested > and multi-line)
-    html = html.replace(/^(&gt;.*)$/gm, (_, line) => {
-      const content = line.replace(/^&gt;\s?/, '');
-      return `<blockquote>${renderInline(content)}</blockquote>`;
-    });
-    html = html.replace(/<\/blockquote>\n<blockquote>/g, '\n');
-
-    // Task lists (- [ ] / - [x])
-    html = html.replace(/^(\s*)- \[([ xX])\] (.+)$/gm, (_, indent, checked, text) => {
-      const marker = checked.trim() ? '✓' : '';
-      const cls = checked.trim() ? 'task-checked' : 'task-unchecked';
-      return `${indent}<div class="task-item ${cls}"><span class="task-box">${marker}</span>${renderInline(text)}</div>`;
-    });
-
-    // Unordered lists (multi-line, supports nesting via indentation)
-    html = html.replace(/((?:^[ \t]*[-*+] .+\n?)+)/gm, (block) => {
-      const items = block.trim().split('\n').map(line => {
-        const m = line.match(/^(\s*)[-*+]\s(.+)$/);
-        if (!m) return '';
-        const depth = m[1].length;
-        return `<li class="list-depth-${Math.min(depth, 4)}">${renderInline(m[2])}</li>`;
-      });
-      return `<ul>${items.join('')}</ul>`;
-    });
-
-    // Ordered lists (multi-line)
-    html = html.replace(/((?:^\d+\. .+\n?)+)/gm, (block) => {
-      const items = block.trim().split('\n').map(line => {
-        const m = line.match(/^(\s*)\d+\.\s(.+)$/);
-        if (!m) return '';
-        return `<li>${renderInline(m[2])}</li>`;
-      });
-      return `<ol>${items.join('')}</ol>`;
-    });
-
-    // Paragraphs — split by double newline; single newlines are soft breaks
-    html = html.split(/\n{2,}/).map(p => {
-      p = p.trim();
-      if (!p) return '';
-      if (/^<(div|pre|table|h[1-6]|ul|ol|blockquote|hr|p)/.test(p)) return p;
-      if (p.startsWith('\x00CODE')) return p;
-      // Soft line breaks: single \n → space (CommonMark behavior)
-      // Hard line breaks: two trailing spaces or trailing \ → <br>
-      p = p.replace(/  \n|\n/g, (m, offset, str) => {
-        // Check for trailing \ before newline
-        if (offset > 0 && str[offset - 1] === '\\') return '<br>';
-        return m === '  \n' ? '<br>' : ' ';
-      });
-      return `<p>${renderInline(p)}</p>`;
-    }).join('\n');
-
-    // Restore code blocks
-    html = html.replace(/\x00CODE(\d+)\x00/g, (_, idx) => codeBlocks[idx]);
-    // Restore inline codes
-    html = html.replace(/\x00ICODE(\d+)\x00/g, (_, idx) => inlineCodes[idx]);
-
-    return html;
-  }
-
-  // Inline rendering (links/images before emphasis, protected by placeholders)
-  // Note: `text` is already HTML-entity-encoded (via esc()). We need to unescape
-  // before splicing into HTML tags so the browser renders special chars correctly.
-  function renderInline(text) {
-    const inlineParts = [];
-    const stash = html => {
-      const idx = inlineParts.length;
-      inlineParts.push(html);
-      return `\x00PART${idx}\x00`;
-    };
-
-    text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
-      const safeUrl = sanitizeUrl(url, { image: true });
-      return stash(`<img src="${safeUrl}" alt="${esc(unesc(stripMd(alt)))}" loading="lazy">`);
-    });
-    text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => {
-      const safeUrl = sanitizeUrl(url);
-      return stash(`<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${esc(unesc(stripMd(label)))}</a>`);
-    });
-    text = text.replace(/&lt;code&gt;([\s\S]*?)&lt;\/code&gt;/g, (_, code) => stash(`<code>${esc(code)}</code>`));
-    // Unescape before wrapping in HTML tags so entities render correctly
-    text = text.replace(/~~(.+?)~~/g, (_, c) => `<del>${unesc(c)}</del>`);
-    text = text.replace(/\*\*([^\n*](?:[^\n]*?[^\n*])?)\*\*/g, (_, c) => `<strong>${unesc(c)}</strong>`);
-    // Italic: avoid lookbehind for broader browser compatibility.
-    text = text.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, (_, pre, c) => `${pre}<em>${unesc(c)}</em>`);
-    text = text.replace(/\*\*([^*\n]{1,80})$/g, (_, c) => unesc(c));
-    text = text.replace(/(^|[\s([])\*([^\s*\n][^*\n]{0,79})$/g, (_, pre, c) => `${pre}${unesc(c)}`);
-    // Autolinks: bare URLs become clickable
-    text = text.replace(/(^|[^=&\x00])((?:https?:\/\/)[^\s<\x00]+[^\s<\x00.,;:!?)'"`\]}])/gim, (_, pre, url) => {
-      return `${pre}${stash(`<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(url)}</a>`)}`;
-    });
-    text = text.replace(/\x00PART(\d+)\x00/g, (_, idx) => inlineParts[idx]);
-    return text;
-  }
-
-  function unesc(t) { return t.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'"); }
-
-  function esc(t) { return t.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]); }
-
-  function stripMd(t) {
-    return t.replace(/[*_~`[\]]/g, '');
-  }
-
-  function sanitizeUrl(rawUrl, opts = {}) {
-    return esc(sanitizeUrlValue(rawUrl, opts));
-  }
-
-  function sanitizeUrlValue(rawUrl, opts = {}) {
-    const url = rawUrl.trim().replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-    if (!url) return '#';
-    if (opts.image && /^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) return url;
-    try {
-      const parsed = new URL(url, window.location.href);
-      const allowed = opts.image ? ['http:', 'https:'] : ['http:', 'https:', 'mailto:', 'tel:'];
-      if (allowed.includes(parsed.protocol)) return url;
-    } catch {
-      if (!opts.image && /^(#|\/(?!\/)|\.{1,2}\/)/.test(url)) return url;
-    }
-    return '#';
-  }
-
-  function splitThinkTags(raw) {
-    const text = raw || '';
-    const contentParts = [];
-    const reasoningParts = [];
-    const tagRe = /<\/?think>/ig;
-    let last = 0;
-    let inThink = false;
-    let sawThink = false;
-    let match;
-
-    while ((match = tagRe.exec(text))) {
-      sawThink = true;
-      if (/^<think>$/i.test(match[0])) {
-        if (inThink) {
-          reasoningParts.push(text.slice(last, match.index));
-        } else {
-          contentParts.push(text.slice(last, match.index));
-          inThink = true;
-        }
-      } else if (inThink) {
-        reasoningParts.push(text.slice(last, match.index));
-        inThink = false;
-      } else {
-        contentParts.push(text.slice(last, match.index));
-      }
-      last = match.index + match[0].length;
-    }
-
-    if (inThink) reasoningParts.push(text.slice(last));
-    else contentParts.push(text.slice(last));
-
-    const reasoning = reasoningParts.join('').replace(/^\s+|\s+$/g, '');
-    const content = sawThink ? contentParts.join('').replace(/^\s+/, '') : text;
-    return { reasoning, content, openThink: inThink };
-  }
-
-  function highlightCode(code, lang) {
-    // Collect all highlight regions first, then build output in one pass
-    const regions = [];
-    const add = (start, end, cls) => regions.push({ start, end, cls });
-
-    // Collect string regions first (strings take priority over comments)
-    const stringRegions = [];
-    for (const m of code.matchAll(/"(?:[^"\\]|\\.)*"/g)) { add(m.index, m.index + m[0].length, 'hl-string'); stringRegions.push([m.index, m.index + m[0].length]); }
-    for (const m of code.matchAll(/'(?:[^'\\]|\\.)*'/g)) { add(m.index, m.index + m[0].length, 'hl-string'); stringRegions.push([m.index, m.index + m[0].length]); }
-
-    const inString = idx => stringRegions.some(([s, e]) => idx >= s && idx < e);
-
-    // Comments — skip if inside a string
-    for (const m of code.matchAll(/\/\*[\s\S]*?\*\//g)) {
-      if (!inString(m.index)) add(m.index, m.index + m[0].length, 'hl-comment');
-    }
-    for (const m of code.matchAll(/\/\/.*$/gm)) {
-      if (!inString(m.index)) add(m.index, m.index + m[0].length, 'hl-comment');
-    }
-    if (/^(py|python|rb|ruby|sh|bash|yaml|yml|toml|r|perl|pl)/i.test(lang)) {
-      for (const m of code.matchAll(/#.*$/gm)) {
-        if (!inString(m.index)) add(m.index, m.index + m[0].length, 'hl-comment');
-      }
-    }
-    // Keywords
-    const kwSet = new Set(['function','return','if','else','for','while','do','switch','case','break','continue','class','extends','new','this','super','import','export','from','default','async','await','try','catch','finally','throw','const','let','var','def','elif','lambda','with','as','in','not','is','True','False','None','print','self','yield','raise','except','pass','assert','struct','enum','interface','type','namespace','using','public','private','protected','static','final','void','int','float','double','string','bool','char','long','short','byte','sizeof','null','undefined','true','false','typeof','instanceof']);
-    for (const m of code.matchAll(/\b([a-zA-Z_]\w*)\b/g)) {
-      if (kwSet.has(m[1])) add(m.index, m.index + m[0].length, 'hl-keyword');
-    }
-    // Numbers
-    for (const m of code.matchAll(/\b(\d+\.?\d*)\b/g)) add(m.index, m.index + m[0].length, 'hl-number');
-    // Function calls (identifier before parenthesis, skip keywords)
-    for (const m of code.matchAll(/\b([a-zA-Z_]\w*)(\s*\()/g)) {
-      if (!kwSet.has(m[1])) add(m.index, m.index + m[1].length, 'hl-func');
-    }
-
-    // Sort by start position, then longer matches first (for overlap priority)
-    regions.sort((a, b) => a.start - b.start || b.end - a.end - (a.end - a.start));
-
-    // Remove overlapping regions (keep earlier/longer ones)
-    const kept = [];
-    for (const r of regions) {
-      if (kept.length && r.start < kept[kept.length - 1].end) continue;
-      kept.push(r);
-    }
-
-    // Build output HTML: escape plain parts, wrap highlighted parts
-    let html = '';
-    let pos = 0;
-    for (const r of kept) {
-      if (r.start > pos) html += esc(code.slice(pos, r.start));
-      html += `<span class="${r.cls}">${esc(code.slice(r.start, r.end))}</span>`;
-      pos = r.end;
-    }
-    if (pos < code.length) html += esc(code.slice(pos));
-    return html;
-  }
+  const { KEYS, save, load } = window.OwnChatStorage;
+  const { renderMd, esc, splitThinkTags } = window.OwnChatMarkdown;
+  const {
+    DEFAULT_CONTEXT_LIMIT,
+    estimateTokens,
+    tokensToK,
+    kToTokens,
+    explicitMaxTokens,
+    trimContextMessages,
+    apiMessagesTokenCount,
+    estimateMessageTokens,
+    formatTokenCount,
+  } = window.OwnChatTokens;
+  const {
+    IMAGE_KEY,
+    setImageSaveErrorHandler,
+    imageDbGetAllJobs,
+    imageDbPutJob,
+    imageDbDeleteJob,
+    imageDbClearJobs,
+    fileDbPut,
+    fileDbGetAll,
+    fileDbDelete,
+    fileDbClearAll,
+    writeStreamSession,
+    getStreamSession,
+    getStableStreamSession,
+    clearStreamSession,
+    getImageSession,
+    normalizeImageSession,
+    clearImageSession,
+    clearImageSessionForJob,
+    writeImageSession,
+    collectConversationFileIds,
+    collectDeletedOnlyFileIds: collectDeletedOnlyFileIdsFor,
+    stripFilesFromConversations,
+    hydrateFilesInConversations,
+  } = window.OwnChatDb;
+  const Attachments = window.OwnChatAttachments;
+  const ImageCore = window.OwnChatImageCore;
+  const ImageRenderer = window.OwnChatImageRenderer;
+  const ChatRenderer = window.OwnChatChatRenderer;
+  const StreamUi = window.OwnChatStreamUi;
+  const Api = window.OwnChatApi;
+  const ServiceWorker = window.OwnChatServiceWorker;
+  const ConfigImport = window.OwnChatConfigImport;
+  const UiUtils = window.OwnChatUiUtils;
+  const Icons = window.OwnChatIcons;
+  const ImageViewer = window.OwnChatImageViewer;
+  const {
+    imageJobReplies,
+    ensureImageJobReplies,
+    currentImageActiveReply,
+    imageReplyOutput,
+    dataUrlForImage,
+    imageByteSize,
+    normalizeImageFormat,
+    imageOutputMeta,
+    imageFilename,
+    attachmentImageFilename,
+    formatDuration,
+    formatDateTime,
+    imageStaleTimeoutMs,
+    setImageJobDone,
+    setImageJobFailed,
+    completeImageJobFromSession,
+    failImageJobFromSession,
+    parseImageOutputs,
+    parseResponseImageOutputs,
+    imageToolOptions,
+    mappedImageInput,
+    extractChatText,
+    promptLanguageInstruction,
+    dataUrlToBlob,
+    filenameForBlob,
+  } = ImageCore;
 
   // ===== State =====
   const DEFAULT_IMAGE_MODELS = ['gpt-image-2', 'gpt-image-2-2026-04-21', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-3', 'dall-e-2'];
   const DEFAULT_IMAGE_PARAMS = { size: 'auto', quality: 'auto', outputFormat: 'png', background: 'auto' };
   const MAX_IMAGE_REFS = 4;
-  let serviceWorkerRegistrationPromise = null;
 
   const state = {
     mode: load(KEYS.mode) || 'chat',
@@ -396,9 +91,6 @@
     modelsCache: load(KEYS.modelsCache) || [],
     conversations: load(KEYS.conversations) || [],
     currentConvId: load(KEYS.currentConvId) || null,
-    tokenStats: load(KEYS.tokenStats) || { input: 0, output: 0, total: 0 },
-    showThinking: load(KEYS.showThinking) !== false,
-    includeContext: load(KEYS.includeContext) !== false,
     sidebarCollapsed: load(KEYS.sidebarCollapsed) || false,
     theme: load(KEYS.theme) || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
     imageBaseUrl: load(KEYS.imageBaseUrl) || '',
@@ -423,12 +115,7 @@
     imageWakeLock: null,
     isImageHistoryLoading: false,
     isOptimizingImagePrompt: false,
-    viewerImage: null,
-    imageViewerTransform: { scale: 1, x: 0, y: 0 },
-    imageViewerDragging: null,
-    imageViewerTouch: null,
     textareaResize: null,
-    imageRef: null,
     imageRefs: [],
     pendingFiles: [],
     sidebarSearch: '',
@@ -463,6 +150,7 @@
       strippedConversations = stripped;
       fileResult = await saveFileMap(fileMap);
     }
+    if (fileResult.failed) return fileResult;
     if (strippedConversations) save(KEYS.conversations, strippedConversations);
     for (const k of keys) {
       if (k === KEYS.conversations) continue;
@@ -478,65 +166,8 @@
     return { total: results.length, failed: results.filter(ok => !ok).length };
   }
 
-  function cleanConfigUrl() {
-    if (!window.history?.replaceState) return;
-    const url = new URL(window.location.href);
-    ['config', 'config_b64', 'oc_config', 'oc_config_b64'].forEach(k => url.searchParams.delete(k));
-    window.history.replaceState({}, document.title, url.href);
-  }
-
-  function decodeBase64Url(value) {
-    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
-    return decodeURIComponent(Array.from(atob(padded), c => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join(''));
-  }
-
-  function stringValue(...values) {
-    for (const value of values) {
-      if (typeof value === 'string' && value.trim()) return value.trim();
-    }
-    return '';
-  }
-
-  function arrayValue(value) {
-    return Array.isArray(value) ? value.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()) : [];
-  }
-
-  function parseImportConfig(text) {
-    const cfg = JSON.parse(text);
-    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('配置必须是 JSON 对象');
-    return cfg;
-  }
-
-  function importConfigSummary(cfg) {
-    const chat = cfg.chat && typeof cfg.chat === 'object' ? cfg.chat : {};
-    const image = cfg.image && typeof cfg.image === 'object' ? cfg.image : {};
-    return {
-      chatBaseUrl: stringValue(chat.baseUrl, chat.base_url, cfg.baseUrl, cfg.base_url),
-      chatApiKey: stringValue(chat.apiKey, chat.api_key, cfg.apiKey, cfg.api_key),
-      chatModel: stringValue(chat.model, cfg.model),
-      imageBaseUrl: stringValue(image.baseUrl, image.base_url, cfg.imageBaseUrl, cfg.image_base_url),
-      imageApiKey: stringValue(image.apiKey, image.api_key, cfg.imageApiKey, cfg.image_api_key),
-      imageModel: stringValue(image.model, cfg.imageModel, cfg.image_model),
-      imageMapModel: stringValue(image.mapModel, image.map_model, cfg.imageMapModel, cfg.image_map_model),
-      imagePromptModel: stringValue(image.promptModel, image.prompt_model, cfg.imagePromptModel, cfg.image_prompt_model),
-      mode: stringValue(cfg.mode),
-      imageDefaults: image.defaults && typeof image.defaults === 'object' ? image.defaults : null,
-      chatModels: mergeUnique(arrayValue(chat.models), arrayValue(cfg.models)),
-      imageModels: mergeUnique(arrayValue(image.models), arrayValue(cfg.imageModels), arrayValue(cfg.image_models)),
-      hasImageMapModel: 'mapModel' in image || 'map_model' in image || 'imageMapModel' in cfg || 'image_map_model' in cfg,
-      hasImagePromptModel: 'promptModel' in image || 'prompt_model' in image || 'imagePromptModel' in cfg || 'image_prompt_model' in cfg,
-    };
-  }
-
-  function maskKey(value) {
-    if (!value) return '未提供';
-    if (value.length <= 10) return `${value.slice(0, 3)}***`;
-    return `${value.slice(0, 6)}...${value.slice(-4)}`;
-  }
-
   function applyImportedConfig(cfg) {
-    const summary = importConfigSummary(cfg);
+    const summary = ConfigImport.summary(cfg);
     if (summary.chatBaseUrl) state.baseUrl = normalizeUrl(summary.chatBaseUrl);
     if (summary.chatApiKey) state.apiKey = summary.chatApiKey;
     if (summary.chatModel) state.model = summary.chatModel;
@@ -565,14 +196,14 @@
 
   function showConfigImportConfirm(cfg) {
     state.pendingImportConfig = cfg;
-    const summary = importConfigSummary(cfg);
+    const summary = ConfigImport.summary(cfg);
     dom.configImportPreview.innerHTML = [
       ['模式', summary.mode || '不修改'],
       ['对话 Base URL', summary.chatBaseUrl || '不修改'],
-      ['对话 API Key', maskKey(summary.chatApiKey)],
+      ['对话 API Key', ConfigImport.maskKey(summary.chatApiKey)],
       ['对话模型', summary.chatModel || '不修改'],
       ['绘画 Base URL', summary.imageBaseUrl || '不修改'],
-      ['绘画 API Key', maskKey(summary.imageApiKey)],
+      ['绘画 API Key', ConfigImport.maskKey(summary.imageApiKey)],
       ['绘画模型', summary.imageModel || '不修改'],
       ['映射模型', summary.hasImageMapModel ? (summary.imageMapModel || '关闭') : '不修改'],
       ['提示词优化模型', summary.hasImagePromptModel ? (summary.imagePromptModel || '关闭') : '不修改'],
@@ -587,21 +218,19 @@
 
   function importConfigFromUrl() {
     const params = new URLSearchParams(window.location.search);
-    const raw = params.get('config') || params.get('oc_config');
-    const rawB64 = params.get('config_b64') || params.get('oc_config_b64');
-    if (!raw && !rawB64) return false;
+    const hasConfig = ['config', 'config_b64', 'oc_config', 'oc_config_b64'].some(k => params.has(k));
+    if (!hasConfig) return false;
     if (configured() || imageConfigured()) {
-      cleanConfigUrl();
+      ConfigImport.cleanUrl();
       showToast('已存在本地配置，已忽略 URL 配置');
       return false;
     }
     try {
-      const text = rawB64 ? decodeBase64Url(rawB64) : raw;
-      showConfigImportConfirm(parseImportConfig(text));
-      cleanConfigUrl();
+      showConfigImportConfirm(ConfigImport.fromCurrentUrl());
+      ConfigImport.cleanUrl();
       return true;
     } catch (e) {
-      cleanConfigUrl();
+      ConfigImport.cleanUrl();
       alert(`导入接口配置失败: ${e.message}`);
       return false;
     }
@@ -621,7 +250,7 @@
   }
 
   function conversationShowThinking(conv = currentConv()) {
-    return conv?.showThinking !== undefined ? conv.showThinking !== false : state.showThinking !== false;
+    return conv?.showThinking !== false;
   }
 
   function conversationIncludeContext(conv = currentConv()) {
@@ -629,7 +258,7 @@
   }
 
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), model: state.model, temperature: 0.7, topP: 1, maxTokens: null, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: state.showThinking !== false, includeContextDefault: true };
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), model: state.model, temperature: 0.7, topP: 1, maxTokens: null, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: true, includeContextDefault: true };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -700,82 +329,6 @@
     return !!(endpoint?.baseUrl && endpoint.apiKey && endpoint.model);
   }
 
-  const DEFAULT_CONTEXT_LIMIT = 256000;
-  const DEFAULT_MAX_TOKENS = 128000;
-  const TOKEN_K = 1000;
-  const LEGACY_DEFAULT_MAX_TOKENS = 128000;
-
-  function tokensToK(tokens, fallback) {
-    if (tokens === null || tokens === undefined || tokens === '') return '';
-    const value = Number.isFinite(Number(tokens)) ? Number(tokens) : fallback;
-    return Math.round(value / TOKEN_K);
-  }
-
-  function kToTokens(value, fallback, opts = {}) {
-    if (value === null || value === undefined || String(value).trim() === '') return null;
-    const kValue = parseFloat(value);
-    if (!Number.isFinite(kValue) || kValue < 0) return fallback;
-    if (opts.allowZero && kValue === 0) return 0;
-    return Math.max(TOKEN_K, Math.round(kValue * TOKEN_K));
-  }
-
-  function explicitMaxTokens(conv) {
-    const value = Number(conv?.maxTokens);
-    if (!Number.isFinite(value) || value <= 0) return null;
-    if (value === LEGACY_DEFAULT_MAX_TOKENS) return null;
-    return Math.round(value);
-  }
-
-  function trimContextMessages(messages, systemPrompt, maxTokens) {
-    if (maxTokens === 0) {
-      // 0 means no trimming
-      const allMessages = [];
-      if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt });
-      allMessages.push(...messages);
-      return allMessages;
-    }
-    maxTokens = maxTokens || DEFAULT_CONTEXT_LIMIT;
-    const allMessages = [];
-    if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt });
-    allMessages.push(...messages);
-
-    let totalTokens = 0;
-    for (const m of allMessages) {
-      totalTokens += estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
-    }
-
-    if (totalTokens <= maxTokens) return allMessages;
-
-    // Trim from the front, always keep system prompt + last user/assistant pair
-    const sysMsg = allMessages[0]?.role === 'system' ? allMessages[0] : null;
-    const rest = sysMsg ? allMessages.slice(1) : allMessages;
-
-    // Find the last user message index
-    let lastUserIdx = -1;
-    for (let i = rest.length - 1; i >= 0; i--) {
-      if (rest[i].role === 'user') { lastUserIdx = i; break; }
-    }
-
-    const keepTail = rest.slice(Math.max(0, lastUserIdx));
-    const tailTokens = keepTail.reduce((s, m) => s + estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content)), 0);
-    const sysTokens = sysMsg ? estimateTokens(sysMsg.content) : 0;
-    const budget = maxTokens - sysTokens - tailTokens;
-
-    const head = [];
-    let headTokens = 0;
-    for (const m of rest.slice(0, Math.max(0, lastUserIdx))) {
-      const t = estimateTokens(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
-      if (headTokens + t > budget) break;
-      head.push(m);
-      headTokens += t;
-    }
-
-    const result = [];
-    if (sysMsg) result.push(sysMsg);
-    result.push(...head, ...keepTail);
-    return result;
-  }
-
   function contextMessagesForRequest(conv, currentUserMsg, includeContext) {
     if (!includeContext) return [currentUserMsg];
     const messages = conv?.messages || [];
@@ -790,574 +343,40 @@
     return messages;
   }
 
-  function apiMessagesTokenCount(messages) {
-    return messages.reduce((sum, msg) => {
-      return sum + estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''));
-    }, 0);
-  }
-
-  function normalizeUsage(usage) {
-    if (!usage || typeof usage !== 'object') return null;
-    const input = Number(usage.prompt_tokens ?? usage.input_tokens ?? usage.input);
-    const output = Number(usage.completion_tokens ?? usage.output_tokens ?? usage.output);
-    const total = Number(usage.total_tokens ?? usage.total);
-    const normalized = {};
-    if (Number.isFinite(input)) normalized.input = input;
-    if (Number.isFinite(output)) normalized.output = output;
-    if (Number.isFinite(total)) normalized.total = total;
-    return Object.keys(normalized).length ? normalized : null;
-  }
-
-  function formatShortDuration(ms) {
-    if (!Number.isFinite(ms) || ms < 0) return '';
-    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
-  }
-
-  function usageInputTokens(usage, fallback) {
-    const normalized = normalizeUsage(usage);
-    return normalized?.input ?? fallback;
+  function buildChatRequestBody(conv, model, apiMessages) {
+    const body = {
+      model,
+      messages: Attachments.apiMessagesFromPromptMessages(apiMessages),
+      stream: true,
+      temperature: conv.temperature,
+      top_p: conv.topP,
+      stream_options: { include_usage: true },
+    };
+    const maxTokens = explicitMaxTokens(conv);
+    if (maxTokens) body.max_tokens = maxTokens;
+    return body;
   }
 
   function usageOutputTokens(usage, fallback) {
-    const normalized = normalizeUsage(usage);
+    const normalized = OwnChatStream.normalizeUsage(usage);
     return normalized?.output ?? fallback;
   }
 
-  function normalizeUrl(u) {
-    u = (u || '').trim();
-    if (!u) throw new Error('Base URL 不能为空');
-    if (!/^(https?:\/\/|\/)/i.test(u)) throw new Error('Base URL 需要以 http://、https:// 或 / 开头');
-    u = u.replace(/\/+$/, '');
-    if (!u.endsWith('/v1')) u += '/v1';
-    return u;
-  }
-
-  function requestUrl(baseUrl, path) {
-    return normalizeUrl(baseUrl) + path;
-  }
-
-  function describeNetworkError(err, url) {
-    const msg = err?.message || String(err);
-    if (!/Failed to fetch|NetworkError|Load failed|fetch/i.test(msg)) return err;
-    let target = url;
-    try { target = new URL(url, window.location.href).origin; } catch { /* keep raw url */ }
-    const hints = [`浏览器没有拿到 ${target} 的可用响应`];
-    try {
-      const parsed = new URL(url, window.location.href);
-      if (window.location.protocol === 'https:' && parsed.protocol === 'http:') {
-        hints.push('当前页面是 HTTPS，但接口是 HTTP，浏览器会拦截混合内容');
-      }
-      if (parsed.origin !== window.location.origin) {
-        hints.push('这是跨域请求，如 Network 面板显示 CORS 错误才需要检查 Access-Control-Allow-Origin');
-      }
-      if (/api\.openai\.com$/i.test(parsed.hostname)) {
-        hints.push('浏览器直连 OpenAI API 容易被 CORS 拦截，建议通过本地或服务端代理转发');
-      }
-    } catch { /* ignore */ }
-    if (window.location.protocol === 'file:') {
-      hints.push('当前是 file:// 打开页面，建议用本地静态服务访问页面');
-    }
-    const message = `网络请求失败：${hints.join('；')}。请检查 Base URL、代理服务和浏览器控制台 Network 面板。`;
-    const error = new Error(message);
-    error.diagnostics = [
-      `请求地址: ${url}`,
-      `页面地址: ${window.location.href}`,
-      `原始错误: ${msg}`,
-      `排查建议: ${hints.join('；')}`,
-    ].join('\n');
-    return error;
-  }
-
-  function canUseServiceWorker() {
-    return 'serviceWorker' in navigator && window.location.protocol !== 'file:';
-  }
-
-  function registerServiceWorker() {
-    if (!canUseServiceWorker()) return Promise.resolve(null);
-    if (!serviceWorkerRegistrationPromise) {
-      serviceWorkerRegistrationPromise = navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(e => {
-        console.warn('SW registration failed:', e);
-        return null;
-      });
-    }
-    return serviceWorkerRegistrationPromise;
-  }
-
-  async function ensureServiceWorkerTarget(timeoutMs = 5000) {
-    if (!canUseServiceWorker()) return null;
-    if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
-
-    const registration = await registerServiceWorker();
-    if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
-    if (registration?.active) return registration.active;
-
-    return new Promise(resolve => {
-      let done = false;
-      const finish = target => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
-        resolve(target || navigator.serviceWorker.controller || null);
-      };
-      const onControllerChange = () => finish(navigator.serviceWorker.controller);
-      const timer = setTimeout(() => finish(null), timeoutMs);
-      navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
-      navigator.serviceWorker.ready.then(reg => {
-        finish(navigator.serviceWorker.controller || reg.active || null);
-      }).catch(() => finish(null));
-    });
-  }
-
+  function normalizeUrl(u) { return Api.normalizeUrl(u); }
+  function requestUrl(baseUrl, path) { return Api.requestUrl(baseUrl, path); }
+  function apiFetch(url, options = {}) { return Api.apiFetch(url, options); }
+  function registerServiceWorker() { return ServiceWorker.register(); }
+  function ensureServiceWorkerTarget(timeoutMs = 5000) { return ServiceWorker.ensureTarget(timeoutMs); }
   function httpError(status, message, url) {
-    const error = new Error(message || `HTTP ${status}`);
-    error.diagnostics = [
-      `请求地址: ${url}`,
-      `HTTP 状态: ${status}`,
-      `错误信息: ${message || `HTTP ${status}`}`,
-      `当前模式: ${state.mode}`,
-      `对话模型: ${conversationModel() || '未配置'}`,
-      `绘画模型: ${state.imageModel || '未配置'}`,
-    ].join('\n');
-    return error;
-  }
-
-  async function apiFetch(url, options = {}) {
-    try {
-      return await fetch(url, options);
-    } catch (err) {
-      if (err?.name === 'AbortError') throw err;
-      throw describeNetworkError(err, url);
-    }
-  }
-
-  // ===== IndexedDB for large image history & file attachments =====
-  const IMAGE_DB = { name: 'ownchat_image_db', version: 3, store: 'jobs', fileStore: 'files' };
-  let imageDbPromise = null;
-  let imageDbWarned = false;
-
-  function openImageDb() {
-    if (imageDbPromise) return imageDbPromise;
-    imageDbPromise = new Promise((resolve, reject) => {
-      if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
-      const req = indexedDB.open(IMAGE_DB.name, IMAGE_DB.version);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        // Ensure 'jobs' store exists (for upgrades from version 1)
-        if (!db.objectStoreNames.contains(IMAGE_DB.store)) {
-          const store = db.createObjectStore(IMAGE_DB.store, { keyPath: 'id' });
-          store.createIndex('createdAt', 'createdAt');
-        }
-        // Ensure 'files' store exists (for upgrades from version 1 or 2)
-        if (!db.objectStoreNames.contains(IMAGE_DB.fileStore)) {
-          db.createObjectStore(IMAGE_DB.fileStore, { keyPath: 'id' });
-        }
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
+    return Api.httpError(status, message, url, {
+      mode: state.mode,
+      chatModel: conversationModel(),
+      imageModel: state.imageModel,
     });
-    return imageDbPromise;
-  }
-
-  async function imageDbGetAllJobs() {
-    const legacyJobs = load('nc_image_jobs') || [];
-    try {
-      const db = await openImageDb();
-      const jobs = await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.store, 'readonly');
-        const req = tx.objectStore(IMAGE_DB.store).getAll();
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => reject(req.error);
-      });
-      const merged = mergeJobs(jobs, legacyJobs).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-      if (legacyJobs.length && !localStorage.getItem('nc_image_migrated')) {
-        await Promise.allSettled(legacyJobs.map(imageDbPutJob));
-        localStorage.removeItem('nc_image_jobs');
-        localStorage.setItem('nc_image_migrated', '1');
-      }
-      return merged;
-    } catch (e) {
-      console.warn('Image history load failed:', e);
-      return legacyJobs;
-    }
-  }
-
-  function mergeJobs(a, b) {
-    const map = new Map();
-    [...a, ...b].forEach(job => { if (job?.id) map.set(job.id, job); });
-    return Array.from(map.values());
-  }
-
-  async function imageDbPutJob(job) {
-    try {
-      const db = await openImageDb();
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.store, 'readwrite');
-        tx.objectStore(IMAGE_DB.store).put(job);
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      console.warn('Image history save failed:', e);
-      if (!imageDbWarned) {
-        imageDbWarned = true;
-        showToast('图片历史保存失败，当前页面仍可查看');
-      }
-    }
-  }
-
-  async function imageDbDeleteJob(id) {
-    try {
-      const db = await openImageDb();
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.store, 'readwrite');
-        tx.objectStore(IMAGE_DB.store).delete(id);
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      console.warn('Image history delete failed:', e);
-    }
-  }
-
-  async function imageDbClearJobs() {
-    try {
-      const db = await openImageDb();
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.store, 'readwrite');
-        tx.objectStore(IMAGE_DB.store).clear();
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      console.warn('Image history clear failed:', e);
-    }
-    localStorage.removeItem('nc_image_jobs');
-  }
-
-  // ===== File Attachment IndexedDB helpers =====
-  async function fileDbPut(fileData) {
-    try {
-      const db = await openImageDb();
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
-        tx.objectStore(IMAGE_DB.fileStore).put(fileData);
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error);
-      });
-      return true;
-    } catch (e) {
-      console.warn('File attachment save failed:', e);
-      return false;
-    }
-  }
-
-  async function fileDbGet(id) {
-    try {
-      const db = await openImageDb();
-      return await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.fileStore, 'readonly');
-        const req = tx.objectStore(IMAGE_DB.fileStore).get(id);
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = () => reject(req.error);
-      });
-    } catch (e) {
-      console.warn('File attachment load failed:', e);
-      return null;
-    }
-  }
-
-  async function fileDbGetAll() {
-    try {
-      const db = await openImageDb();
-      return await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.fileStore, 'readonly');
-        const req = tx.objectStore(IMAGE_DB.fileStore).getAll();
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => reject(req.error);
-      });
-    } catch (e) {
-      console.warn('File attachments load failed:', e);
-      return [];
-    }
-  }
-
-  async function fileDbDelete(id) {
-    try {
-      const db = await openImageDb();
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
-        tx.objectStore(IMAGE_DB.fileStore).delete(id);
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      console.warn('File attachment delete failed:', e);
-    }
-  }
-
-  async function fileDbClearAll() {
-    try {
-      const db = await openImageDb();
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
-        tx.objectStore(IMAGE_DB.fileStore).clear();
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error);
-      });
-    } catch (e) {
-      console.warn('File attachments clear failed:', e);
-    }
-  }
-
-  function collectConversationFileIds(conversations) {
-    const ids = new Set();
-    for (const conv of conversations || []) {
-      if (!conv) continue;
-      for (const msg of conv.messages || []) {
-        if (Array.isArray(msg.files)) {
-          msg.files.forEach(f => { if (f?.fileId) ids.add(f.fileId); });
-        }
-        if (Array.isArray(msg.content)) {
-          msg.content.forEach(part => {
-            const fileId = part?.type === 'image_url' ? part.image_url?.fileId : null;
-            if (fileId) ids.add(fileId);
-          });
-        }
-      }
-    }
-    return Array.from(ids);
   }
 
   function collectDeletedOnlyFileIds(deletedConversations) {
-    const deletedIds = new Set(collectConversationFileIds(deletedConversations));
-    const remainingIds = new Set(collectConversationFileIds(state.conversations));
-    return Array.from(deletedIds).filter(id => !remainingIds.has(id));
-  }
-
-  function generateFileId(convId, msgIndex, partIndex) {
-    return `${convId}_${msgIndex}_${partIndex}`;
-  }
-
-  function isFileReady(file) {
-    return !!(file && !file.loading && (file.base64 || typeof file.text === 'string'));
-  }
-
-  function hasPendingFileReads() {
-    return state.pendingFiles.some(f => f.loading || !isFileReady(f));
-  }
-
-  // ===== Stream Session IndexedDB (shared with Service Worker) =====
-  const STREAM_KEY = 'active_stream';
-  const IMAGE_KEY = 'active_image';
-  const STREAM_DB_NAME = 'ownchat_stream_db';
-  const STREAM_DB_VERSION = 2;
-  const STREAM_STORE = 'sessions';
-  let streamDbPromise = null;
-
-  function openStreamDb() {
-    if (streamDbPromise) return streamDbPromise;
-    streamDbPromise = new Promise((resolve, reject) => {
-      if (!window.indexedDB) { reject(new Error('IndexedDB unavailable')); return; }
-      const req = indexedDB.open(STREAM_DB_NAME, STREAM_DB_VERSION);
-      req.onupgradeneeded = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains(STREAM_STORE)) {
-          db.createObjectStore(STREAM_STORE, { keyPath: 'id' });
-        }
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    return streamDbPromise;
-  }
-
-  async function writeStreamSession(meta) {
-    try {
-      const db = await openStreamDb();
-      const tx = db.transaction(STREAM_STORE, 'readwrite');
-      tx.objectStore(STREAM_STORE).put(Object.assign({ id: STREAM_KEY, assistantContent: '', reasoningContent: '', status: 'streaming', updatedAt: Date.now() }, meta));
-      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
-    } catch { /* ignore */ }
-  }
-
-  async function getStreamSession() {
-    try {
-      const db = await openStreamDb();
-      return await new Promise((resolve, reject) => {
-        const tx = db.transaction(STREAM_STORE, 'readonly');
-        const req = tx.objectStore(STREAM_STORE).get(STREAM_KEY);
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = () => reject(req.error);
-      });
-    } catch { return null; }
-  }
-
-  async function getStableStreamSession(baseSession) {
-    if (!baseSession || !['complete', 'error', 'stopped'].includes(baseSession.status)) return baseSession;
-    await new Promise(r => setTimeout(r, 50));
-    const latest = await getStreamSession();
-    if (!latest || (latest.convId && baseSession.convId && latest.convId !== baseSession.convId)) return baseSession;
-    return Object.assign({}, baseSession, latest);
-  }
-
-  async function clearStreamSession() {
-    try {
-      const db = await openStreamDb();
-      const tx = db.transaction(STREAM_STORE, 'readwrite');
-      tx.objectStore(STREAM_STORE).delete(STREAM_KEY);
-      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
-    } catch { /* ignore */ }
-  }
-
-  async function getImageSession() {
-    try {
-      const db = await openStreamDb();
-      return await new Promise((resolve, reject) => {
-        const tx = db.transaction(STREAM_STORE, 'readonly');
-        const req = tx.objectStore(STREAM_STORE).get(IMAGE_KEY);
-        req.onsuccess = () => resolve(normalizeImageSession(req.result || null));
-        req.onerror = () => reject(req.error);
-      });
-    } catch { return null; }
-  }
-
-  function normalizeImageSession(session) {
-    if (!session) return null;
-    if ((session.status === 'connecting' || session.status === 'streaming')) {
-      if (typeof session.outputs === 'string' && session.outputs.trim()) {
-        return Object.assign({}, session, { status: 'complete' });
-      }
-      if (session.error) {
-        return Object.assign({}, session, { status: 'error' });
-      }
-    }
-    return session;
-  }
-
-  function parseImageSessionOutputs(session) {
-    try {
-      const raw = session?.outputs;
-      if (Array.isArray(raw)) return raw;
-      if (typeof raw !== 'string' || !raw.trim()) return [];
-      const outputs = JSON.parse(raw);
-      return Array.isArray(outputs) ? outputs : [];
-    } catch {
-      return [];
-    }
-  }
-
-  async function clearImageSession() {
-    try {
-      const db = await openStreamDb();
-      const tx = db.transaction(STREAM_STORE, 'readwrite');
-      tx.objectStore(STREAM_STORE).delete(IMAGE_KEY);
-      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
-    } catch { /* ignore */ }
-  }
-
-  async function clearImageSessionForJob(jobId, statuses = []) {
-    try {
-      const session = await getImageSession();
-      if (!session || session.jobId !== jobId) return;
-      if (statuses.length && !statuses.includes(session.status)) return;
-      await clearImageSession();
-    } catch { /* ignore */ }
-  }
-
-  async function writeImageSession(meta) {
-    try {
-      const db = await openStreamDb();
-      const tx = db.transaction(STREAM_STORE, 'readwrite');
-      tx.objectStore(STREAM_STORE).put(Object.assign({ id: IMAGE_KEY, status: 'stopped', updatedAt: Date.now() }, meta));
-      await new Promise(r => { tx.oncomplete = r; tx.onerror = r; });
-    } catch { /* ignore */ }
-  }
-
-  // Strip base64 from messages for localStorage, store in IndexedDB instead
-  function stripFilesFromConversations(conversations) {
-    const fileMap = [];
-    const queuedFileIds = new Set();
-    const queueFile = fileData => {
-      if (!fileData?.id || queuedFileIds.has(fileData.id)) return;
-      queuedFileIds.add(fileData.id);
-      fileMap.push(fileData);
-    };
-    const stripped = conversations.map(conv => {
-      const strippedConv = Object.assign({}, conv);
-      strippedConv.messages = conv.messages.map((msg, msgIdx) => {
-        const imageFileIds = [];
-        let changed = false;
-        const strippedMsg = Object.assign({}, msg);
-        if (msg.files && msg.files.length) {
-          strippedMsg.files = msg.files.map((f, fIdx) => {
-            const fileId = f.fileId || generateFileId(conv.id, msgIdx, fIdx);
-            if (f.base64) {
-              queueFile({ id: fileId, base64: f.base64, name: f.name, type: f.type });
-              imageFileIds.push(fileId);
-              changed = true;
-              return { name: f.name, type: f.type, fileId: fileId };
-            }
-            if (f.fileId) imageFileIds.push(f.fileId);
-            return f;
-          });
-        }
-        if (Array.isArray(msg.content)) {
-          let imageIdx = 0;
-          strippedMsg.content = msg.content.map((part, partIdx) => {
-            if (part.type === 'image_url' && part.image_url?.url?.startsWith('data:')) {
-              const fileId = part.image_url.fileId || imageFileIds[imageIdx] || generateFileId(conv.id, msgIdx, partIdx);
-              imageIdx += 1;
-              queueFile({ id: fileId, base64: part.image_url.url, name: '', type: 'image_url' });
-              changed = true;
-              return Object.assign({}, part, { image_url: { url: fileId, fileId: fileId } });
-            }
-            if (part.type === 'image_url' && part.image_url?.fileId) imageIdx += 1;
-            return part;
-          });
-        }
-        return changed ? strippedMsg : msg;
-      });
-      return strippedConv;
-    });
-    return { stripped, fileMap };
-  }
-
-  // Hydrate base64 data back into messages from IndexedDB
-  async function hydrateFilesInConversations(conversations) {
-    const allFiles = await fileDbGetAll();
-    const fileById = new Map(allFiles.map(f => [f.id, f]));
-    for (const conv of conversations) {
-      for (const msg of conv.messages) {
-        if (msg.files && msg.files.length) {
-          for (const f of msg.files) {
-            if (f.fileId) {
-              const stored = fileById.get(f.fileId);
-              if (stored) {
-                f.base64 = stored.base64;
-                delete f.missing;
-              } else {
-                f.missing = true;
-              }
-            }
-          }
-        }
-        if (Array.isArray(msg.content)) {
-          for (const part of msg.content) {
-            if (part.type === 'image_url' && part.image_url?.fileId) {
-              const stored = fileById.get(part.image_url.fileId);
-              if (stored) {
-                part.image_url.url = stored.base64;
-                delete part.image_url.missing;
-              } else {
-                part.image_url.missing = true;
-              }
-            }
-          }
-        }
-      }
-    }
-    return conversations;
+    return collectDeletedOnlyFileIdsFor(deletedConversations, state.conversations);
   }
 
   // ===== DOM =====
@@ -1477,21 +496,12 @@
     setupLater: $('setup-later'),
   };
 
-  // ===== Stream Render Throttle =====
-  let streamRafPending = false;
-  let streamRafCallback = null;
+  setImageSaveErrorHandler(() => {
+    showToast('图片历史保存失败，当前页面仍可查看');
+  });
 
   function scheduleStreamRender(callback) {
-    streamRafCallback = callback;
-    if (streamRafPending) return;
-    streamRafPending = true;
-    requestAnimationFrame(() => {
-      streamRafPending = false;
-      if (streamRafCallback) {
-        streamRafCallback();
-        streamRafCallback = null;
-      }
-    });
+    StreamUi.scheduleStreamRender(callback);
   }
 
   // ===== Render Functions =====
@@ -1613,11 +623,12 @@
 
   function updateSendBtn() {
     const hasText = !!dom.userInput.value.trim();
-    const hasReadyFiles = state.pendingFiles.some(isFileReady);
-    const hasLoadingFiles = hasPendingFileReads();
-    dom.sendBtn.disabled = !state.isStreaming && (!configured() || hasLoadingFiles || (!hasText && !hasReadyFiles));
+    const hasReadyFiles = state.pendingFiles.some(Attachments.isReady);
+    const hasFailedAttachments = state.pendingFiles.some(Attachments.hasError);
+    const hasLoadingFiles = state.pendingFiles.some(Attachments.isLoading);
+    dom.sendBtn.disabled = !state.isStreaming && (!configured() || hasLoadingFiles || hasFailedAttachments || (!hasText && !hasReadyFiles));
     dom.sendBtn.classList.toggle('is-stopping', state.isStreaming);
-    const label = state.isStreaming ? '停止生成' : (hasLoadingFiles ? '附件读取中' : '发送');
+    const label = state.isStreaming ? '停止生成' : (hasFailedAttachments ? '请先移除失败附件' : (hasLoadingFiles ? '附件读取中' : '发送'));
     dom.sendBtn.title = label;
     dom.sendBtn.setAttribute('aria-label', state.isStreaming ? '停止生成' : '发送');
     dom.sendBtn.dataset.tooltip = label;
@@ -1653,20 +664,13 @@
     dom.imageOptimizeBtn.classList.toggle('active', state.isOptimizingImagePrompt);
   }
 
-  function formatTokenCount(n) {
-    const value = Math.max(0, Math.round(n || 0));
-    if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`;
-    if (value >= 1000) return `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}K`;
-    return String(value);
-  }
-
   function currentConversationTokenTotals() {
     const conv = currentConv();
     const totals = { input: 0, output: 0, total: 0, count: 0 };
     if (!conv?.messages?.length) return totals;
     conv.messages.forEach(msg => {
-      const usage = normalizeUsage(msg.usage);
-      const tokens = msg.tokens || estimateTokens(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''));
+      const usage = OwnChatStream.normalizeUsage(msg.usage);
+      const tokens = msg.tokens || estimateMessageTokens(msg);
       if (msg.role === 'assistant' && usage?.output != null) totals.output += usage.output;
       else if (msg.role === 'user') totals.input += tokens;
       else if (msg.role === 'assistant') totals.output += tokens;
@@ -1736,19 +740,15 @@
   }
 
   function imageReferenceList(refs = state.imageRefs) {
-    const explicitRefs = arguments.length > 0;
-    const list = Array.isArray(refs) ? refs.slice() : (refs ? [refs] : []);
-    if (!explicitRefs && state.imageRef && !list.some(ref => ref?.base64 === state.imageRef.base64)) list.push(state.imageRef);
-    return list.filter(ref => ref?.base64).slice(0, MAX_IMAGE_REFS);
+    return ImageCore.imageReferenceList(refs, MAX_IMAGE_REFS);
   }
 
   function setImageReferences(refs) {
     state.imageRefs = imageReferenceList(refs);
-    state.imageRef = state.imageRefs[0] || null;
   }
 
   function imageReferencePayload(refs) {
-    return imageReferenceList(refs).map(ref => ({ name: ref.name, type: ref.type, base64: ref.base64 }));
+    return ImageCore.imageReferencePayload(refs, MAX_IMAGE_REFS);
   }
 
   function renderImageRefPreview() {
@@ -1817,6 +817,7 @@
       recoverImageFromSession();
     }
     document.documentElement.removeAttribute('data-boot-mode');
+    document.documentElement.removeAttribute('data-boot-empty-chat');
     persist();
   }
 
@@ -1829,73 +830,25 @@
     persist([KEYS.sidebarCollapsed]);
   }
 
-  // ===== SVG Icons =====
-  const SVG_PERSON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>';
-  const SVG_COPY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
-  const SVG_REFRESH = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-8.36L23 10"/></svg>';
-  const SVG_EDIT = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
-  const SVG_DOWNLOAD = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-  const SVG_MAXIMIZE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
-  const AI_AVATAR = '<div class="ai-avatar" aria-label="AI"></div>';
-
   // ===== Clipboard =====
   function copyText(text) {
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(() => showToast('已复制到剪贴板')).catch(() => fallbackCopy(text));
-    } else {
-      fallbackCopy(text);
-    }
-  }
-
-  function fallbackCopy(text) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try { document.execCommand('copy'); showToast('已复制到剪贴板'); }
-    catch { showToast('复制失败，请手动复制'); }
-    document.body.removeChild(ta);
+    UiUtils.copyText(text, () => showToast('已复制到剪贴板'), () => showToast('复制失败，请手动复制'));
   }
 
   function messageTextContent(msg) {
-    if (!msg) return '';
-    if (typeof msg.content === 'string') return msg.content;
-    if (Array.isArray(msg.content)) {
-      return msg.content.filter(p => p.type === 'text').map(p => p.text || '').join('\n\n');
-    }
-    return '';
+    return ChatRenderer.messageTextContent(msg);
   }
 
   function copyableMessageText(msg) {
-    const text = messageTextContent(msg);
-    if (msg?.role !== 'assistant') return text;
-    return splitThinkTags(text).content.trim();
+    return ChatRenderer.copyableMessageText(msg);
   }
 
   function copyableMessagePlainText(msg) {
-    const text = copyableMessageText(msg);
-    if (!text) return '';
-    const tmp = document.createElement('div');
-    tmp.innerHTML = renderMd(text);
-    tmp.querySelectorAll('.code-header, .code-copy-btn').forEach(el => el.remove());
-    tmp.querySelectorAll('br').forEach(el => el.replaceWith('\n'));
-    tmp.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, tr').forEach(el => {
-      el.appendChild(document.createTextNode('\n'));
-    });
-    tmp.querySelectorAll('table, ul, ol, .code-block').forEach(el => {
-      el.appendChild(document.createTextNode('\n'));
-    });
-    return tmp.textContent
-      .replace(/\u2713/g, '✓ ')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .trim();
+    return ChatRenderer.copyableMessagePlainText(msg);
   }
 
   function closeCopyMenus() {
-    dom.messages?.querySelectorAll('.copy-menu.open').forEach(menu => menu.classList.remove('open'));
+    UiUtils.closeCopyMenus(dom.messages);
   }
 
   function showToast(msg) {
@@ -1907,12 +860,7 @@
   }
 
   function downloadJson(filename, data) {
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = filename;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    UiUtils.downloadJson(filename, data);
   }
 
   function appConfigSnapshot(includeSecrets = false) {
@@ -1981,215 +929,56 @@
     dom.welcome.classList.add('hidden');
     dom.messages.classList.add('has-messages');
     updateConversationTokenSummary();
-    const showThinking = conversationShowThinking(conv);
-
-    dom.messages.innerHTML = conv.messages.map((msg, i) => {
-      const isUser = msg.role === 'user';
-      const avatar = isUser ? SVG_PERSON : AI_AVATAR;
-      const splitContent = !isUser && typeof msg.content === 'string' ? splitThinkTags(msg.content) : null;
-      const reasoningText = showThinking && !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
-      const mainContent = splitContent?.reasoning ? splitContent.content : msg.content;
-
-      // Build content: thinking block + main content
-      let contentHtml = '';
-      if (!isUser && reasoningText) {
-        const thinkingTimeStr = msg.reasoningTimeMs != null ? formatShortDuration(msg.reasoningTimeMs) : '';
-        contentHtml += `
-          <div class="thinking-block">
-            <button class="thinking-toggle" type="button">
-              <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              <span>思考过程</span>${thinkingTimeStr ? ` · ${thinkingTimeStr}` : ''}
-            </button>
-            <div class="thinking-content"><div class="msg-md">${renderMd(reasoningText)}</div></div>
-          </div>
-        `;
-      }
-      // Display user content (text or multimodal with files)
-      if (isUser) {
-        if (typeof msg.content === 'string') {
-          contentHtml += esc(msg.content).replace(/\n/g, '<br>');
-        } else {
-          // Multimodal: extract text + show images
-          const textPart = msg.content.find(p => p.type === 'text')?.text || '';
-          contentHtml += esc(textPart).replace(/\n/g, '<br>');
-          const imgParts = msg.content.filter(p => p.type === 'image_url');
-          if (imgParts.length) {
-            const fileMeta = Array.isArray(msg.files) ? msg.files.filter(f => f.base64 || f.fileId) : [];
-            contentHtml += `<div class="msg-images">${imgParts.map((p, imgIdx) => {
-              const file = fileMeta[imgIdx] || {};
-              const name = file.name || `attachment-${imgIdx + 1}`;
-              if (p.image_url.missing || file.missing) {
-                return `<div class="msg-img-missing" title="${esc(name)}">附件已丢失</div>`;
-              }
-              return `<img src="${p.image_url.url}" class="msg-img" loading="lazy" data-action="view-attachment-image" data-name="${esc(name)}" alt="${esc(name)}">`;
-            }).join('')}</div>`;
-          }
-        }
-      } else {
-        const mainText = typeof mainContent === 'string' ? mainContent : '';
-        if (msg.streaming && !mainText.trim() && !reasoningText) {
-          contentHtml += `
-            <div class="stream-waiting">
-              <div class="typing-dots"><span></span><span></span><span></span></div>
-            </div>
-          `;
-        }
-        contentHtml += `<div class="msg-md">${renderMd(mainText)}</div>`;
-      }
-
-      // Build meta row: timestamp + latency + tokens + model + actions
-      const metaParts = [];
-      if (isUser && msg.timestamp) {
-        const d = new Date(msg.timestamp);
-        const pad = n => String(n).padStart(2, '0');
-        metaParts.push(`<span class="msg-meta-item">${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}</span>`);
-      }
-      if (isUser && msg.includeContext === false) {
-        metaParts.push('<span class="msg-meta-item">未带上文</span>');
-      }
-      if (!isUser && msg.firstTokenMs !== undefined) {
-        metaParts.push(`<span class="msg-meta-item">首字 ${formatShortDuration(msg.firstTokenMs)}</span>`);
-      }
-      if (!isUser && msg.outputTimeMs != null) {
-        metaParts.push(`<span class="msg-meta-item">输出 ${formatShortDuration(msg.outputTimeMs)}</span>`);
-      }
-      const usage = normalizeUsage(msg.usage);
-      if (usage && !isUser) {
-        const usageParts = [];
-        if (usage.input != null) usageParts.push(`输入 ${formatTokenCount(usage.input)}`);
-        if (usage.output != null) usageParts.push(`输出 ${formatTokenCount(usage.output)}`);
-        if (usage.total != null) usageParts.push(`总计 ${formatTokenCount(usage.total)}`);
-        if (usageParts.length) metaParts.push(`<span class="msg-meta-item">${usageParts.join(' / ')}</span>`);
-      } else if (msg.tokens) {
-        metaParts.push(`<span class="msg-meta-item">~${formatTokenCount(msg.tokens)} tokens</span>`);
-      }
-      if (!isUser && msg.model) metaParts.push(`<span class="msg-meta-item msg-model-tag">${esc(msg.model)}</span>`);
-      metaParts.push(`
-        <span class="copy-menu">
-          <button class="msg-action-btn" data-action="copy-menu" data-idx="${i}" title="复制" data-tooltip="复制">${SVG_COPY}</button>
-          <span class="copy-menu-popover">
-            <button type="button" data-action="copy-md" data-idx="${i}">复制 Markdown</button>
-            <button type="button" data-action="copy-text" data-idx="${i}">复制纯文本</button>
-          </span>
-        </span>
-      `);
-      if (isUser) metaParts.push(`<button class="msg-action-btn" data-action="edit" data-idx="${i}" title="继续提问" data-tooltip="继续提问">${SVG_EDIT}</button>`);
-      if (!isUser) metaParts.push(`<button class="msg-action-btn" data-action="retry" data-idx="${i}" title="重新生成，会替换这条回复之后的内容" data-tooltip="重新生成，会替换后续内容">${SVG_REFRESH}</button>`);
-      const metaRow = metaParts.length ? `<div class="msg-meta">${metaParts.join('')}</div>` : '';
-
-      return `
-        <div class="chat-msg ${isUser ? 'user' : 'ai'}">
-          <div class="chat-msg-inner">
-            <div class="chat-msg-avatar">${avatar}</div>
-            <div class="chat-msg-body">${contentHtml}${metaRow}</div>
-          </div>
-        </div>
-      `;
-    }).join('');
+    dom.messages.innerHTML = ChatRenderer.renderMessages(conv, {
+      showThinking: conversationShowThinking(conv),
+      icons: {
+        person: Icons.person,
+        aiAvatar: Icons.aiAvatar,
+        copy: Icons.copy,
+        edit: Icons.edit,
+        refresh: Icons.refresh,
+      },
+    });
 
     dom.messages.scrollTop = dom.messages.scrollHeight;
   }
 
   function addTyping() {
-    const el = document.createElement('div');
-    el.className = 'chat-msg ai';
-    el.id = 'typing-el';
-    el.innerHTML = `
-      <div class="chat-msg-inner">
-        <div class="chat-msg-avatar">${AI_AVATAR}</div>
-        <div class="chat-msg-body">
-          <div class="typing-dots"><span></span><span></span><span></span></div>
-        </div>
-      </div>
-    `;
-    dom.messages.classList.add('has-messages');
-    dom.welcome.classList.add('hidden');
-    updateConversationTokenSummary();
-    dom.messages.appendChild(el);
-    dom.messages.scrollTop = dom.messages.scrollHeight;
+    return StreamUi.addTyping(dom.messages, dom.welcome, updateConversationTokenSummary, Icons.aiAvatar);
   }
 
-  function removeTyping() { $('typing-el')?.remove(); }
+  function removeTyping() { StreamUi.removeTyping(document); }
 
   function addStreamMsg() {
-    const el = document.createElement('div');
-    el.className = 'chat-msg ai';
-    el.id = 'stream-el';
-    el.innerHTML = `
-      <div class="chat-msg-inner">
-        <div class="chat-msg-avatar">${AI_AVATAR}</div>
-        <div class="chat-msg-body">
-          <div class="stream-waiting">
-            <div class="typing-dots"><span></span><span></span><span></span></div>
-          </div>
-          <div class="thinking-block hidden">
-            <button class="thinking-toggle" type="button">
-              <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-              <span class="thinking-label">思考中...</span>
-            </button>
-            <div class="thinking-content"><div class="msg-md"></div></div>
-          </div>
-          <div class="msg-md"></div>
-        </div>
-      </div>
-    `;
-    dom.messages.appendChild(el);
-    dom.messages.scrollTop = dom.messages.scrollHeight;
-    return {
-      thinkingMd: el.querySelector('.thinking-content .msg-md'),
-      thinkingBlock: el.querySelector('.thinking-block'),
-      thinkingLabel: el.querySelector('.thinking-label'),
-      contentMd: el.querySelector('.chat-msg-body > .msg-md'),
-      waiting: el.querySelector('.stream-waiting'),
-    };
+    return StreamUi.addStreamMsg(dom.messages, Icons.aiAvatar);
   }
 
   function updateStream(el, text) {
-    scheduleStreamRender(() => {
-      el.innerHTML = renderMd(text);
-      dom.messages.scrollTop = dom.messages.scrollHeight;
-    });
+    StreamUi.updateStream(dom.messages, el, text);
+  }
+
+  function renderStreamContent(streamEls, content, opts = {}) {
+    StreamUi.renderStreamContent(dom.messages, streamEls, content, opts);
+  }
+
+  function showThinkingContent(streamEls, reasoningContent, opts = {}) {
+    StreamUi.showThinkingContent(dom.messages, streamEls, reasoningContent, opts);
   }
 
   function updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv = currentConv()) {
-    if (!conversationShowThinking(conv)) return;
-    scheduleStreamRender(() => {
-      streamEls.waiting?.classList.add('hidden');
-      if (streamEls.thinkingBlock.classList.contains('hidden')) {
-        streamEls.thinkingBlock.classList.remove('hidden');
-      }
-      if (!streamEls.thinkingDone && streamEls.thinkingBlock.dataset.userToggled !== 'true') {
-        streamEls.thinkingBlock.classList.add('expanded');
-      }
-      const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
-      if (!streamEls.thinkingDone) streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
-      streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
-      dom.messages.scrollTop = dom.messages.scrollHeight;
-    });
+    StreamUi.updateThinkingStream(dom.messages, streamEls, reasoningContent, reasoningStartTime, streamStartTime, conversationShowThinking(conv));
   }
 
   function finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, endedAt = Date.now(), reasoningContent = '') {
-    if (!streamEls?.thinkingBlock || streamEls.thinkingBlock.classList.contains('hidden')) return null;
-    const thinkingMs = endedAt - (reasoningStartTime || streamStartTime);
-    applyThinkingDoneLabel(streamEls, thinkingMs, reasoningContent);
-    return thinkingMs;
+    return StreamUi.finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, endedAt, reasoningContent);
   }
 
   function hideEmptyThinkingStream(streamEls) {
-    if (!streamEls?.thinkingBlock || streamEls.thinkingMd?.textContent?.trim()) return;
-    streamEls.thinkingBlock.classList.add('hidden');
-    streamEls.thinkingBlock.classList.remove('expanded');
-    delete streamEls.thinkingBlock.dataset.userToggled;
+    StreamUi.hideEmptyThinkingStream(streamEls);
   }
 
   function applyThinkingDoneLabel(streamEls, thinkingMs, reasoningContent = '') {
-    if (!streamEls?.thinkingBlock) return;
-    streamEls.thinkingDone = true;
-    streamEls.thinkingBlock.classList.remove('expanded');
-    delete streamEls.thinkingBlock.dataset.userToggled;
-    if (reasoningContent) streamEls.thinkingMd.innerHTML = renderMd(reasoningContent);
-    if (Number.isFinite(thinkingMs)) streamEls.thinkingLabel.textContent = `思考过程 · ${formatShortDuration(thinkingMs)}`;
-    else streamEls.thinkingLabel.textContent = '思考过程';
+    StreamUi.applyThinkingDoneLabel(streamEls, thinkingMs, reasoningContent);
   }
 
   // ===== Model Dropdown =====
@@ -2324,8 +1113,13 @@
       return;
     }
     const retryUserMsg = opts.userMessage ? cloneMessage(opts.userMessage) : null;
-    if (!retryUserMsg && hasPendingFileReads()) {
+    if (!retryUserMsg && state.pendingFiles.some(Attachments.isLoading)) {
       showToast('附件还在读取中，请稍后发送');
+      updateSendBtn();
+      return;
+    }
+    if (!retryUserMsg && state.pendingFiles.some(Attachments.hasError)) {
+      showToast('请先移除失败附件后再发送');
       updateSendBtn();
       return;
     }
@@ -2334,7 +1128,7 @@
     const includeContext = opts.includeContext ?? conversationIncludeContext(conv);
 
     // Build user message content (plain text or multimodal)
-    const files = state.pendingFiles.filter(isFileReady);
+    const files = state.pendingFiles.filter(Attachments.isReady);
     if (!retryUserMsg && !userContent.trim() && files.length === 0) return;
     let userMsgData;
     if (retryUserMsg) {
@@ -2342,15 +1136,13 @@
       userMsgData.includeContext = includeContext;
       userMsgData.timestamp = Date.now();
     } else if (files.length > 0) {
-      const contentParts = [{ type: 'text', text: userContent }];
-      for (const f of files) {
-        if (f.base64) {
-          contentParts.push({ type: 'image_url', image_url: { url: f.base64 } });
-        } else if (f.text) {
-          contentParts.push({ type: 'text', text: `[文件: ${f.name}]\n${f.text}` });
-        }
+      const fileIssues = Attachments.validateReadyFiles(files);
+      if (fileIssues.length) {
+        showToast(fileIssues[0]);
+        updateSendBtn();
+        return;
       }
-      userMsgData = { role: 'user', content: contentParts, tokens: inputTokens, timestamp: Date.now(), includeContext, files: files.map(f => ({ name: f.name, type: f.type, base64: f.base64 })) };
+      userMsgData = Attachments.messageFromReadyFiles(userContent, files, { tokens: inputTokens, timestamp: Date.now(), includeContext });
     } else {
       userMsgData = { role: 'user', content: userContent, tokens: inputTokens, timestamp: Date.now(), includeContext };
     }
@@ -2371,10 +1163,11 @@
 
     // Build API messages with context window trimming
     const sourceMessages = contextMessagesForRequest(conv, userMsgData, includeContext);
-    const rawApiMessages = sourceMessages.map(m => {
-      if (typeof m.content === 'string') return { role: m.role, content: m.content };
-      return { role: m.role, content: m.content };
-    });
+    const rawApiMessages = sourceMessages.map(m => ({
+      role: m.role,
+      content: m.content,
+      files: m.files,
+    }));
     const apiMessages = trimContextMessages(rawApiMessages, conv.systemPrompt?.trim() || null, conv.contextLimit);
     const requestInputTokens = apiMessagesTokenCount(apiMessages);
 
@@ -2402,12 +1195,7 @@
     persist([KEYS.conversations, KEYS.currentConvId]);
 
     // Build request params for the Service Worker to make the ONLY API call
-    const reqBody = { model: chatModel, messages: apiMessages, stream: true };
-    reqBody.temperature = conv.temperature;
-    reqBody.top_p = conv.topP;
-    const maxTokens = explicitMaxTokens(conv);
-    if (maxTokens) reqBody.max_tokens = maxTokens;
-    reqBody.stream_options = { include_usage: true };
+    const reqBody = buildChatRequestBody(conv, chatModel, apiMessages);
     const streamUrl = requestUrl(state.baseUrl, '/chat/completions');
     const swAvailable = navigator.serviceWorker?.controller;
 
@@ -2447,7 +1235,7 @@
 
         const content = session.assistantContent || '';
         const reasoning = session.reasoningContent || '';
-        const usage = normalizeUsage(session.usage);
+        const usage = OwnChatStream.normalizeUsage(session.usage);
 
         if (content && firstTokenTime === null) {
           firstTokenTime = Date.now() - streamStartTime;
@@ -2457,19 +1245,7 @@
         if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
         if (conversationShowThinking(conv) && reasoning) streamEls.waiting?.classList.add('hidden');
 
-        // Update thinking block until the answer body starts, then keep its duration fixed.
-        if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
-          if (streamEls.thinkingBlock.classList.contains('hidden')) {
-            streamEls.thinkingBlock.classList.remove('hidden');
-          }
-          if (streamEls.thinkingBlock.dataset.userToggled !== 'true') {
-            streamEls.thinkingBlock.classList.add('expanded');
-          }
-          const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
-          streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
-          streamEls.thinkingMd.innerHTML = renderMd(reasoning);
-          dom.messages.scrollTop = dom.messages.scrollHeight;
-        }
+        updateThinkingStream(streamEls, reasoning, reasoningStartTime, streamStartTime, conv);
 
         // Update content
         if (content !== lastContent) {
@@ -2484,8 +1260,7 @@
             if (reasoningEndTime !== null) conv.messages[streamMsgIdx].reasoningTimeMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
           }
           updateConversationTokenSummary();
-          streamEls.contentMd.innerHTML = renderMd(content);
-          dom.messages.scrollTop = dom.messages.scrollHeight;
+          renderStreamContent(streamEls, content, { hideWaiting: false });
         }
 
         // Collapse thinking block when reasoning is done and content starts
@@ -2503,7 +1278,7 @@
           const finalSession = await getStableStreamSession(session);
           const finalContent = finalSession.assistantContent || content;
           const finalReasoning = finalSession.reasoningContent || reasoning;
-          const finalUsage = normalizeUsage(finalSession.usage) || usage;
+          const finalUsage = OwnChatStream.normalizeUsage(finalSession.usage) || usage;
           const estimatedOutputTokens = estimateTokens(finalContent);
           const outputTokens = usageOutputTokens(finalUsage, estimatedOutputTokens);
           const outputEndTime = Date.now();
@@ -2534,7 +1309,6 @@
               msgData.reasoningTimeMs = reasoningEndTime ? reasoningEndTime - (reasoningStartTime || streamStartTime) : null;
             }
           }
-
           // Replace placeholder
           if (conv.messages[streamMsgIdx]?.streaming) {
             conv.messages[streamMsgIdx] = msgData;
@@ -2548,11 +1322,7 @@
             conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
           }
 
-          state.tokenStats.input += usageInputTokens(finalUsage, requestInputTokens);
-          state.tokenStats.output += outputTokens;
-          state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
-
-          persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+          persist([KEYS.conversations, KEYS.currentConvId]);
           updateModelBadge();
           updateSidebar();
 
@@ -2575,6 +1345,7 @@
       state.chatAbortController = controller;
       let assistantContent = '';
       let reasoningContent = '';
+      let apiStreamState = OwnChatStream.createStreamState();
       let apiReasoningContent = '';
       let tagReasoningContent = '';
       let firstTokenTime = null;
@@ -2595,8 +1366,7 @@
         if (!resp.ok) {
           let errText = await resp.text().catch(() => '');
           if (/stream_options|include_usage/i.test(errText)) {
-            const fallbackBody = Object.assign({}, reqBody);
-            delete fallbackBody.stream_options;
+            const fallbackBody = OwnChatStream.removeStreamOptions(reqBody);
             resp = await apiFetch(streamUrl, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
@@ -2622,21 +1392,18 @@
         let lastStreamPersist = 0;
 
         const processStreamLine = (line) => {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data:')) return;
-          const data = trimmed.slice(5).trim();
-          if (data === '[DONE]') return;
           try {
-            const json = JSON.parse(data);
-            const usage = normalizeUsage(json.usage);
-            if (usage) streamUsage = usage;
-            const delta = json.choices?.[0]?.delta;
-            const reasoningDelta = delta?.reasoning_content || delta?.thinking || '';
-            const contentDelta = delta?.content || '';
+            const json = OwnChatStream.parseSseLine(line);
+            if (!json) return;
+            const parsed = OwnChatStream.parseChatStreamEvent(json);
+            apiStreamState = OwnChatStream.applyStreamDelta(apiStreamState, parsed);
+            if (apiStreamState.usage) streamUsage = apiStreamState.usage;
+            const reasoningDelta = parsed.reasoning;
+            const contentDelta = parsed.content;
 
             if (reasoningDelta) {
               if (reasoningStartTime === null) reasoningStartTime = Date.now();
-              apiReasoningContent += reasoningDelta;
+              apiReasoningContent = apiStreamState.reasoning;
               reasoningContent = [apiReasoningContent, tagReasoningContent].filter(Boolean).join('\n\n');
               updateThinkingStream(streamEls, reasoningContent, reasoningStartTime, streamStartTime, conv);
             }
@@ -2720,11 +1487,7 @@
           conv.title = userContent.slice(0, 30) + (userContent.length > 30 ? '...' : '');
         }
 
-        state.tokenStats.input += usageInputTokens(streamUsage, requestInputTokens);
-        state.tokenStats.output += outputTokens;
-        state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
-
-        persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+        persist([KEYS.conversations, KEYS.currentConvId]);
         updateModelBadge();
         updateSidebar();
 
@@ -2866,14 +1629,6 @@
   }
 
   // ===== Setup Overlay =====
-  function showSetup() {
-    dom.setupBaseUrl.value = state.baseUrl;
-    dom.setupApiKey.value = state.apiKey;
-    populateSelectFromCache(dom.setupModelSelect);
-    dom.setupModelSelect.value = state.model;
-    dom.setupOverlay.classList.remove('hidden');
-  }
-
   function hideSetup() {
     dom.setupOverlay.classList.add('hidden');
   }
@@ -2965,92 +1720,6 @@
     return state.imageJobs.find(j => j.id === state.currentImageJobId);
   }
 
-  function imageJobReplies(job) {
-    if (!job) return [];
-    if (Array.isArray(job.replies) && job.replies.length) return job.replies;
-    return [{
-      id: `${job.id}-reply-0`,
-      model: job.model,
-      mapModel: job.mapModel,
-      prompt: job.prompt,
-      inputImage: job.inputImage || null,
-      inputImages: imageReferencePayload(job.inputImages || job.inputImage),
-      params: job.params || DEFAULT_IMAGE_PARAMS,
-      outputs: job.outputs || [],
-      error: job.error || null,
-      status: job.status || 'done',
-      startedAt: job.startedAt || job.createdAt,
-      createdAt: job.startedAt || job.createdAt,
-      estimatedSeconds: job.estimatedSeconds,
-      durationMs: job.durationMs,
-    }];
-  }
-
-  function ensureImageJobReplies(job) {
-    if (!job) return [];
-    if (!Array.isArray(job.replies) || !job.replies.length) {
-      job.replies = imageJobReplies(job);
-    }
-    return job.replies;
-  }
-
-  function currentImageActiveReply(job) {
-    const replies = ensureImageJobReplies(job);
-    return replies.find(reply => reply.status === 'generating') || replies[replies.length - 1] || null;
-  }
-
-  function imageReplyOutput(job, replyIndex, outputIndex) {
-    const reply = imageJobReplies(job)[Number.isFinite(replyIndex) ? replyIndex : 0];
-    return {
-      reply,
-      out: reply?.outputs?.[Number.isFinite(outputIndex) ? outputIndex : 0],
-    };
-  }
-
-  function dataUrlForImage(out, fallbackFormat) {
-    const format = out.format || fallbackFormat || 'png';
-    if (out.url) return sanitizeUrl(out.url, { image: true });
-    return `data:image/${format};base64,${out.b64}`;
-  }
-
-  function imageByteSize(out) {
-    if (Number.isFinite(out?.bytes)) return out.bytes;
-    if (!out?.b64) return 0;
-    const clean = out.b64.replace(/\s/g, '');
-    const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
-    return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
-  }
-
-  function storedTextBytes(value) {
-    if (value == null) return 0;
-    const text = typeof value === 'string' ? value : JSON.stringify(value);
-    if (!text) return 0;
-    if (typeof Blob !== 'undefined') return new Blob([text]).size;
-    return new TextEncoder().encode(text).length;
-  }
-
-  function formatBytes(bytes) {
-    if (!Number.isFinite(bytes) || bytes <= 0) return '';
-    if (bytes < 1024) return `${bytes} B`;
-    const kb = bytes / 1024;
-    if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB`;
-    const mb = kb / 1024;
-    return `${mb.toFixed(mb >= 100 ? 0 : 2)} MB`;
-  }
-
-  function normalizeImageFormat(format) {
-    const value = (format || '').toLowerCase().replace(/^image\//, '');
-    if (value === 'jpg') return 'jpeg';
-    return value || '';
-  }
-
-  function imageOutputMeta(out, fallbackFormat) {
-    const size = out?.width && out?.height ? `${out.width}x${out.height}` : '尺寸读取中';
-    const format = normalizeImageFormat(out?.format || fallbackFormat || '') || '未知格式';
-    const bytes = formatBytes(imageByteSize(out)) || '大小未知';
-    return [size, format.toUpperCase(), bytes].filter(Boolean);
-  }
-
   async function updateRemoteImageOutputMeta(job, out, metaEl) {
     if (!out?.url || out.metaFetchTried || out.bytes) return;
     out.metaFetchTried = true;
@@ -3083,11 +1752,6 @@
     const metaEl = resultEl?.querySelector('.image-result-meta');
     if (metaEl) metaEl.innerHTML = imageOutputMeta(out, (reply?.params || job.params)?.outputFormat).map(esc).join('<span>·</span>');
     updateRemoteImageOutputMeta(job, out, metaEl);
-  }
-
-  function imageFilename(job, out) {
-    const ext = out?.format || job.params?.outputFormat || 'png';
-    return `${(job.title || 'ownchat-image').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60)}.${ext}`;
   }
 
   function downloadImage(job, out) {
@@ -3123,11 +1787,6 @@
     }
   }
 
-  function attachmentImageFilename(item) {
-    const fallback = `attachment.${item.format || 'png'}`;
-    return (item.name || fallback).replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80) || fallback;
-  }
-
   function downloadAttachmentImage(item) {
     const a = document.createElement('a');
     a.href = item.src;
@@ -3149,41 +1808,9 @@
     }
   }
 
-  function imageViewerItemsForJob(job, scope = 'outputs') {
-    if (!job) return [];
-    const items = [];
-    imageJobReplies(job).forEach((reply, replyIndex) => {
-      if (scope === 'inputs') {
-        imageReferencePayload(reply.inputImages || reply.inputImage || job.inputImages || job.inputImage).forEach((inputImage, refIndex) => {
-          const format = (inputImage.type || '').replace(/^image\//, '') || (reply.params || job.params)?.outputFormat || 'png';
-          items.push({
-            jobId: job.id,
-            inputRef: true,
-            inputImage,
-            replyIndex,
-            refIndex,
-            src: inputImage.base64,
-            out: { b64: inputImage.base64.split(',').pop(), format },
-          });
-        });
-      }
-      if (scope !== 'outputs') return;
-      (reply.outputs || []).forEach((output, index) => {
-        items.push({
-          jobId: job.id,
-          replyIndex,
-          index,
-          src: dataUrlForImage(output, (reply.params || job.params)?.outputFormat),
-          out: output,
-        });
-      });
-    });
-    return items;
-  }
-
   function openImageViewer(job, out, replyIndex = 0) {
     const scope = out.inputRef ? 'inputs' : 'outputs';
-    const items = imageViewerItemsForJob(job, scope);
+    const items = ImageCore.imageViewerItemsForJob(job, scope, MAX_IMAGE_REFS);
     const reply = imageJobReplies(job)[replyIndex];
     let itemIndex = items.findIndex(item => {
       if (out.inputRef) return item.inputRef && item.replyIndex === replyIndex && item.refIndex === (out.refIndex || 0);
@@ -3193,271 +1820,37 @@
       const outputIndex = reply?.outputs?.indexOf(out) ?? 0;
       itemIndex = items.findIndex(item => !item.inputRef && item.replyIndex === replyIndex && item.index === outputIndex);
     }
-    state.viewerImage = {
-      jobId: job.id,
-      items,
-      itemIndex: Math.max(0, itemIndex),
-    };
-    resetImageViewerTransform();
-    syncImageViewer();
-    dom.imageViewer.classList.remove('hidden');
+    ImageViewer.openItems(items, itemIndex);
   }
 
   function openAttachmentImageViewer(src, name = 'attachment') {
-    state.viewerImage = { attachment: true, src, name };
-    resetImageViewerTransform();
-    syncImageViewer();
-    dom.imageViewer.classList.remove('hidden');
-  }
-
-  function closeImageViewer() {
-    dom.imageViewer.classList.add('hidden');
-    dom.imageViewerImg.src = '';
-    state.viewerImage = null;
-    state.imageViewerDragging = null;
-    state.imageViewerTouch = null;
-    dom.imageViewerCounter.textContent = '';
-    dom.imageViewerCounter.classList.add('hidden');
-    dom.imageViewerPrev.classList.add('hidden');
-    dom.imageViewerNext.classList.add('hidden');
+    ImageViewer.openAttachment({ src, name });
   }
 
   function currentViewerImage() {
-    if (!state.viewerImage) return null;
-    if (state.viewerImage.attachment) {
-      const src = state.viewerImage.src;
+    const item = ImageViewer.current();
+    if (!item) return null;
+    if (item.attachment) {
+      const src = item.src;
       const mime = src.match(/^data:([^;]+)/)?.[1] || 'image/png';
       const format = normalizeImageFormat(mime) || 'png';
       return {
         attachment: true,
         src,
-        name: state.viewerImage.name || `attachment.${format}`,
+        name: item.name || `attachment.${format}`,
         format,
       };
     }
-    if (Array.isArray(state.viewerImage.items)) {
-      const item = state.viewerImage.items[state.viewerImage.itemIndex || 0];
-      const job = state.imageJobs.find(j => j.id === item?.jobId);
-      return job && item?.out ? { job, out: item.out } : null;
-    }
-    const job = state.imageJobs.find(j => j.id === state.viewerImage.jobId);
-    if (state.viewerImage.inputRef) {
-      const reply = imageJobReplies(job)[state.viewerImage.replyIndex || 0];
-      const inputImage = state.viewerImage.inputImage || imageReferencePayload(reply?.inputImages || reply?.inputImage || job?.inputImages || job?.inputImage)[state.viewerImage.refIndex || 0];
-      if (!inputImage) return null;
-      const format = (inputImage.type || '').replace(/^image\//, '') || (reply?.params || job.params)?.outputFormat || 'png';
-      return {
-        job,
-        out: { b64: inputImage.base64.split(',').pop(), format },
-      };
-    }
-    const { reply, out } = imageReplyOutput(job, state.viewerImage.replyIndex || 0, state.viewerImage.index);
-    return job && out ? { job, out } : null;
-  }
-
-  function syncImageViewer() {
-    const viewer = state.viewerImage;
-    if (!viewer) return;
-    if (viewer.attachment) {
-      dom.imageViewerImg.src = viewer.src;
-      dom.imageViewerCounter.textContent = '';
-      dom.imageViewerCounter.classList.add('hidden');
-      dom.imageViewerPrev.classList.add('hidden');
-      dom.imageViewerNext.classList.add('hidden');
-      return;
-    }
-    if (!Array.isArray(viewer.items)) return;
-    const total = viewer.items.length;
-    const itemIndex = Math.min(Math.max(viewer.itemIndex || 0, 0), Math.max(total - 1, 0));
-    viewer.itemIndex = itemIndex;
-    const item = viewer.items[itemIndex];
-    if (item) dom.imageViewerImg.src = item.src;
-    dom.imageViewerCounter.textContent = total > 1 ? `${itemIndex + 1} / ${total}` : '';
-    dom.imageViewerCounter.classList.toggle('hidden', total <= 1);
-    dom.imageViewerPrev.classList.toggle('hidden', total <= 1);
-    dom.imageViewerNext.classList.toggle('hidden', total <= 1);
-  }
-
-  function switchImageViewerImage(direction) {
-    const viewer = state.viewerImage;
-    if (!viewer || !Array.isArray(viewer.items) || viewer.items.length <= 1) return;
-    const total = viewer.items.length;
-    viewer.itemIndex = (viewer.itemIndex + direction + total) % total;
-    resetImageViewerTransform();
-    syncImageViewer();
-  }
-
-  function clampImageScale(scale) {
-    return Math.min(8, Math.max(0.25, scale));
-  }
-
-  function applyImageViewerTransform() {
-    const t = state.imageViewerTransform;
-    dom.imageViewerImg.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.scale})`;
-    dom.imageViewerImg.classList.toggle('is-zoomed', t.scale > 1.01);
-  }
-
-  function resetImageViewerTransform() {
-    state.imageViewerTransform = { scale: 1, x: 0, y: 0 };
-    state.imageViewerDragging = null;
-    applyImageViewerTransform();
-  }
-
-  function zoomImageViewer(e) {
-    if (dom.imageViewer.classList.contains('hidden')) return;
-    e.preventDefault();
-    const current = state.imageViewerTransform;
-    const nextScale = clampImageScale(current.scale * (e.deltaY < 0 ? 1.16 : 1 / 1.16));
-    if (Math.abs(nextScale - current.scale) < 0.001) return;
-
-    const rect = dom.imageViewerImg.getBoundingClientRect();
-    const cx = e.clientX - (rect.left + rect.width / 2);
-    const cy = e.clientY - (rect.top + rect.height / 2);
-    const ratio = nextScale / current.scale;
-    state.imageViewerTransform = {
-      scale: nextScale,
-      x: current.x - cx * (ratio - 1),
-      y: current.y - cy * (ratio - 1),
-    };
-    applyImageViewerTransform();
-  }
-
-  function startImageViewerDrag(e) {
-    if (dom.imageViewer.classList.contains('hidden')) return;
-    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
-    e.preventDefault();
-    state.imageViewerDragging = {
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      originX: state.imageViewerTransform.x,
-      originY: state.imageViewerTransform.y,
-    };
-    dom.imageViewerImg.setPointerCapture?.(e.pointerId);
-    dom.imageViewer.classList.add('is-panning');
-  }
-
-  function moveImageViewerDrag(e) {
-    const drag = state.imageViewerDragging;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    e.preventDefault();
-    state.imageViewerTransform.x = drag.originX + e.clientX - drag.startX;
-    state.imageViewerTransform.y = drag.originY + e.clientY - drag.startY;
-    applyImageViewerTransform();
-  }
-
-  function endImageViewerDrag(e) {
-    const drag = state.imageViewerDragging;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    e.preventDefault();
-    state.imageViewerDragging = null;
-    dom.imageViewerImg.releasePointerCapture?.(e.pointerId);
-    dom.imageViewer.classList.remove('is-panning');
-  }
-
-  function touchDistance(touches) {
-    const [a, b] = touches;
-    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-  }
-
-  function touchCenter(touches) {
-    const [a, b] = touches;
-    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
-  }
-
-  function startImageViewerTouch(e) {
-    if (dom.imageViewer.classList.contains('hidden') || e.touches.length !== 2) return;
-    e.preventDefault();
-    state.imageViewerTouch = {
-      distance: touchDistance(e.touches),
-      center: touchCenter(e.touches),
-      scale: state.imageViewerTransform.scale,
-      x: state.imageViewerTransform.x,
-      y: state.imageViewerTransform.y,
-    };
-  }
-
-  function moveImageViewerTouch(e) {
-    const start = state.imageViewerTouch;
-    if (!start || e.touches.length !== 2) return;
-    e.preventDefault();
-    const center = touchCenter(e.touches);
-    const nextScale = clampImageScale(start.scale * (touchDistance(e.touches) / start.distance));
-    state.imageViewerTransform = {
-      scale: nextScale,
-      x: start.x + center.x - start.center.x,
-      y: start.y + center.y - start.center.y,
-    };
-    applyImageViewerTransform();
-  }
-
-  function endImageViewerTouch(e) {
-    if (e.touches.length < 2) state.imageViewerTouch = null;
+    const job = state.imageJobs.find(j => j.id === item.jobId);
+    return job && item.out ? { job, out: item.out } : null;
   }
 
   function estimateImageSeconds(params) {
-    const qualityFactor = params.quality === 'high' ? 130 : params.quality === 'medium' ? 95 : params.quality === 'low' ? 60 : 90;
-    const sizeFactor = params.size === '3840x2160' || params.size === '2160x3840'
-      ? 95
-      : params.size === '1536x1024' || params.size === '1024x1536'
-        ? 35
-        : params.size === 'auto' ? 15 : 20;
-    const editFactor = imageReferenceList().length ? 35 : 0;
-    return Math.max(60, qualityFactor + sizeFactor + editFactor);
-  }
-
-  function formatDuration(ms) {
-    if (!Number.isFinite(ms) || ms < 0) return '';
-    const seconds = Math.round(ms / 1000);
-    if (seconds < 60) return `${seconds}s`;
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return s ? `${m}m ${s}s` : `${m}m`;
-  }
-
-  function formatDateTime(ts) {
-    const d = new Date(ts || Date.now());
-    const pad = n => String(n).padStart(2, '0');
-    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    return ImageCore.estimateImageSeconds(params, imageReferenceList());
   }
 
   function imageTimeoutMs(params) {
-    return Math.max(30 * 60 * 1000, estimateImageSeconds(params) * 1000 * 3);
-  }
-
-  function imageStaleTimeoutMs() {
-    return 10 * 60 * 1000;
-  }
-
-  function completeImageJobFromSession(job, activeReply, session, startedAt) {
-    const nextOutputs = parseImageSessionOutputs(session);
-    if (nextOutputs.length === 0) {
-      activeReply.error = '接口未返回可显示的图片数据';
-      activeReply.status = 'error';
-      job.error = activeReply.error;
-      job.status = 'error';
-    } else {
-      activeReply.outputs = nextOutputs;
-      activeReply.error = null;
-      activeReply.status = 'done';
-      job.outputs = nextOutputs;
-      job.error = null;
-      job.status = 'done';
-    }
-    const durationMs = Date.now() - (startedAt || activeReply.startedAt || job.startedAt || job.createdAt || Date.now());
-    activeReply.durationMs = durationMs;
-    job.durationMs = durationMs;
-  }
-
-  function failImageJobFromSession(job, activeReply, message, status = 'error', startedAt = null) {
-    const isCancelled = status === 'cancelled';
-    const durationMs = Date.now() - (startedAt || activeReply.startedAt || job.startedAt || job.createdAt || Date.now());
-    activeReply.error = message || (isCancelled ? '请求已中断' : '生成失败');
-    activeReply.status = isCancelled ? 'cancelled' : 'error';
-    activeReply.durationMs = durationMs;
-    job.error = activeReply.error;
-    job.status = activeReply.status;
-    job.durationMs = durationMs;
+    return ImageCore.imageTimeoutMs(params, imageReferenceList());
   }
 
   function startImageProgressTimer() {
@@ -3558,15 +1951,8 @@
       clearInterval(state.imagePollTimer);
       state.imagePollTimer = null;
     }
-    job.status = 'cancelled';
-    job.error = reason;
-    job.durationMs = Date.now() - (job.startedAt || job.createdAt);
     const activeReply = currentImageActiveReply(job);
-    if (activeReply?.status === 'generating') {
-      activeReply.status = 'cancelled';
-      activeReply.error = reason;
-      activeReply.durationMs = job.durationMs;
-    }
+    if (activeReply) setImageJobFailed(job, activeReply, reason, 'cancelled');
     state.isGeneratingImage = false;
     state.imageAbortController = null;
     releaseImageWakeLock();
@@ -3587,7 +1973,7 @@
   }
 
   function storageText(bytes) {
-    return formatBytes(bytes) || '0 B';
+    return Attachments.formatBytes(bytes) || '0 B';
   }
 
   function isSettingsOpen() {
@@ -3597,7 +1983,7 @@
   async function collectStorageStats() {
     const chatJson = localStorage.getItem(KEYS.conversations) || '[]';
     const allFiles = await fileDbGetAll();
-    const attachmentBytes = allFiles.reduce((sum, file) => sum + storedTextBytes(file), 0);
+    const attachmentBytes = allFiles.reduce((sum, file) => sum + Attachments.storedTextBytes(file), 0);
     const attachmentIds = new Set(allFiles.map(file => file?.id).filter(Boolean));
     const referencedIds = new Set(collectConversationFileIds(state.conversations));
     const orphanAttachmentCount = allFiles.reduce((sum, file) => {
@@ -3609,12 +1995,12 @@
     }, 0);
     return {
       conversationCount: state.conversations.length,
-      chatBytes: storedTextBytes(chatJson) + attachmentBytes,
+      chatBytes: Attachments.storedTextBytes(chatJson) + attachmentBytes,
       attachmentCount: attachmentIds.size,
       orphanAttachmentCount,
       imageJobCount: jobs.length,
       imageOutputCount: outputCount,
-      imageBytes: storedTextBytes(jobs),
+      imageBytes: Attachments.storedTextBytes(jobs),
     };
   }
 
@@ -3655,9 +2041,8 @@
       await clearStreamSession();
       state.conversations = [];
       state.currentConvId = null;
-      state.tokenStats = { input: 0, output: 0, total: 0 };
       resetSidebarBulkMode();
-      persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+      persist([KEYS.conversations, KEYS.currentConvId]);
       await fileDbClearAll();
       updateSidebar();
       syncConvParams();
@@ -3704,123 +2089,19 @@
 
   function renderImageWorkspace() {
     const selected = currentImageJob();
-    const jobs = selected ? [selected] : [];
     dom.imageEmpty.classList.toggle('hidden', !!selected);
-    dom.imageGallery.innerHTML = jobs.map(job => {
-      const renderUserMessage = (prompt, inputImages, createdAt, params = job.params || DEFAULT_IMAGE_PARAMS, replyIndex = '') => {
-        const refs = imageReferencePayload(inputImages);
-        const inputRef = refs.length
-          ? `<div class="image-input-ref-list">
-              ${refs.map((inputImage, refIndex) => `
-                <div class="image-input-ref">
-                  <img src="${esc(inputImage.base64)}" alt="${esc(inputImage.name || '参考图')}" class="image-input-preview" data-job="${esc(job.id)}" data-reply="${esc(String(replyIndex))}" data-ref="${refIndex}">
-                  <span>${esc(inputImage.name || `参考图 ${refIndex + 1}`)}</span>
-                </div>
-              `).join('')}
-            </div>`
-          : '';
-        return `
-          <div class="image-chat-msg user">
-            <div class="image-chat-inner">
-              <div class="image-chat-avatar">${SVG_PERSON}</div>
-              <div class="image-chat-bubble image-chat-bubble-prompt">
-                <div class="image-chat-prompt">${esc(prompt || '')}</div>
-                ${inputRef}
-                <div class="image-msg-meta">
-                  <span>${formatDateTime(createdAt || job.createdAt)}</span>
-                  <span>~${formatTokenCount(estimateTokens(prompt))} tokens</span>
-                  <button class="msg-action-btn image-action" data-action="copy-prompt" data-job="${job.id}" data-prompt="${esc(prompt || '')}" type="button" title="复制提示词" data-tooltip="复制提示词">${SVG_COPY}</button>
-                  <button class="msg-action-btn image-action" data-action="reuse" data-job="${job.id}" data-prompt="${esc(prompt || '')}" data-size="${esc(params.size || '')}" data-quality="${esc(params.quality || '')}" data-format="${esc(params.outputFormat || '')}" data-background="${esc(params.background || '')}" type="button" title="复用到输入框" data-tooltip="复用到输入框">${SVG_EDIT}</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        `;
-      };
-      const userMessage = renderUserMessage(job.prompt, job.inputImages || job.inputImage, job.createdAt, job.params);
-      const replies = imageJobReplies(job);
-      const replyMessages = replies.map((reply, replyIndex) => {
-        const params = reply.params || job.params || DEFAULT_IMAGE_PARAMS;
-        const replyUserMessage = replyIndex > 0
-          ? renderUserMessage(reply.prompt || job.prompt, reply.inputImages || reply.inputImage || null, reply.createdAt || reply.startedAt, params, replyIndex)
-          : '';
-        if (reply.status === 'generating' && !(reply.outputs || []).length && !reply.error) {
-          return replyUserMessage;
-        }
-        const aiMetaParts = [
-          reply.model || job.model,
-          reply.mapModel ? `映射 ${formatSourcedModel(reply.mapModel)}` : '',
-          params.size,
-          params.quality !== 'auto' ? params.quality : '',
-          params.outputFormat ? params.outputFormat.toUpperCase() : '',
-          reply.durationMs ? `耗时 ${formatDuration(reply.durationMs)}` : '',
-          formatDateTime(reply.durationMs ? (reply.startedAt || reply.createdAt || job.createdAt) + reply.durationMs : (reply.createdAt || job.createdAt)),
-        ].filter(Boolean).map(item => `<span>${esc(item)}</span>`).join('');
-        const outputs = (reply.outputs || []).map((out, i) => {
-          const outputMeta = imageOutputMeta(out, params.outputFormat).map(esc).join('<span>·</span>');
-          return `
-          <div class="image-result" data-job="${esc(job.id)}" data-reply="${replyIndex}" data-index="${i}">
-            <img src="${esc(dataUrlForImage(out, params.outputFormat))}" alt="${esc(job.prompt)}" loading="lazy" class="image-preview">
-            <div class="image-result-meta">${outputMeta}</div>
-            <div class="image-result-actions">
-              <button class="msg-action-btn image-action" data-action="view" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="放大查看" data-tooltip="放大查看">${SVG_MAXIMIZE}</button>
-              <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="以图编辑" data-tooltip="以图编辑">${SVG_EDIT}</button>
-              <button class="msg-action-btn image-action" data-action="copy-image" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="复制图片" data-tooltip="复制图片">${SVG_COPY}</button>
-              <button class="msg-action-btn image-action" data-action="download" data-job="${job.id}" data-reply="${replyIndex}" data-index="${i}" title="下载" data-tooltip="下载">${SVG_DOWNLOAD}</button>
-            </div>
-          </div>
-        `;
-        }).join('');
-        return `
-          ${replyUserMessage}
-          <div class="image-chat-msg ai">
-            <div class="image-chat-inner">
-              <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
-              <div class="image-chat-bubble image-chat-bubble-result">
-                ${reply.error ? `<div class="image-error">${esc(reply.error)}</div>` : ''}
-                <div class="image-results">${outputs}</div>
-                <div class="image-msg-meta">${aiMetaParts}</div>
-                <div class="image-job-actions">
-                  <button class="btn-secondary image-action" data-action="edit-latest" data-job="${job.id}" data-reply="${replyIndex}" type="button">编辑</button>
-                  <button class="btn-secondary image-action" data-action="retry" data-job="${job.id}" data-reply="${replyIndex}" type="button">${reply.status === 'generating' ? '生成中' : '重绘'}</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
-      const waitedMs = Date.now() - (job.startedAt || job.createdAt);
-      const progress = job.status === 'generating'
-        ? `<div class="image-progress" data-job="${esc(job.id)}">
-            <div class="image-progress-indicator">
-              <div class="image-spinner"></div>
-            </div>
-            <div class="image-progress-body">
-              <div class="image-progress-title">正在生成图片</div>
-              <div class="image-progress-stats">
-                <span class="image-progress-elapsed">耗时 ${formatDuration(waitedMs)}</span>
-              </div>
-              <div class="image-progress-note">正在生成，请勿关闭页面</div>
-            </div>
-            <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${job.id}" type="button">取消</button>
-          </div>`
-        : '';
-      const progressMessage = progress
-        ? `<div class="image-chat-msg ai">
-            <div class="image-chat-inner">
-              <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
-              <div class="image-chat-bubble image-chat-bubble-progress">${progress}</div>
-            </div>
-          </div>`
-        : '';
-      return `
-        <article class="image-job-card" data-id="${job.id}">
-          ${userMessage}
-          ${replyMessages}
-          ${progressMessage}
-        </article>
-      `;
-    }).join('');
+    dom.imageGallery.innerHTML = ImageRenderer.renderWorkspace(selected, {
+      defaultParams: DEFAULT_IMAGE_PARAMS,
+      maxRefs: MAX_IMAGE_REFS,
+      formatSourcedModel,
+      icons: {
+        person: Icons.person,
+        copy: Icons.copy,
+        edit: Icons.edit,
+        download: Icons.download,
+        maximize: Icons.maximize,
+      },
+    }).html;
   }
 
   function scrollImageWorkspaceToBottom(smooth = true) {
@@ -3845,66 +2126,12 @@
     return dom.imageWorkspace.scrollHeight - dom.imageWorkspace.scrollTop - dom.imageWorkspace.clientHeight <= threshold;
   }
 
-  function parseImageOutputs(data, format) {
-    return (data.data || []).map(item => ({
-      b64: item.b64_json || '',
-      url: item.url || '',
-      revisedPrompt: item.revised_prompt || '',
-      format: normalizeImageFormat(item.output_format || item.mime_type || format),
-      bytes: item.b64_json ? imageByteSize({ b64: item.b64_json }) : 0,
-      createdAt: Date.now(),
-    })).filter(item => item.b64 || item.url);
-  }
-
-  function parseResponseImageOutputs(data, format) {
-    const outputs = [];
-    const scan = value => {
-      if (!value) return;
-      if (Array.isArray(value)) { value.forEach(scan); return; }
-      if (typeof value !== 'object') return;
-      if ((value.type === 'image_generation_call' || value.type === 'image_generation') && value.result) {
-        outputs.push({
-          b64: value.result,
-          url: '',
-          revisedPrompt: '',
-          format: normalizeImageFormat(value.output_format || value.mime_type || format),
-          bytes: imageByteSize({ b64: value.result }),
-          createdAt: Date.now(),
-        });
-      }
-      Object.keys(value).forEach(k => scan(value[k]));
-    };
-    scan(data.output || data);
-    return outputs;
-  }
-
-  function imageToolOptions(params) {
-    const opts = { type: 'image_generation' };
-    if (params.size !== 'auto') opts.size = params.size;
-    if (params.quality !== 'auto') opts.quality = params.quality;
-    if (params.outputFormat) opts.output_format = params.outputFormat;
-    if (params.background !== 'auto') opts.background = params.background;
-    return opts;
-  }
-
-  function mappedImageInput(prompt, ref) {
-    const refs = imageReferenceList(ref);
-    if (!refs.length) return prompt.trim();
-    return [{
-      role: 'user',
-      content: [
-        { type: 'input_text', text: prompt.trim() },
-        ...refs.map(item => ({ type: 'input_image', image_url: item.base64 })),
-      ],
-    }];
-  }
-
   async function requestMappedImage(prompt, params, ref = null, signal = null) {
     const endpoint = imageMapEndpoint();
     const url = requestUrl(endpoint.baseUrl, '/responses');
     const body = {
       model: endpoint.model,
-      input: mappedImageInput(prompt, ref),
+      input: mappedImageInput(prompt, imageReferenceList(ref)),
       tools: [imageToolOptions(params)],
       tool_choice: 'required',
     };
@@ -3915,29 +2142,6 @@
       signal,
     });
     if (!resp.ok) {
-      body.tool_choice = { type: 'image_generation' };
-      resp = await apiFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
-        body: JSON.stringify(body),
-        signal,
-      });
-    }
-    if (!resp.ok && (body.tools[0].output_format || body.tools[0].background || body.tools[0].quality || body.tools[0].size)) {
-      const fallback = {
-        model: endpoint.model,
-        input: mappedImageInput(prompt, ref),
-        tools: [{ type: 'image_generation' }],
-        tool_choice: 'required',
-      };
-      resp = await apiFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
-        body: JSON.stringify(fallback),
-        signal,
-      });
-    }
-    if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
       throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
     }
@@ -3945,41 +2149,7 @@
   }
 
   function buildImageRequestBody(prompt, params) {
-    const body = {
-      model: state.imageModel,
-      prompt: prompt.trim(),
-      n: 1,
-    };
-    if (params.size !== 'auto') body.size = params.size;
-    if (params.quality !== 'auto') body.quality = params.quality;
-    if (params.outputFormat && !/^dall-e/i.test(state.imageModel)) body.output_format = params.outputFormat;
-    if (params.background !== 'auto') body.background = params.background;
-    return body;
-  }
-
-  function extractChatText(data) {
-    const msg = data?.choices?.[0]?.message;
-    if (!msg) return '';
-    if (typeof msg.content === 'string') return msg.content.trim();
-    if (Array.isArray(msg.content)) {
-      return msg.content.map(part => part.text || '').join('').trim();
-    }
-    return '';
-  }
-
-  function promptLanguageInstruction(prompt) {
-    const cjkCount = (prompt.match(/[\u3400-\u9fff]/g) || []).length;
-    const latinCount = (prompt.match(/[a-zA-Z]/g) || []).length;
-    if (cjkCount > 0 && cjkCount >= latinCount * 0.3) {
-      return {
-        label: '中文',
-        instruction: '用户原提示词主要是中文，优化结果必须使用中文输出。不要翻译成英文，不要中英混写，除非原文中的品牌名、专有名词或参数本身是英文。',
-      };
-    }
-    return {
-      label: '原文语言',
-      instruction: '优化结果必须使用用户原提示词的主要语言输出。不要擅自切换语言；只有原文是英文时才输出英文。',
-    };
+    return ImageCore.buildImageRequestBody(state.imageModel, prompt, params);
   }
 
   async function optimizeImagePrompt() {
@@ -4046,36 +2216,11 @@
       body: JSON.stringify(body),
       signal,
     });
-    if (!resp.ok && (body.output_format || body.background || body.quality)) {
-      body = { model: state.imageModel, prompt: prompt.trim(), n: 1 };
-      if (params.size !== 'auto') body.size = params.size;
-      resp = await apiFetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${imageApiKey}` },
-        body: JSON.stringify(body),
-        signal,
-      });
-    }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
       throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
     }
     return parseImageOutputs(await resp.json(), params.outputFormat);
-  }
-
-  function dataUrlToBlob(dataUrl) {
-    const [header, data] = dataUrl.split(',');
-    const mime = header.match(/data:([^;]+)/)?.[1] || 'image/png';
-    const bin = atob(data);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    return new Blob([bytes], { type: mime });
-  }
-
-  function filenameForBlob(name, blob) {
-    const ext = blob.type.includes('jpeg') ? 'jpg' : blob.type.includes('webp') ? 'webp' : 'png';
-    const base = (name || 'reference').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60);
-    return `${base || 'reference'}.${ext}`;
   }
 
   async function requestImageEdit(prompt, params, ref, signal = null) {
@@ -4101,27 +2246,24 @@
       body: form,
       signal,
     });
-    if (!resp.ok && (form.has('quality') || form.has('output_format') || form.has('background'))) {
-      const fallback = new FormData();
-      fallback.append('model', state.imageModel);
-      fallback.append('prompt', prompt.trim());
-      refs.forEach(item => {
-        const refBlob = dataUrlToBlob(item.base64);
-        fallback.append('image', refBlob, filenameForBlob(item.name, refBlob));
-      });
-      if (params.size !== 'auto') fallback.append('size', params.size);
-      resp = await apiFetch(url, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${imageApiKey}` },
-        body: fallback,
-        signal,
-      });
-    }
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
       throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
     }
     return parseImageOutputs(await resp.json(), params.outputFormat);
+  }
+
+  function createImageReply(jobId, prompt, params, refs, startedAt, replyId = `${jobId}-reply-${Date.now()}`) {
+    return ImageCore.createImageReply({
+      jobId,
+      prompt,
+      params,
+      refs,
+      startedAt,
+      model: state.imageModel,
+      mapModel: state.imageMapModel,
+      replyId,
+    });
   }
 
   async function generateImage(prompt, params = state.imageDefaults, retryJob = null, refOverride = undefined) {
@@ -4141,7 +2283,6 @@
     const startedAt = Date.now();
     const refSource = refOverride !== undefined ? refOverride : state.imageRefs;
     const refs = imageReferencePayload(refSource);
-    const ref = refs[0] || null;
     const estimatedSeconds = estimateImageSeconds(params);
     const job = retryJob || {
       id: startedAt.toString(),
@@ -4151,7 +2292,6 @@
       mapModel: state.imageMapModel,
       createdAt: startedAt,
       params: Object.assign({}, params),
-      inputImage: ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : null,
       inputImages: refs,
       outputs: [],
       error: null,
@@ -4160,12 +2300,13 @@
       estimatedSeconds,
       durationMs: null,
     };
-    if (!job.replies) job.replies = imageJobReplies(job);
+    if (!job.replies) job.replies = [];
     let activeReply = null;
     if (!retryJob) {
+      activeReply = createImageReply(job.id, prompt, params, refs, startedAt, `${job.id}-reply-0`);
+      job.replies = [activeReply];
       state.imageJobs.unshift(job);
       state.currentImageJobId = job.id;
-      activeReply = job.replies[0];
     } else {
       job.model = state.imageModel;
       job.mapModel = state.imageMapModel;
@@ -4175,22 +2316,7 @@
       job.startedAt = startedAt;
       job.estimatedSeconds = estimatedSeconds;
       job.durationMs = null;
-      activeReply = {
-        id: `${job.id}-reply-${Date.now()}`,
-        model: state.imageModel,
-        mapModel: state.imageMapModel,
-        prompt: prompt.trim(),
-        inputImage: ref ? { name: ref.name, type: ref.type, base64: ref.base64 } : null,
-        inputImages: refs,
-        params: Object.assign({}, params),
-        outputs: [],
-        error: null,
-        status: 'generating',
-        startedAt,
-        createdAt: startedAt,
-        estimatedSeconds,
-        durationMs: null,
-      };
+      activeReply = createImageReply(job.id, prompt, params, refs, startedAt);
       job.replies.push(activeReply);
     }
     persist();
@@ -4363,14 +2489,7 @@
             ? await requestImageEdit(prompt, params, refs, controller.signal)
             : await requestOneImage(prompt, params, controller.signal);
         if (nextOutputs.length === 0) throw new Error('接口未返回可显示的图片数据');
-        activeReply.outputs = nextOutputs;
-        activeReply.error = null;
-        activeReply.status = 'done';
-        activeReply.durationMs = Date.now() - startedAt;
-        job.outputs = nextOutputs;
-        job.error = null;
-        job.status = 'done';
-        job.durationMs = activeReply.durationMs;
+        setImageJobDone(job, activeReply, nextOutputs, startedAt);
         if (refs.length) { setImageReferences([]); renderImageRefPreview(); }
         showToast('图片已生成');
         finishImageJob();
@@ -4508,11 +2627,7 @@
         dom.messages.querySelectorAll('.thinking-block.hidden').forEach(el => el.classList.remove('hidden'));
         const reasoning = streamingMsg?.reasoningContent || '';
         if (reasoning && state.streamEls?.thinkingBlock) {
-          state.streamEls.waiting?.classList.add('hidden');
-          state.streamEls.thinkingBlock.classList.remove('hidden');
-          delete state.streamEls.thinkingBlock.dataset.userToggled;
-          state.streamEls.thinkingBlock.classList.add('expanded');
-          state.streamEls.thinkingMd.innerHTML = renderMd(reasoning);
+          showThinkingContent(state.streamEls, reasoning, { resetUserToggle: true });
           if (streamingMsg?.reasoningTimeMs != null) {
             applyThinkingDoneLabel(state.streamEls, streamingMsg.reasoningTimeMs, reasoning);
           }
@@ -4627,15 +2742,11 @@
         const initialContent = session.assistantContent || '';
         const initialReasoning = session.reasoningContent || '';
         if (initialContent) {
-          streamEls.waiting?.classList.add('hidden');
-          streamEls.contentMd.innerHTML = renderMd(initialContent);
+          renderStreamContent(streamEls, initialContent);
           lastContent = initialContent;
         }
         if (conversationShowThinking(conv) && initialReasoning) {
-          streamEls.waiting?.classList.add('hidden');
-          streamEls.thinkingBlock.classList.remove('hidden');
-          streamEls.thinkingBlock.classList.add('expanded');
-          streamEls.thinkingMd.innerHTML = renderMd(initialReasoning);
+          showThinkingContent(streamEls, initialReasoning);
           reasoningStartTime = Date.now() - 1000;
         }
         dom.messages.scrollTop = dom.messages.scrollHeight;
@@ -4659,24 +2770,13 @@
           if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
           if (conversationShowThinking(conv) && reasoning) streamEls.waiting?.classList.add('hidden');
 
-          if (conversationShowThinking(conv) && reasoning && reasoningEndTime === null) {
-            if (streamEls.thinkingBlock.classList.contains('hidden')) {
-              streamEls.thinkingBlock.classList.remove('hidden');
-            }
-            if (streamEls.thinkingBlock.dataset.userToggled !== 'true') {
-              streamEls.thinkingBlock.classList.add('expanded');
-            }
-            const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
-            streamEls.thinkingLabel.textContent = `思考中... · ${formatShortDuration(thinkingMs)}`;
-            streamEls.thinkingMd.innerHTML = renderMd(reasoning);
-          }
+          updateThinkingStream(streamEls, reasoning, reasoningStartTime, streamStartTime, conv);
 
           if (content !== lastContent) {
             lastContent = content;
             if (conversationShowThinking(conv)) streamEls.waiting?.classList.add('hidden');
             else streamEls.waiting?.classList.toggle('hidden', !!content.trim());
-            streamEls.contentMd.innerHTML = renderMd(content);
-            dom.messages.scrollTop = dom.messages.scrollHeight;
+            renderStreamContent(streamEls, content, { hideWaiting: false });
           }
 
           if (conversationShowThinking(conv) && reasoning && content) {
@@ -4712,16 +2812,10 @@
       const existingContent = conv.messages[streamIdx].content || '';
       const existingReasoning = conv.messages[streamIdx].reasoningContent || '';
       if (existingContent) {
-        state.streamEls.waiting?.classList.add('hidden');
-        state.streamEls.contentMd.innerHTML = renderMd(existingContent);
+        renderStreamContent(state.streamEls, existingContent);
       }
       if (conversationShowThinking(conv) && existingReasoning) {
-        state.streamEls.waiting?.classList.add('hidden');
-        state.streamEls.thinkingBlock.classList.remove('hidden');
-        if (state.streamEls.thinkingBlock.dataset.userToggled !== 'true') {
-          state.streamEls.thinkingBlock.classList.add('expanded');
-        }
-        state.streamEls.thinkingMd.innerHTML = renderMd(existingReasoning);
+        showThinkingContent(state.streamEls, existingReasoning);
       }
       dom.messages.scrollTop = dom.messages.scrollHeight;
 
@@ -4745,12 +2839,10 @@
         const c = placeholder.content || '';
         const r = placeholder.reasoningContent || '';
         if (c) {
-          state.streamEls.waiting?.classList.add('hidden');
-          state.streamEls.contentMd.innerHTML = renderMd(c);
+          renderStreamContent(state.streamEls, c);
         }
         if (conversationShowThinking(conv) && r) {
-          state.streamEls.waiting?.classList.add('hidden');
-          state.streamEls.thinkingMd.innerHTML = renderMd(r);
+          showThinkingContent(state.streamEls, r);
         }
         dom.messages.scrollTop = dom.messages.scrollHeight;
       }, 500);
@@ -4761,7 +2853,7 @@
   function finalizeStreamFromSession(conv, streamIdx, session) {
     const content = session.assistantContent || '';
     const reasoning = session.reasoningContent || '';
-    const usage = normalizeUsage(session.usage);
+    const usage = OwnChatStream.normalizeUsage(session.usage);
     const outputTokens = usageOutputTokens(usage, estimateTokens(content));
     const requestInputTokens = Number(session.requestInputTokens || conv.messages[streamIdx]?.requestInputTokens || 0);
     const chatModel = session.model || conversationModel(conv);
@@ -4791,16 +2883,12 @@
       conv.title = titleText.slice(0, 30) + (titleText.length > 30 ? '...' : '');
     }
 
-    state.tokenStats.input += usageInputTokens(usage, requestInputTokens);
-    state.tokenStats.output += outputTokens;
-    state.tokenStats.total = state.tokenStats.input + state.tokenStats.output;
-
     state.isStreaming = false;
     state.streamingConvId = null;
     state.chatAbortController = null;
     releaseChatWakeLock();
 
-    persist([KEYS.conversations, KEYS.currentConvId, KEYS.tokenStats]);
+    persist([KEYS.conversations, KEYS.currentConvId]);
     updateModelBadge();
     updateSidebar();
 
@@ -5105,7 +3193,7 @@
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        showConfigImportConfirm(parseImportConfig(String(reader.result || '')));
+        showConfigImportConfirm(ConfigImport.parse(String(reader.result || '')));
       } catch (e) {
         alert(`导入配置失败: ${e.message}`);
       }
@@ -5333,28 +3421,15 @@
   function addChatAttachmentFile(file, opts = {}) {
     const name = opts.name || file.name || pastedImageName(file, opts.index || 0);
     if (state.pendingFiles.find(f => f.name === name && f.size === file.size)) return false;
-    const entry = { name, size: file.size, type: file.type, loading: true };
+    const entry = Attachments.createPendingEntry(file, name);
     state.pendingFiles.push(entry);
     renderFilePreview();
     updateSendBtn();
 
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      if (file.type.startsWith('image/')) entry.base64 = ev.target.result;
-      else entry.text = ev.target.result;
-      entry.loading = false;
-      delete entry.error;
+    Attachments.readIntoEntry(entry, file).finally(() => {
       renderFilePreview();
       updateSendBtn();
-    };
-    reader.onerror = () => {
-      entry.loading = false;
-      entry.error = true;
-      renderFilePreview();
-      updateSendBtn();
-    };
-    if (file.type.startsWith('image/')) reader.readAsDataURL(file);
-    else reader.readAsText(file);
+    });
     return true;
   }
 
@@ -5411,8 +3486,10 @@
         : f.base64
         ? `<img src="${f.base64}" class="file-thumb" data-action="preview-attachment-image" data-index="${i}" alt="${esc(f.name)}">`
         : `<div class="file-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>`;
-      const status = f.error ? '<span class="file-status">失败</span>' : (f.loading ? '<span class="file-status">读取中</span>' : '');
-      return `<div class="file-preview-item ${f.loading ? 'is-loading' : ''} ${f.error ? 'is-error' : ''}" data-index="${i}">${inner}<span class="file-name">${esc(f.name)}</span>${status}<button class="file-remove" data-index="${i}" type="button">&times;</button></div>`;
+      const readyStatus = f.extractionLabel ? esc(f.extractionLabel) : '';
+      const status = f.error ? `<span class="file-status">${esc(f.errorText || '失败')}</span>` : (f.loading ? '<span class="file-status">读取中</span>' : (readyStatus ? `<span class="file-status">${readyStatus}</span>` : ''));
+      const title = f.errorText ? `${f.name}: ${f.errorText}` : f.name;
+      return `<div class="file-preview-item ${f.loading ? 'is-loading' : ''} ${f.error ? 'is-error' : ''}" data-index="${i}" title="${esc(title)}">${inner}<span class="file-name">${esc(f.name)}</span>${status}<button class="file-remove" data-index="${i}" type="button">&times;</button></div>`;
     }).join('');
   }
 
@@ -5493,7 +3570,7 @@
       const replyIndex = parseInt(inputPreview.dataset.reply || '', 10);
       const reply = Number.isFinite(replyIndex) ? imageJobReplies(job)[replyIndex] : null;
       const refIndex = parseInt(inputPreview.dataset.ref || '0', 10);
-      const inputImage = imageReferencePayload(reply?.inputImages || reply?.inputImage || job?.inputImages || job?.inputImage)[refIndex];
+      const inputImage = imageReferencePayload(reply?.inputImages || job?.inputImages)[refIndex];
       if (inputImage) {
         openImageViewer(job, {
           inputRef: true,
@@ -5542,7 +3619,7 @@
       const reply = imageJobReplies(job)[Number.isFinite(replyIndex) ? replyIndex : 0] || null;
       const retryPrompt = reply?.prompt || job.prompt || '';
       const retryParams = Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {}, reply?.params || {});
-      const retryRef = reply?.inputImages || reply?.inputImage || job.inputImages || job.inputImage || null;
+      const retryRef = reply?.inputImages || job.inputImages || null;
       state.currentImageJobId = job.id;
       generateImage(retryPrompt, retryParams, job, retryRef);
     } else if (btn.dataset.action === 'cancel') {
@@ -5617,44 +3694,29 @@
     if (state.mode === 'image' && shouldKeepBottom) scrollImageWorkspaceToBottom(false);
   }, true);
 
-  dom.imageViewerClose.addEventListener('click', closeImageViewer);
-  dom.imageViewer.querySelector('.image-viewer-backdrop').addEventListener('click', closeImageViewer);
-  dom.imageViewerPrev.addEventListener('click', () => switchImageViewerImage(-1));
-  dom.imageViewerNext.addEventListener('click', () => switchImageViewerImage(1));
-  dom.imageViewerImg.addEventListener('wheel', zoomImageViewer, { passive: false });
-  dom.imageViewerImg.addEventListener('pointerdown', startImageViewerDrag);
-  dom.imageViewer.addEventListener('pointermove', moveImageViewerDrag);
-  dom.imageViewer.addEventListener('pointerup', endImageViewerDrag);
-  dom.imageViewer.addEventListener('pointercancel', endImageViewerDrag);
-  dom.imageViewerImg.addEventListener('dblclick', resetImageViewerTransform);
-  dom.imageViewerImg.addEventListener('touchstart', startImageViewerTouch, { passive: false });
-  dom.imageViewerImg.addEventListener('touchmove', moveImageViewerTouch, { passive: false });
-  dom.imageViewerImg.addEventListener('touchend', endImageViewerTouch);
-  dom.imageViewerImg.addEventListener('touchcancel', endImageViewerTouch);
-  dom.imageViewerCopy.addEventListener('click', () => {
-    const current = currentViewerImage();
-    if (!current) return;
-    if (current.attachment) copyAttachmentImage(current);
-    else copyImage(current.job, current.out);
-  });
-  dom.imageViewerDownload.addEventListener('click', () => {
-    const current = currentViewerImage();
-    if (!current) return;
-    if (current.attachment) downloadAttachmentImage(current);
-    else downloadImage(current.job, current.out);
-  });
-  document.addEventListener('keydown', (e) => {
-    if (dom.imageViewer.classList.contains('hidden')) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeImageViewer();
-    } else if (e.key === 'ArrowLeft') {
-      e.preventDefault();
-      switchImageViewerImage(-1);
-    } else if (e.key === 'ArrowRight') {
-      e.preventDefault();
-      switchImageViewerImage(1);
-    }
+  ImageViewer.mount({
+    viewer: dom.imageViewer,
+    backdrop: dom.imageViewer.querySelector('.image-viewer-backdrop'),
+    img: dom.imageViewerImg,
+    closeBtn: dom.imageViewerClose,
+    prevBtn: dom.imageViewerPrev,
+    nextBtn: dom.imageViewerNext,
+    counter: dom.imageViewerCounter,
+    copyBtn: dom.imageViewerCopy,
+    downloadBtn: dom.imageViewerDownload,
+  }, {
+    onCopy() {
+      const current = currentViewerImage();
+      if (!current) return;
+      if (current.attachment) copyAttachmentImage(current);
+      else copyImage(current.job, current.out);
+    },
+    onDownload() {
+      const current = currentViewerImage();
+      if (!current) return;
+      if (current.attachment) downloadAttachmentImage(current);
+      else downloadImage(current.job, current.out);
+    },
   });
 
   window.addEventListener('beforeunload', (e) => {
@@ -5708,12 +3770,17 @@
     }
     const text = dom.userInput.value.trim();
     if (!ensureModeConfigured('chat')) return;
-    if (hasPendingFileReads()) {
+    if (state.pendingFiles.some(Attachments.isLoading)) {
       showToast('附件还在读取中，请稍后发送');
       updateSendBtn();
       return;
     }
-    if (!text && !state.pendingFiles.some(isFileReady)) return;
+    if (state.pendingFiles.some(Attachments.hasError)) {
+      showToast('请先移除失败附件后再发送');
+      updateSendBtn();
+      return;
+    }
+    if (!text && !state.pendingFiles.some(Attachments.isReady)) return;
     if (!currentConv()) { newConv(); updateSidebar(); syncConvParams(); }
     dom.userInput.value = '';
     delete dom.userInput.dataset.manualHeight;
@@ -5757,7 +3824,7 @@
 
     if (session.status === 'complete') {
       // Stream finished while page was refreshing — full recovery
-      const usage = normalizeUsage(session.usage);
+      const usage = OwnChatStream.normalizeUsage(session.usage);
       const msgData = {
         role: 'assistant',
         content: session.assistantContent || '',
@@ -5782,7 +3849,7 @@
       state.isStreaming = true;
       state.streamingConvId = conv.id;
       requestChatWakeLock();
-      const usage = normalizeUsage(session.usage);
+      const usage = OwnChatStream.normalizeUsage(session.usage);
       const msgData = {
         role: 'assistant',
         content: session.assistantContent || '...',
@@ -5806,7 +3873,7 @@
     // SW reported stopped (user aborted before page refresh)
     if (session.status === 'stopped') {
       const content = (session.assistantContent || '').trim();
-      const usage = normalizeUsage(session.usage);
+      const usage = OwnChatStream.normalizeUsage(session.usage);
       const stoppedContent = content ? `${content}\n\n_已停止生成_` : '**已停止生成**';
       const msgData = { role: 'assistant', content: stoppedContent, tokens: usageOutputTokens(usage, estimateTokens(content)), model: session.model };
       if (usage) msgData.usage = usage;
@@ -5822,7 +3889,7 @@
     if (session.status === 'error') {
       const content = (session.assistantContent || '').trim();
       if (content) {
-        const usage = normalizeUsage(session.usage);
+        const usage = OwnChatStream.normalizeUsage(session.usage);
         const msgData = {
           role: 'assistant',
           content: `${content}\n\n_（回复中断）_`,
@@ -5863,7 +3930,7 @@
       const hasReasoning = showThinking && !!msg.reasoningContent;
       el.innerHTML = `
         <div class="chat-msg-inner">
-          <div class="chat-msg-avatar">${AI_AVATAR}</div>
+          <div class="chat-msg-avatar">${Icons.aiAvatar}</div>
           <div class="chat-msg-body">
             <div class="stream-waiting ${hasReasoning ? 'hidden' : ''}">
               <div class="typing-dots"><span></span><span></span><span></span></div>
@@ -5918,7 +3985,7 @@
       }
 
       const msg = conv.messages[streamIdx];
-      const usage = normalizeUsage(session.usage);
+      const usage = OwnChatStream.normalizeUsage(session.usage);
       msg.content = session.assistantContent || msg.content;
       if (session.reasoningContent) msg.reasoningContent = session.reasoningContent;
       msg.tokens = usageOutputTokens(usage, estimateTokens(msg.content));
@@ -6040,40 +4107,15 @@
   function applyRecoveredImageSession(job, session) {
     const activeReply = currentImageActiveReply(job);
     if (!activeReply) return;
-    const durationMs = Date.now() - (activeReply.startedAt || job.startedAt || job.createdAt || Date.now());
     if (session.status === 'complete') {
-      const outputs = parseImageSessionOutputs(session);
-      if (outputs.length === 0) {
-        activeReply.error = '接口未返回可显示的图片数据';
-        activeReply.status = 'error';
-        job.error = activeReply.error;
-        job.status = 'error';
-      } else {
-        activeReply.outputs = outputs;
-        activeReply.error = null;
-        activeReply.status = 'done';
-        job.outputs = outputs;
-        job.error = null;
-        job.status = 'done';
-      }
+      completeImageJobFromSession(job, activeReply, session);
     } else if (session.status === 'stopped') {
-      activeReply.error = '请求已中断';
-      activeReply.status = 'cancelled';
-      job.error = activeReply.error;
-      job.status = 'cancelled';
+      setImageJobFailed(job, activeReply, '请求已中断', 'cancelled');
     } else if (session.status === 'error') {
-      activeReply.error = session.error || '生成失败';
-      activeReply.status = 'error';
-      job.error = activeReply.error;
-      job.status = 'error';
+      setImageJobFailed(job, activeReply, session.error || '生成失败');
     } else if (session.status === 'timeout') {
-      activeReply.error = '生成超时';
-      activeReply.status = 'error';
-      job.error = activeReply.error;
-      job.status = 'error';
+      setImageJobFailed(job, activeReply, '生成超时');
     }
-    activeReply.durationMs = durationMs;
-    job.durationMs = durationMs;
   }
 
   // Recover image generation session from Service Worker

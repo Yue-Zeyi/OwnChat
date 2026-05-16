@@ -174,7 +174,28 @@ style.css
 app.js
 sw.js
 icon.png
+storage.js
+markdown-renderer.js
+attachments.js
+chat-stream.js
+token-utils.js
+persistence-db.js
+api-client.js
+service-worker-client.js
+config-import.js
+ui-utils.js
+icons.js
+image-core.js
+image-renderer.js
+image-viewer.js
+chat-renderer.js
+stream-ui.js
 markdown-it.min.js
+pdf.min.js
+pdf.worker.min.js
+mammoth.browser.min.js
+xlsx.full.min.js
+jszip.min.js
 ```
 
 可部署到：
@@ -198,7 +219,28 @@ Service Worker 需要 HTTPS 或 localhost。若 API 服务未开放 CORS，纯�
 ├── app.js
 ├── sw.js
 ├── icon.png
+├── storage.js
+├── markdown-renderer.js
+├── attachments.js
+├── chat-stream.js
+├── token-utils.js
+├── persistence-db.js
+├── api-client.js
+├── service-worker-client.js
+├── config-import.js
+├── ui-utils.js
+├── icons.js
+├── image-core.js
+├── image-renderer.js
+├── image-viewer.js
+├── chat-renderer.js
+├── stream-ui.js
 ├── markdown-it.min.js
+├── pdf.min.js
+├── pdf.worker.min.js
+├── mammoth.browser.min.js
+├── xlsx.full.min.js
+├── jszip.min.js
 └── README.md
 ```
 
@@ -209,6 +251,8 @@ Service Worker 需要 HTTPS 或 localhost。若 API 服务未开放 CORS，纯�
 ```bash
 node --check app.js
 node --check sw.js
+node --check chat-stream.js
+node --check attachments.js
 ```
 
 修改 `sw.js` 后，如果浏览器仍使用旧版本，可以在 DevTools 的 Application / Service Workers 中手动更新，或清理站点数据后重新加载。

@@ -17,9 +17,19 @@
       }
       try {
         const mode = JSON.parse(localStorage.getItem('nc_mode'));
-        document.documentElement.setAttribute('data-boot-mode', mode === 'image' ? 'image' : 'chat');
+        const bootMode = mode === 'image' ? 'image' : 'chat';
+        document.documentElement.setAttribute('data-boot-mode', bootMode);
+        if (bootMode === 'chat') {
+          const conversations = JSON.parse(localStorage.getItem('nc_conversations')) || [];
+          const currentConvId = JSON.parse(localStorage.getItem('nc_current_conv_id'));
+          const currentConv = conversations.find(c => c && c.id === currentConvId);
+          if (!currentConv || !Array.isArray(currentConv.messages) || currentConv.messages.length === 0) {
+            document.documentElement.setAttribute('data-boot-empty-chat', 'true');
+          }
+        }
       } catch {
         document.documentElement.setAttribute('data-boot-mode', 'chat');
+        document.documentElement.setAttribute('data-boot-empty-chat', 'true');
       }
       try {
         const collapsed = JSON.parse(localStorage.getItem('nc_sidebar_collapsed'));
@@ -142,7 +152,7 @@
       <!-- Input -->
       <div id="input-area">
         <input type="file" id="file-input" class="hidden"
-          accept="image/*,.pdf,.txt,.md,.csv,.json,.py,.js,.ts,.jsx,.tsx,.html,.css,.xml,.yaml,.yml,.php,.java,.go,.rs,.c,.cpp,.h,.hpp,.cs,.rb,.swift,.kt,.kts,.vue,.svelte,.sh,.bash,.zsh,.sql,.toml,.ini,.env,.log" multiple title="上传文件">
+          accept="image/*,.pdf,.doc,.docx,.rtf,.odt,.ppt,.pptx,.xls,.xlsx,.tsv,.txt,.md,.csv,.json,.py,.js,.ts,.jsx,.tsx,.html,.css,.xml,.yaml,.yml,.php,.java,.go,.rs,.c,.cpp,.h,.hpp,.cs,.rb,.swift,.kt,.kts,.vue,.svelte,.sh,.bash,.zsh,.sql,.toml,.ini,.env,.log" multiple title="上传文件">
         <div class="input-wrapper">
           <div id="file-preview" class="file-preview hidden"></div>
           <div class="textarea-resize-handle" data-resize-target="user-input" aria-hidden="true"></div>
@@ -571,6 +581,26 @@
   </div>
 
   <script src="markdown-it.min.js" defer></script>
+  <script src="pdf.min.js" defer></script>
+  <script src="mammoth.browser.min.js" defer></script>
+  <script src="xlsx.full.min.js" defer></script>
+  <script src="jszip.min.js" defer></script>
+  <script src="storage.js" defer></script>
+  <script src="markdown-renderer.js" defer></script>
+  <script src="chat-stream.js" defer></script>
+  <script src="attachments.js" defer></script>
+  <script src="token-utils.js" defer></script>
+  <script src="persistence-db.js" defer></script>
+  <script src="api-client.js" defer></script>
+  <script src="service-worker-client.js" defer></script>
+  <script src="config-import.js" defer></script>
+  <script src="ui-utils.js" defer></script>
+  <script src="icons.js" defer></script>
+  <script src="image-core.js" defer></script>
+  <script src="image-renderer.js" defer></script>
+  <script src="image-viewer.js" defer></script>
+  <script src="chat-renderer.js" defer></script>
+  <script src="stream-ui.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 

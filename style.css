@@ -70,6 +70,14 @@ html[data-boot-mode="image"] #mode-image-btn {
   color: #fff;
 }
 
+html[data-boot-mode="image"] #mode-chat-btn.active {
+  color: var(--text-3);
+}
+
+html[data-boot-mode="image"] #mode-image-btn:not(.active) {
+  color: #fff;
+}
+
 html[data-boot-mode] .mode-btn {
   transition: none;
 }
@@ -92,6 +100,10 @@ html[data-boot-mode="image"] #image-workspace {
 
 html[data-boot-mode="image"] #image-input-area {
   display: block !important;
+}
+
+html[data-boot-mode="chat"][data-boot-empty-chat="true"] #welcome {
+  display: flex !important;
 }
 
 html[data-boot-sidebar="collapsed"] #sidebar {
@@ -1004,8 +1016,6 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 
 /* Nested lists */
 .msg-md ul ul, .msg-md ol ol, .msg-md ul ol, .msg-md ol ul { margin: 4px 0; }
-.msg-md .list-depth-2 { padding-left: 20px; }
-.msg-md .list-depth-4 { padding-left: 40px; }
 
 /* Task lists */
 .msg-md .task-item {
@@ -2065,6 +2075,10 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   font-size: 10px;
   color: var(--text-3);
   line-height: 1;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .file-preview-item.is-error .file-status {
@@ -2345,11 +2359,6 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   flex-shrink: 0;
 }
 
-.danger-chip {
-  color: var(--danger);
-  border-color: rgba(239, 68, 68, 0.35);
-}
-
 .settings-storage-tools {
   display: grid;
   grid-template-columns: 1fr;
@@ -2483,6 +2492,74 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   line-height: 1.4;
   text-align: center;
 }
+
+.msg-files {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.msg-file {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 320px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+
+.chat-msg.user .msg-file {
+  border-color: rgba(255,255,255,0.24);
+  background: rgba(255,255,255,0.12);
+}
+
+.msg-file-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-3);
+  background: var(--bg-input);
+}
+
+.chat-msg.user .msg-file-icon {
+  color: rgba(255,255,255,0.82);
+  background: rgba(255,255,255,0.14);
+}
+
+.msg-file-info {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.msg-file-name,
+.msg-file-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-file-name {
+  color: var(--text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.msg-file-meta {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.chat-msg.user .msg-file-name { color: #fff; }
+.chat-msg.user .msg-file-meta { color: rgba(255,255,255,0.68); }
 
 .btn-refresh {
   padding: 10px 12px;

@@ -1,4 +1,6 @@
 // OwnChat Service Worker — sole proxy for chat stream and image generation
+importScripts('chat-stream.js');
+
 const STREAM_KEY = 'active_stream';
 const IMAGE_KEY = 'active_image';
 const STREAM_DB_NAME = 'ownchat_stream_db';
@@ -75,37 +77,37 @@ async function startStream(data) {
   });
 
   try {
+    let requestBody = body;
     let resp = await fetch(url, {
-      method: 'POST', headers, body, signal: controller.signal,
+      method: 'POST', headers, body: requestBody, signal: controller.signal,
     });
 
     if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
+      let errText = await resp.text().catch(() => '');
       if (errText && /stream_options|include_usage/i.test(errText)) {
         try {
           const fallbackBody = JSON.parse(body || '{}');
           delete fallbackBody.stream_options;
+          requestBody = JSON.stringify(fallbackBody);
           resp = await fetch(url, {
             method: 'POST',
             headers,
-            body: JSON.stringify(fallbackBody),
+            body: requestBody,
             signal: controller.signal,
           });
           if (resp.ok) {
             await updateStreamData({ streamOptions: null, usageUnavailable: true, updatedAt: Date.now() });
           } else {
-            const retryErrText = await resp.text().catch(() => '');
-            await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${retryErrText.slice(0, 500)}` });
-            activeStreamAbort = null;
-            return;
+            errText = await resp.text().catch(() => errText);
           }
         } catch {
-          await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
+          await updateStreamData({ status: 'error', updatedAt: Date.now(), error: OwnChatStream.httpErrorText(resp.status, errText) });
           activeStreamAbort = null;
           return;
         }
-      } else {
-        await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}` });
+      }
+      if (!resp.ok) {
+        await updateStreamData({ status: 'error', updatedAt: Date.now(), error: OwnChatStream.httpErrorText(resp.status, errText) });
         activeStreamAbort = null;
         return;
       }
@@ -116,27 +118,15 @@ async function startStream(data) {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let assistantContent = '';
-    let reasoningContent = '';
-    let usage = null;
+    let streamState = OwnChatStream.createStreamState();
     let lastPersist = 0;
-    let outputStartAt = null;
 
     const processStreamLine = (line) => {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data:')) return;
-      const payload = trimmed.slice(5).trim();
-      if (payload === '[DONE]') return;
       try {
-        const json = JSON.parse(payload);
-        if (json.usage) usage = json.usage;
-        const delta = json.choices?.[0]?.delta;
-        if (delta?.reasoning_content) reasoningContent += delta.reasoning_content;
-        if (delta?.thinking) reasoningContent += delta.thinking;
-        if (delta?.content) {
-          if (!outputStartAt) outputStartAt = Date.now();
-          assistantContent += delta.content;
-        }
+        const json = OwnChatStream.parseSseLine(line);
+        if (!json) return;
+        const parsed = OwnChatStream.parseChatStreamEvent(json);
+        streamState = OwnChatStream.applyStreamDelta(streamState, parsed);
       } catch { /* skip */ }
     };
 
@@ -157,49 +147,28 @@ async function startStream(data) {
         const now = Date.now();
         if (now - lastPersist > 300) {
           lastPersist = now;
-          await updateStreamData({ assistantContent, reasoningContent, usage, outputStartAt, status: 'streaming', updatedAt: now });
+          await updateStreamData({
+            assistantContent: streamState.content,
+            reasoningContent: streamState.reasoning,
+            usage: streamState.usage,
+            outputStartAt: streamState.outputStartAt,
+            status: 'streaming',
+            updatedAt: now,
+          });
         }
       }
 
       const completedAt = Date.now();
-      await updateStreamData({
-        assistantContent,
-        reasoningContent,
-        usage,
-        outputStartAt,
-        outputEndAt: completedAt,
-        outputTimeMs: outputStartAt ? completedAt - outputStartAt : null,
-        status: 'complete',
-        updatedAt: completedAt,
-      });
+      await updateStreamData(OwnChatStream.finalizeChatStream(streamState, 'complete', completedAt));
     } catch (e) {
       if (e?.name === 'AbortError') {
         const stoppedAt = Date.now();
-        await updateStreamData({
-          assistantContent,
-          reasoningContent,
-          usage,
-          outputStartAt,
-          outputEndAt: stoppedAt,
-          outputTimeMs: outputStartAt ? stoppedAt - outputStartAt : null,
-          status: 'stopped',
-          updatedAt: stoppedAt,
-        });
+        await updateStreamData(OwnChatStream.finalizeChatStream(streamState, 'stopped', stoppedAt));
         activeStreamAbort = null;
         return;
       }
       const erroredAt = Date.now();
-      await updateStreamData({
-        assistantContent,
-        reasoningContent,
-        usage,
-        outputStartAt,
-        outputEndAt: erroredAt,
-        outputTimeMs: outputStartAt ? erroredAt - outputStartAt : null,
-        status: 'error',
-        updatedAt: erroredAt,
-        error: String(e.message || e),
-      });
+      await updateStreamData(OwnChatStream.finalizeChatStream(streamState, 'error', erroredAt, { error: String(e.message || e) }));
     }
   } catch (e) {
     if (e?.name === 'AbortError') {
@@ -207,7 +176,7 @@ async function startStream(data) {
       activeStreamAbort = null;
       return;
     }
-    await updateStreamData({ status: 'error', updatedAt: Date.now(), error: `Fetch failed: ${e.message || String(e)}` });
+    await updateStreamData({ status: 'error', updatedAt: Date.now(), error: OwnChatStream.fetchErrorText(e) });
   }
   activeStreamAbort = null;
 }
@@ -244,20 +213,6 @@ async function startImage(data) {
         body: data.body,
         signal: controller.signal,
       });
-      // Fallback: retry without optional params if first request fails
-      if (!resp.ok) {
-        const bodyObj = JSON.parse(data.body);
-        if (bodyObj.output_format || bodyObj.background || bodyObj.quality) {
-          const fallback = { model: bodyObj.model, prompt: bodyObj.prompt, n: 1 };
-          if (bodyObj.size && bodyObj.size !== 'auto') fallback.size = bodyObj.size;
-          resp = await fetch(data.url, {
-            method: 'POST',
-            headers: data.headers,
-            body: JSON.stringify(fallback),
-            signal: controller.signal,
-          });
-        }
-      }
     } else if (requestType === 'responses') {
       resp = await fetch(data.url, {
         method: 'POST',
@@ -265,27 +220,7 @@ async function startImage(data) {
         body: data.body,
         signal: controller.signal,
       });
-      // Fallback retries for Responses API
-      if (!resp.ok) {
-        const bodyObj = JSON.parse(data.body);
-        bodyObj.tool_choice = { type: 'image_generation' };
-        resp = await fetch(data.url, {
-          method: 'POST', headers: data.headers,
-          body: JSON.stringify(bodyObj), signal: controller.signal,
-        });
-      }
-      if (!resp.ok) {
-        const bodyObj = JSON.parse(data.body);
-        if (bodyObj.tools?.[0]?.output_format || bodyObj.tools?.[0]?.background || bodyObj.tools?.[0]?.quality || bodyObj.tools?.[0]?.size) {
-          const fallback = { model: bodyObj.model, input: bodyObj.input, tools: [{ type: 'image_generation' }], tool_choice: 'required' };
-          resp = await fetch(data.url, {
-            method: 'POST', headers: data.headers,
-            body: JSON.stringify(fallback), signal: controller.signal,
-          });
-        }
-      }
     } else if (requestType === 'edit') {
-      // Reconstruct FormData from serialized params
       const form = new FormData();
       const params = data.formParams;
       form.append('model', params.model);
@@ -308,23 +243,6 @@ async function startImage(data) {
         body: form,
         signal: controller.signal,
       });
-      // Fallback for edit: retry with minimal params
-      if (!resp.ok && (params.quality !== 'auto' || params.outputFormat || params.background !== 'auto')) {
-        const fallback = new FormData();
-        fallback.append('model', params.model);
-        fallback.append('prompt', params.prompt);
-        images.forEach(item => {
-          const refBlob2 = dataUrlToBlob(item.base64);
-          fallback.append('image', refBlob2, item.filename || 'reference.png');
-        });
-        if (params.size && params.size !== 'auto') fallback.append('size', params.size);
-        resp = await fetch(data.url, {
-          method: 'POST',
-          headers: { 'Authorization': data.headers['Authorization'] },
-          body: fallback,
-          signal: controller.signal,
-        });
-      }
     }
 
     if (!resp) {
@@ -340,7 +258,7 @@ async function startImage(data) {
       const errText = await resp.text().catch(() => '');
       await updateImageSession({
         id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
-        status: 'error', updatedAt: Date.now(), error: `HTTP ${resp.status}: ${errText.slice(0, 500)}`,
+        status: 'error', updatedAt: Date.now(), error: OwnChatStream.httpErrorText(resp.status, errText),
       });
       activeImageAbort = null;
       return;
