@@ -301,6 +301,7 @@ async function startImage(data) {
       id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
       status: 'complete', updatedAt: Date.now(),
       outputs: JSON.stringify(outputs || []),
+      usage: normalizeImageUsage(result.usage || result.response?.usage),
     });
   } catch (e) {
     if (e?.name === 'AbortError') {
@@ -342,6 +343,28 @@ function normalizeImageFormat(raw) {
   if (lower.includes('jpeg') || lower.includes('jpg')) return 'jpeg';
   if (lower.includes('webp')) return 'webp';
   return lower;
+}
+
+function normalizeImageUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null;
+  const input = Number(usage.input_tokens ?? usage.prompt_tokens ?? usage.input);
+  const output = Number(usage.output_tokens ?? usage.completion_tokens ?? usage.output);
+  const total = Number(usage.total_tokens ?? usage.total);
+  const imageInput = Number(usage.input_tokens_details?.image_tokens ?? usage.input_image_tokens);
+  const textInput = Number(usage.input_tokens_details?.text_tokens ?? usage.input_text_tokens);
+  const imageOutput = Number(usage.output_tokens_details?.image_tokens ?? usage.output_image_tokens);
+  const textOutput = Number(usage.output_tokens_details?.text_tokens ?? usage.output_text_tokens);
+  const normalized = {};
+  if (Number.isFinite(input)) normalized.input = input;
+  if (Number.isFinite(output)) normalized.output = output;
+  if (Number.isFinite(total)) normalized.total = total;
+  const details = {};
+  if (Number.isFinite(imageInput)) details.inputImage = imageInput;
+  if (Number.isFinite(textInput)) details.inputText = textInput;
+  if (Number.isFinite(imageOutput)) details.outputImage = imageOutput;
+  if (Number.isFinite(textOutput)) details.outputText = textOutput;
+  if (Object.keys(details).length) normalized.details = details;
+  return Object.keys(normalized).length ? normalized : null;
 }
 
 // ===== IndexedDB helpers =====

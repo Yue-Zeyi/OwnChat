@@ -44,12 +44,15 @@
   const ImageRenderer = window.OwnChatImageRenderer;
   const ChatRenderer = window.OwnChatChatRenderer;
   const StreamUi = window.OwnChatStreamUi;
+  const StreamSessionPoller = window.OwnChatStreamSessionPoller;
   const Api = window.OwnChatApi;
   const ServiceWorker = window.OwnChatServiceWorker;
   const ConfigImport = window.OwnChatConfigImport;
   const UiUtils = window.OwnChatUiUtils;
   const Icons = window.OwnChatIcons;
   const ImageViewer = window.OwnChatImageViewer;
+  const ImageApi = window.OwnChatImageApi;
+  const SidebarRenderer = window.OwnChatSidebarRenderer;
   const {
     imageJobReplies,
     ensureImageJobReplies,
@@ -68,14 +71,6 @@
     setImageJobFailed,
     completeImageJobFromSession,
     failImageJobFromSession,
-    parseImageOutputs,
-    parseResponseImageOutputs,
-    imageToolOptions,
-    mappedImageInput,
-    extractChatText,
-    promptLanguageInstruction,
-    dataUrlToBlob,
-    filenameForBlob,
   } = ImageCore;
 
   // ===== State =====
@@ -534,90 +529,50 @@
     }
   }
 
-  function sidebarBulkCheckbox(id, label) {
-    if (!state.sidebarBulkMode) return '';
-    const checked = state.sidebarSelectedIds.has(id) ? ' checked' : '';
-    return `<label class="conv-item-check" title="选择${esc(label)}">
-      <input type="checkbox" data-action="bulk-check" data-id="${esc(id)}"${checked}>
-      <span></span>
-    </label>`;
-  }
-
   function updateSidebarBulkBar() {
-    const total = state.sidebarVisibleIds.length;
-    const selected = state.sidebarVisibleIds.filter(id => state.sidebarSelectedIds.has(id)).length;
-    dom.sidebarBulkBar.classList.toggle('is-active', state.sidebarBulkMode);
-    dom.sidebarBulkToggle.classList.toggle('hidden', state.sidebarBulkMode);
-    dom.sidebarBulkSelectAll.classList.toggle('hidden', !state.sidebarBulkMode);
-    dom.sidebarBulkDelete.classList.toggle('hidden', !state.sidebarBulkMode);
-    dom.sidebarBulkCancel.classList.toggle('hidden', !state.sidebarBulkMode);
-    dom.sidebarBulkSelectAll.disabled = total === 0;
-    dom.sidebarBulkSelectAll.textContent = total > 0 && selected === total ? '取消全选' : '全选';
-    dom.sidebarBulkDelete.disabled = selected === 0;
-    dom.sidebarBulkDelete.textContent = selected ? `删除 ${selected}` : '删除';
+    SidebarRenderer.applyBulkBar({
+      bar: dom.sidebarBulkBar,
+      toggle: dom.sidebarBulkToggle,
+      selectAll: dom.sidebarBulkSelectAll,
+      delete: dom.sidebarBulkDelete,
+      cancel: dom.sidebarBulkCancel,
+    }, SidebarRenderer.bulkBarState({
+      visibleIds: state.sidebarVisibleIds,
+      selectedIds: state.sidebarSelectedIds,
+      bulkMode: state.sidebarBulkMode,
+    }));
   }
 
   function updateSidebar() {
     if (state.mode === 'image') {
-      dom.sidebarSearch.placeholder = '搜索绘画...';
-      dom.newChatBtn.innerHTML = `
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <rect x="3" y="3" width="18" height="18" rx="2"/>
-          <circle cx="8.5" cy="8.5" r="1.5"/>
-          <path d="M21 15l-5-5L5 21"/>
-        </svg>
-        新绘画
-      `;
-      if (state.isImageHistoryLoading) {
-        dom.convList.innerHTML = `<div class="sidebar-empty">正在加载绘画历史...</div>`;
-        return;
-      }
-      const q = state.sidebarSearch.trim().toLowerCase();
-      const imageJobs = q
-        ? state.imageJobs.filter(j => `${j.title || ''} ${j.prompt || ''} ${j.model || ''}`.toLowerCase().includes(q))
-        : state.imageJobs;
-      state.sidebarVisibleIds = imageJobs.map(j => j.id);
+      const view = SidebarRenderer.buildImageView({
+        jobs: state.imageJobs,
+        search: state.sidebarSearch,
+        currentId: state.currentImageJobId,
+        bulkMode: state.sidebarBulkMode,
+        selectedIds: state.sidebarSelectedIds,
+        isLoading: state.isImageHistoryLoading,
+      });
+      dom.sidebarSearch.placeholder = view.searchPlaceholder;
+      dom.newChatBtn.innerHTML = view.newButtonHtml;
+      state.sidebarVisibleIds = view.visibleIds;
       state.sidebarSelectedIds = new Set([...state.sidebarSelectedIds].filter(id => state.sidebarVisibleIds.includes(id)));
-      dom.convList.innerHTML = imageJobs.map(j => `
-        <div class="conv-item ${j.id === state.currentImageJobId ? 'active' : ''} ${state.sidebarBulkMode ? 'bulk-mode' : ''}" data-id="${j.id}">
-          ${sidebarBulkCheckbox(j.id, j.title || j.prompt || '绘画')}
-          <span class="conv-item-title">${esc(j.title || j.prompt || '未命名绘画')}</span>
-          <button class="conv-item-rename" type="button" title="重命名">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-          </button>
-          <button class="conv-item-delete" type="button" title="删除">&times;</button>
-        </div>
-      `).join('') || `<div class="sidebar-empty">没有匹配的绘画</div>`;
+      dom.convList.innerHTML = view.listHtml;
       updateSidebarBulkBar();
       return;
     }
-    dom.sidebarSearch.placeholder = '搜索对话...';
-    const q = state.sidebarSearch.trim().toLowerCase();
-    const conversations = q
-      ? state.conversations.filter(c => {
-          const body = (c.messages || []).map(messageTextContent).join(' ');
-          return `${c.title || ''} ${c.systemPrompt || ''} ${body}`.toLowerCase().includes(q);
-        })
-      : state.conversations;
-    dom.newChatBtn.innerHTML = `
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <line x1="12" y1="5" x2="12" y2="19" />
-        <line x1="5" y1="12" x2="19" y2="12" />
-      </svg>
-      新对话
-    `;
-    state.sidebarVisibleIds = conversations.map(c => c.id);
+    const view = SidebarRenderer.buildChatView({
+      conversations: state.conversations,
+      search: state.sidebarSearch,
+      currentId: state.currentConvId,
+      bulkMode: state.sidebarBulkMode,
+      selectedIds: state.sidebarSelectedIds,
+    });
+    dom.sidebarSearch.placeholder = view.searchPlaceholder;
+    dom.newChatBtn.innerHTML = view.newButtonHtml;
+    state.sidebarVisibleIds = view.visibleIds;
     state.sidebarSelectedIds = new Set([...state.sidebarSelectedIds].filter(id => state.sidebarVisibleIds.includes(id)));
-    dom.convList.innerHTML = conversations.map(c => `
-      <div class="conv-item ${c.id === state.currentConvId ? 'active' : ''} ${state.sidebarBulkMode ? 'bulk-mode' : ''}" data-id="${c.id}">
-        ${sidebarBulkCheckbox(c.id, c.title || '对话')}
-        <span class="conv-item-title">${esc(c.title)}</span>
-        <button class="conv-item-rename" type="button" title="重命名">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
-        </button>
-        <button class="conv-item-delete" type="button" title="删除">&times;</button>
-      </div>
-    `).join('') || `<div class="sidebar-empty">没有匹配的对话</div>`;
+    dom.convList.innerHTML = view.listHtml;
     updateSidebarBulkBar();
   }
 
@@ -1220,12 +1175,7 @@
       removeTyping();
       state.streamEls = addStreamMsg();
       const streamEls = state.streamEls;
-      const streamStartTime = Date.now();
-      let firstTokenTime = null;
-      let outputStartTime = null;
-      let reasoningStartTime = null;
-      let reasoningEndTime = null;
-      let lastContent = '';
+      const streamProgress = StreamSessionPoller.createProgressState();
 
       // Poll IndexedDB for stream progress (every 100ms)
       state.chatPollTimer = setInterval(async () => {
@@ -1233,31 +1183,25 @@
         if (!session) return;
         if (session.convId && session.convId !== conv.id) return;
 
-        const content = session.assistantContent || '';
-        const reasoning = session.reasoningContent || '';
-        const usage = OwnChatStream.normalizeUsage(session.usage);
-
-        if (content && firstTokenTime === null) {
-          firstTokenTime = Date.now() - streamStartTime;
-          outputStartTime = Date.now();
-        }
-        if (reasoning && reasoningStartTime === null) reasoningStartTime = Date.now();
-        if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
+        const progress = StreamSessionPoller.applyProgress(streamProgress, session);
+        const content = progress.content;
+        const reasoning = progress.reasoning;
+        const usage = progress.usage;
         if (conversationShowThinking(conv) && reasoning) streamEls.waiting?.classList.add('hidden');
 
-        updateThinkingStream(streamEls, reasoning, reasoningStartTime, streamStartTime, conv);
+        updateThinkingStream(streamEls, reasoning, streamProgress.reasoningStartTime, streamProgress.streamStartTime, conv);
 
         // Update content
-        if (content !== lastContent) {
-          lastContent = content;
+        if (progress.contentChanged) {
           streamEls.waiting?.classList.toggle('hidden', !!(content.trim() || (conversationShowThinking(conv) && reasoning)));
           if (conv.messages[streamMsgIdx]?.streaming) {
             conv.messages[streamMsgIdx].content = content;
             conv.messages[streamMsgIdx].tokens = usageOutputTokens(usage, estimateTokens(content));
             if (usage) conv.messages[streamMsgIdx].usage = usage;
             if (reasoning) conv.messages[streamMsgIdx].reasoningContent = reasoning;
-            if (firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = firstTokenTime;
-            if (reasoningEndTime !== null) conv.messages[streamMsgIdx].reasoningTimeMs = reasoningEndTime - (reasoningStartTime || streamStartTime);
+            if (streamProgress.firstTokenTime !== null) conv.messages[streamMsgIdx].firstTokenMs = streamProgress.firstTokenTime;
+            const reasoningTimeMs = StreamSessionPoller.reasoningTimeMs(streamProgress);
+            if (reasoningTimeMs !== null) conv.messages[streamMsgIdx].reasoningTimeMs = reasoningTimeMs;
           }
           updateConversationTokenSummary();
           renderStreamContent(streamEls, content, { hideWaiting: false });
@@ -1265,13 +1209,13 @@
 
         // Collapse thinking block when reasoning is done and content starts
         if (conversationShowThinking(conv) && reasoning && content) {
-          finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, reasoningEndTime, reasoning);
+          finishThinkingStream(streamEls, streamProgress.reasoningStartTime, streamProgress.streamStartTime, streamProgress.reasoningEndTime, reasoning);
         } else if (content && !reasoning) {
           hideEmptyThinkingStream(streamEls);
         }
 
         // Handle stream completion
-        if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
+        if (StreamSessionPoller.isTerminalSession(session)) {
           clearInterval(state.chatPollTimer);
           state.chatPollTimer = null;
 
@@ -1281,10 +1225,7 @@
           const finalUsage = OwnChatStream.normalizeUsage(finalSession.usage) || usage;
           const estimatedOutputTokens = estimateTokens(finalContent);
           const outputTokens = usageOutputTokens(finalUsage, estimatedOutputTokens);
-          const outputEndTime = Date.now();
-          const sessionOutputTimeMs = finalSession.outputTimeMs != null ? Number(finalSession.outputTimeMs) : null;
-          const localOutputTimeMs = outputStartTime ? outputEndTime - outputStartTime : null;
-          const outputTimeMs = Number.isFinite(sessionOutputTimeMs) ? sessionOutputTimeMs : localOutputTimeMs;
+          const outputTimeMs = StreamSessionPoller.outputTimeMs(streamProgress, finalSession);
           let msgData;
 
           if (finalSession.status === 'error') {
@@ -1296,17 +1237,17 @@
               : '**已停止生成**';
             msgData = { role: 'assistant', content: stoppedContent, tokens: outputTokens, model: chatModel };
             if (finalUsage) msgData.usage = finalUsage;
-            if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
+            if (streamProgress.firstTokenTime !== null) msgData.firstTokenMs = streamProgress.firstTokenTime;
             if (finalReasoning) msgData.reasoningContent = finalReasoning;
             if (Number.isFinite(outputTimeMs)) msgData.outputTimeMs = outputTimeMs;
           } else {
             msgData = { role: 'assistant', content: finalContent, tokens: outputTokens, model: chatModel };
             if (finalUsage) msgData.usage = finalUsage;
-            if (firstTokenTime !== null) msgData.firstTokenMs = firstTokenTime;
+            if (streamProgress.firstTokenTime !== null) msgData.firstTokenMs = streamProgress.firstTokenTime;
             if (Number.isFinite(outputTimeMs)) msgData.outputTimeMs = outputTimeMs;
             if (finalReasoning) {
               msgData.reasoningContent = finalReasoning;
-              msgData.reasoningTimeMs = reasoningEndTime ? reasoningEndTime - (reasoningStartTime || streamStartTime) : null;
+              msgData.reasoningTimeMs = StreamSessionPoller.reasoningTimeMs(streamProgress);
             }
           }
           // Replace placeholder
@@ -2126,32 +2067,6 @@
     return dom.imageWorkspace.scrollHeight - dom.imageWorkspace.scrollTop - dom.imageWorkspace.clientHeight <= threshold;
   }
 
-  async function requestMappedImage(prompt, params, ref = null, signal = null) {
-    const endpoint = imageMapEndpoint();
-    const url = requestUrl(endpoint.baseUrl, '/responses');
-    const body = {
-      model: endpoint.model,
-      input: mappedImageInput(prompt, imageReferenceList(ref)),
-      tools: [imageToolOptions(params)],
-      tool_choice: 'required',
-    };
-    let resp = await apiFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-      throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
-    }
-    return parseResponseImageOutputs(await resp.json(), params.outputFormat);
-  }
-
-  function buildImageRequestBody(prompt, params) {
-    return ImageCore.buildImageRequestBody(state.imageModel, prompt, params);
-  }
-
   async function optimizeImagePrompt() {
     if (!imagePromptOptimizerConfigured()) {
       showSettings('image');
@@ -2166,31 +2081,7 @@
     updateImageGenerateBtn();
     showToast('正在优化提示词...');
     try {
-      const lang = promptLanguageInstruction(prompt);
-      const optimizeUrl = requestUrl(endpoint.baseUrl, '/chat/completions');
-      const resp = await apiFetch(optimizeUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
-        body: JSON.stringify({
-          model,
-          temperature: 0.4,
-          messages: [
-            {
-              role: 'system',
-              content: `你是专业图像生成提示词编辑器。把用户需求优化成更适合图像生成模型的提示词。${lang.instruction}只输出优化后的提示词，不要解释，不要使用 Markdown。保留用户核心意图，补充主体、构图、风格、光线、色彩、细节、画面质量。不要加入违反安全或版权的内容。`,
-            },
-            {
-              role: 'user',
-              content: `请优化下面的绘画提示词。\n输出语言要求：${lang.label}。\n如果原文是中文，结果必须是中文。\n\n原提示词：\n${prompt}`,
-            },
-          ],
-        }),
-      });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-        throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, optimizeUrl);
-      }
-      const optimized = extractChatText(await resp.json()).replace(/^["“]|["”]$/g, '').trim();
+      const optimized = await ImageApi.optimizePrompt({ baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey, model }, prompt);
       if (!optimized) throw new Error('接口未返回优化后的提示词');
       dom.imagePrompt.value = optimized;
       saveImageParams();
@@ -2203,54 +2094,6 @@
       state.isOptimizingImagePrompt = false;
       updateImageGenerateBtn();
     }
-  }
-
-  async function requestOneImage(prompt, params, signal = null) {
-    const imageBaseUrl = effectiveImageBaseUrl();
-    const imageApiKey = effectiveImageApiKey();
-    const url = requestUrl(imageBaseUrl, '/images/generations');
-    let body = buildImageRequestBody(prompt, params);
-    let resp = await apiFetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${imageApiKey}` },
-      body: JSON.stringify(body),
-      signal,
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-      throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
-    }
-    return parseImageOutputs(await resp.json(), params.outputFormat);
-  }
-
-  async function requestImageEdit(prompt, params, ref, signal = null) {
-    const imageBaseUrl = effectiveImageBaseUrl();
-    const imageApiKey = effectiveImageApiKey();
-    const url = requestUrl(imageBaseUrl, '/images/edits');
-    const form = new FormData();
-    const refs = imageReferenceList(ref);
-    form.append('model', state.imageModel);
-    form.append('prompt', prompt.trim());
-    refs.forEach(item => {
-      const refBlob = dataUrlToBlob(item.base64);
-      form.append('image', refBlob, filenameForBlob(item.name, refBlob));
-    });
-    if (params.size !== 'auto') form.append('size', params.size);
-    if (params.quality !== 'auto') form.append('quality', params.quality);
-    if (params.outputFormat && !/^dall-e/i.test(state.imageModel)) form.append('output_format', params.outputFormat);
-    if (params.background !== 'auto') form.append('background', params.background);
-
-    let resp = await apiFetch(url, {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${imageApiKey}` },
-      body: form,
-      signal,
-    });
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
-      throw httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
-    }
-    return parseImageOutputs(await resp.json(), params.outputFormat);
   }
 
   function createImageReply(jobId, prompt, params, refs, startedAt, replyId = `${jobId}-reply-${Date.now()}`) {
@@ -2361,50 +2204,18 @@
         state.imageAbortController = { abort: () => {
           stopSwImage();
         }};
-        const imageBaseUrl = effectiveImageBaseUrl();
-        const imageApiKey = effectiveImageApiKey();
-        const swHeaders = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${imageApiKey}` };
-
-        let swData;
-        if (state.imageMapModel) {
-          const mapEndpoint = imageMapEndpoint();
-          const body = {
-            model: mapEndpoint.model,
-            input: mappedImageInput(prompt, refs),
-            tools: [imageToolOptions(params)],
-            tool_choice: 'required',
-          };
-          swData = {
-            type: 'start-image', jobId: job.id,
-            url: requestUrl(mapEndpoint.baseUrl, '/responses'),
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${mapEndpoint.apiKey}` },
-            body: JSON.stringify(body),
-            requestType: 'responses', outputFormat: params.outputFormat,
-          };
-        } else if (refs.length) {
-          swData = {
-            type: 'start-image', jobId: job.id,
-            url: requestUrl(imageBaseUrl, '/images/edits'),
-            headers: swHeaders,
-            requestType: 'edit', outputFormat: params.outputFormat,
-            formParams: {
-              model: state.imageModel, prompt: prompt.trim(),
-              images: refs.map(item => ({ base64: item.base64, filename: item.name })),
-              size: params.size, quality: params.quality,
-              outputFormat: params.outputFormat, background: params.background,
-            },
-          };
-        } else {
-          const body = buildImageRequestBody(prompt, params);
-          swData = {
-            type: 'start-image', jobId: job.id,
-            url: requestUrl(imageBaseUrl, '/images/generations'),
-            headers: swHeaders, body: JSON.stringify(body),
-            requestType: 'generations', outputFormat: params.outputFormat,
-          };
-        }
-        swData.startedAt = startedAt;
-        swData.timeoutMs = requestTimeoutMs;
+        const swData = ImageApi.buildServiceWorkerRequest({
+          imageEndpoint: { baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() },
+          mapEndpoint: imageMapEndpoint(),
+          model: state.imageModel,
+          mapModel: state.imageMapModel,
+          prompt,
+          params,
+          refs,
+          jobId: job.id,
+          startedAt,
+          timeoutMs: requestTimeoutMs,
+        });
         swTarget.postMessage(swData);
 
         const handleImageSession = async session => {
@@ -2483,13 +2294,14 @@
       } else {
         // === Fallback: no SW, direct fetch ===
         timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
-        const nextOutputs = state.imageMapModel
-          ? await requestMappedImage(prompt, params, refs, controller.signal)
+        const imageResult = state.imageMapModel
+          ? await ImageApi.requestMappedImage(imageMapEndpoint(), prompt, params, refs, controller.signal)
           : refs.length
-            ? await requestImageEdit(prompt, params, refs, controller.signal)
-            : await requestOneImage(prompt, params, controller.signal);
+            ? await ImageApi.requestImageEdit({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, refs, controller.signal)
+            : await ImageApi.requestOneImage({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, controller.signal);
+        const nextOutputs = ImageCore.imageResultOutputs(imageResult);
         if (nextOutputs.length === 0) throw new Error('接口未返回可显示的图片数据');
-        setImageJobDone(job, activeReply, nextOutputs, startedAt);
+        setImageJobDone(job, activeReply, nextOutputs, startedAt, ImageCore.imageResultUsage(imageResult));
         if (refs.length) { setImageReferences([]); renderImageRefPreview(); }
         showToast('图片已生成');
         finishImageJob();
@@ -2731,23 +2543,20 @@
         $('stream-el')?.remove();
         state.streamEls = addStreamMsg();
         const streamEls = state.streamEls;
-        const streamStartTime = Date.now();
-        let firstTokenTime = null;
-        let outputStartTime = null;
-        let reasoningStartTime = null;
-        let reasoningEndTime = null;
-        let lastContent = conv.messages[streamIdx].content || '';
+        const streamProgress = StreamSessionPoller.createProgressState({
+          lastContent: conv.messages[streamIdx].content || '',
+        });
 
         // Show already-accumulated content
         const initialContent = session.assistantContent || '';
         const initialReasoning = session.reasoningContent || '';
         if (initialContent) {
           renderStreamContent(streamEls, initialContent);
-          lastContent = initialContent;
+          streamProgress.lastContent = initialContent;
         }
         if (conversationShowThinking(conv) && initialReasoning) {
           showThinkingContent(streamEls, initialReasoning);
-          reasoningStartTime = Date.now() - 1000;
+          streamProgress.reasoningStartTime = Date.now() - 1000;
         }
         dom.messages.scrollTop = dom.messages.scrollHeight;
 
@@ -2759,36 +2568,29 @@
           const session = await getStreamSession();
           if (!session) return;
 
-          const content = session.assistantContent || '';
-          const reasoning = session.reasoningContent || '';
-
-          if (content && firstTokenTime === null) {
-            firstTokenTime = Date.now() - streamStartTime;
-            outputStartTime = Date.now();
-          }
-          if (reasoning && reasoningStartTime === null) reasoningStartTime = Date.now();
-          if (reasoning && content && reasoningEndTime === null) reasoningEndTime = Date.now();
+          const progress = StreamSessionPoller.applyProgress(streamProgress, session);
+          const content = progress.content;
+          const reasoning = progress.reasoning;
           if (conversationShowThinking(conv) && reasoning) streamEls.waiting?.classList.add('hidden');
 
-          updateThinkingStream(streamEls, reasoning, reasoningStartTime, streamStartTime, conv);
+          updateThinkingStream(streamEls, reasoning, streamProgress.reasoningStartTime, streamProgress.streamStartTime, conv);
 
-          if (content !== lastContent) {
-            lastContent = content;
+          if (progress.contentChanged) {
             if (conversationShowThinking(conv)) streamEls.waiting?.classList.add('hidden');
             else streamEls.waiting?.classList.toggle('hidden', !!content.trim());
             renderStreamContent(streamEls, content, { hideWaiting: false });
           }
 
           if (conversationShowThinking(conv) && reasoning && content) {
-            finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, reasoningEndTime, reasoning);
+            finishThinkingStream(streamEls, streamProgress.reasoningStartTime, streamProgress.streamStartTime, streamProgress.reasoningEndTime, reasoning);
           } else if (content && !reasoning) {
             hideEmptyThinkingStream(streamEls);
           }
 
-          if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
+          if (StreamSessionPoller.isTerminalSession(session)) {
             clearInterval(state.chatPollTimer);
             state.chatPollTimer = null;
-            if (outputStartTime && !session.outputTimeMs) session.outputTimeMs = Date.now() - outputStartTime;
+            StreamSessionPoller.ensureSessionOutputTime(session, streamProgress);
             finalizeStreamFromSession(conv, streamIdx, session);
           }
         }, 100);

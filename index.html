@@ -54,13 +54,30 @@
     <aside id="sidebar">
       <div class="sidebar-header">
         <button id="new-chat-btn" class="sidebar-new-btn">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          新对话
+          <span class="sidebar-new-mode sidebar-new-chat-mode">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            新对话
+          </span>
+          <span class="sidebar-new-mode sidebar-new-image-mode">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+            新绘画
+          </span>
         </button>
         <input id="sidebar-search" class="sidebar-search" type="search" placeholder="搜索对话..." autocomplete="off">
+        <script>
+          (() => {
+            if (document.documentElement.getAttribute('data-boot-mode') === 'image') {
+              document.getElementById('sidebar-search')?.setAttribute('placeholder', '搜索绘画...');
+            }
+          })();
+        </script>
         <div id="sidebar-bulk-bar" class="sidebar-bulk-bar">
           <button id="sidebar-bulk-toggle" class="sidebar-bulk-btn" type="button">批量删除</button>
           <button id="sidebar-bulk-select-all" class="sidebar-bulk-btn hidden" type="button">全选</button>
@@ -597,10 +614,13 @@
   <script src="ui-utils.js" defer></script>
   <script src="icons.js" defer></script>
   <script src="image-core.js" defer></script>
+  <script src="image-api-client.js" defer></script>
   <script src="image-renderer.js" defer></script>
   <script src="image-viewer.js" defer></script>
   <script src="chat-renderer.js" defer></script>
+  <script src="sidebar-renderer.js" defer></script>
   <script src="stream-ui.js" defer></script>
+  <script src="stream-session-poller.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 

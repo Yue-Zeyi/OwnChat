@@ -70,14 +70,6 @@ html[data-boot-mode="image"] #mode-image-btn {
   color: #fff;
 }
 
-html[data-boot-mode="image"] #mode-chat-btn.active {
-  color: var(--text-3);
-}
-
-html[data-boot-mode="image"] #mode-image-btn:not(.active) {
-  color: #fff;
-}
-
 html[data-boot-mode] .mode-btn {
   transition: none;
 }
@@ -150,6 +142,24 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 
 .sidebar-new-btn:hover { background: var(--bg-hover); }
 
+.sidebar-new-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-new-image-mode {
+  display: none;
+}
+
+html[data-boot-mode="image"] .sidebar-new-chat-mode {
+  display: none;
+}
+
+html[data-boot-mode="image"] .sidebar-new-image-mode {
+  display: flex;
+}
+
 .sidebar-search {
   width: 100%;
   padding: 8px 10px;
@@ -170,10 +180,6 @@ html[data-boot-sidebar="collapsed"] #sidebar {
   align-items: center;
   gap: 6px;
   flex-wrap: nowrap;
-}
-
-.sidebar-bulk-bar.hidden {
-  display: none;
 }
 
 .sidebar-bulk-btn {
@@ -203,10 +209,6 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 .sidebar-bulk-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
-}
-
-.sidebar-bulk-btn.hidden {
-  display: none;
 }
 
 .sidebar-bulk-bar:not(.is-active) .sidebar-bulk-btn {
@@ -813,14 +815,16 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 .msg-action-btn[data-tooltip],
 .toolbar-btn[data-tooltip],
 .send-btn[data-tooltip],
-.model-dropdown-btn[data-tooltip] {
+.model-dropdown-btn[data-tooltip],
+.image-msg-meta span[data-tooltip] {
   position: relative;
 }
 
 .msg-action-btn[data-tooltip]::after,
 .toolbar-btn[data-tooltip]::after,
 .send-btn[data-tooltip]::after,
-.model-dropdown-btn[data-tooltip]::after {
+.model-dropdown-btn[data-tooltip]::after,
+.image-msg-meta span[data-tooltip]::after {
   content: attr(data-tooltip);
   position: absolute;
   right: 50%;
@@ -846,7 +850,8 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 .msg-action-btn[data-tooltip]:hover::after,
 .toolbar-btn[data-tooltip]:hover::after,
 .send-btn[data-tooltip]:hover::after,
-.model-dropdown-btn[data-tooltip]:hover::after {
+.model-dropdown-btn[data-tooltip]:hover::after,
+.image-msg-meta span[data-tooltip]:hover::after {
   display: block;
 }
 
@@ -1289,7 +1294,17 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 }
 
 .image-msg-meta span {
+  min-width: 0;
+  max-width: 100%;
   white-space: nowrap;
+}
+
+.image-meta-label {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
 }
 
 .image-job-actions {
@@ -1879,6 +1894,7 @@ html[data-boot-sidebar="collapsed"] #sidebar {
 /* ===== Input Area ===== */
 #input-area {
   padding: 8px 24px 8px;
+  margin-top: auto;
   flex-shrink: 0;
   background: var(--bg-main);
 }

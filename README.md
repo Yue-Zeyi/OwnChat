@@ -186,10 +186,13 @@ config-import.js
 ui-utils.js
 icons.js
 image-core.js
+image-api-client.js
 image-renderer.js
 image-viewer.js
 chat-renderer.js
+sidebar-renderer.js
 stream-ui.js
+stream-session-poller.js
 markdown-it.min.js
 pdf.min.js
 pdf.worker.min.js
@@ -231,10 +234,14 @@ Service Worker 需要 HTTPS 或 localhost。若 API 服务未开放 CORS，纯�
 ├── ui-utils.js
 ├── icons.js
 ├── image-core.js
+├── image-api-client.js
 ├── image-renderer.js
 ├── image-viewer.js
 ├── chat-renderer.js
+├── sidebar-renderer.js
 ├── stream-ui.js
+├── stream-session-poller.js
+├── smoke.js
 ├── markdown-it.min.js
 ├── pdf.min.js
 ├── pdf.worker.min.js
@@ -249,11 +256,10 @@ Service Worker 需要 HTTPS 或 localhost。若 API 服务未开放 CORS，纯�
 建议检查：
 
 ```bash
-node --check app.js
-node --check sw.js
-node --check chat-stream.js
-node --check attachments.js
+node smoke.js
 ```
+
+`smoke.js` 会检查 `index.html` 引用脚本是否存在、部署清单是否包含页面脚本，并对项目自有 JS 执行语法检查。
 
 修改 `sw.js` 后，如果浏览器仍使用旧版本，可以在 DevTools 的 Application / Service Workers 中手动更新，或清理站点数据后重新加载。
 

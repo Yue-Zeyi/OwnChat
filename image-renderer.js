@@ -77,14 +77,12 @@
     }
 
     const aiMetaParts = [
-      reply.model || job.model,
-      reply.mapModel && options.formatSourcedModel ? `映射 ${options.formatSourcedModel(reply.mapModel)}` : '',
-      params.size,
-      params.quality !== 'auto' ? params.quality : '',
-      params.outputFormat ? params.outputFormat.toUpperCase() : '',
-      reply.durationMs ? `耗时 ${ImageCore.formatDuration(reply.durationMs)}` : '',
-      ImageCore.formatDateTime(reply.durationMs ? (reply.startedAt || reply.createdAt || job.createdAt) + reply.durationMs : (reply.createdAt || job.createdAt)),
-    ].filter(Boolean).map(item => `<span>${esc(item)}</span>`).join('');
+      metaText(reply.model || job.model),
+      metaText(reply.mapModel && options.formatSourcedModel ? `映射 ${options.formatSourcedModel(reply.mapModel)}` : ''),
+      metaText(reply.durationMs ? `耗时 ${ImageCore.formatDuration(reply.durationMs)}` : ''),
+      ...ImageCore.imageUsageMeta(reply.usage || job.usage).map(metaText),
+      metaText(ImageCore.formatDateTime(reply.durationMs ? (reply.startedAt || reply.createdAt || job.createdAt) + reply.durationMs : (reply.createdAt || job.createdAt))),
+    ].filter(Boolean).join('');
 
     const outputs = (reply.outputs || []).map((out, index) => renderOutput(job, reply, replyIndex, out, index, options)).join('');
 
@@ -123,6 +121,13 @@
         </div>
       </div>
     `;
+  }
+
+  function metaText(item) {
+    if (!item) return '';
+    const meta = typeof item === 'object' ? item : { text: item };
+    const tooltip = meta.title && meta.title !== meta.text ? ` data-tooltip="${esc(meta.title)}"` : '';
+    return `<span${tooltip}><span class="image-meta-label">${esc(meta.text)}</span></span>`;
   }
 
   function renderProgressMessage(job, options = {}) {

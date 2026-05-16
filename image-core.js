@@ -69,6 +69,63 @@
     return [size, format.toUpperCase(), bytes].filter(Boolean);
   }
 
+  function normalizeImageUsage(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const input = Number(usage.input_tokens ?? usage.prompt_tokens ?? usage.input);
+    const output = Number(usage.output_tokens ?? usage.completion_tokens ?? usage.output);
+    const total = Number(usage.total_tokens ?? usage.total);
+    const imageInput = Number(usage.input_tokens_details?.image_tokens ?? usage.input_image_tokens ?? usage.details?.inputImage);
+    const textInput = Number(usage.input_tokens_details?.text_tokens ?? usage.input_text_tokens ?? usage.details?.inputText);
+    const imageOutput = Number(usage.output_tokens_details?.image_tokens ?? usage.output_image_tokens ?? usage.details?.outputImage);
+    const textOutput = Number(usage.output_tokens_details?.text_tokens ?? usage.output_text_tokens ?? usage.details?.outputText);
+    const normalized = {};
+    if (Number.isFinite(input)) normalized.input = input;
+    if (Number.isFinite(output)) normalized.output = output;
+    if (Number.isFinite(total)) normalized.total = total;
+    const details = {};
+    if (Number.isFinite(imageInput)) details.inputImage = imageInput;
+    if (Number.isFinite(textInput)) details.inputText = textInput;
+    if (Number.isFinite(imageOutput)) details.outputImage = imageOutput;
+    if (Number.isFinite(textOutput)) details.outputText = textOutput;
+    if (Object.keys(details).length) normalized.details = details;
+    return Object.keys(normalized).length ? normalized : null;
+  }
+
+  function imageUsageMeta(usage) {
+    const normalized = normalizeImageUsage(usage);
+    if (!normalized) return [];
+    const formatCount = value => window.OwnChatTokens?.formatTokenCount?.(value) || String(value);
+    const primary = Number.isFinite(normalized.total)
+      ? normalized.total
+      : (Number.isFinite(normalized.output) ? normalized.output : normalized.input);
+    if (!Number.isFinite(primary)) return [];
+    const parts = [];
+    if (Number.isFinite(normalized.input)) parts.push(`输入 ${formatCount(normalized.input)}`);
+    if (Number.isFinite(normalized.output)) parts.push(`输出 ${formatCount(normalized.output)}`);
+    if (Number.isFinite(normalized.total)) parts.push(`总计 ${formatCount(normalized.total)}`);
+    if (Number.isFinite(normalized.details?.outputImage)) parts.push(`图片 ${formatCount(normalized.details.outputImage)}`);
+    return [{
+      text: `Tokens ${formatCount(primary)}`,
+      title: parts.join(' / '),
+    }];
+  }
+
+  function imageResponseResult(outputs, usage = null) {
+    return {
+      outputs: Array.isArray(outputs) ? outputs : [],
+      usage: normalizeImageUsage(usage),
+    };
+  }
+
+  function imageResultOutputs(result) {
+    if (Array.isArray(result)) return result;
+    return Array.isArray(result?.outputs) ? result.outputs : [];
+  }
+
+  function imageResultUsage(result) {
+    return normalizeImageUsage(result?.usage);
+  }
+
   function safeFileStem(value, fallback, maxLength = 60) {
     return (value || fallback).replace(/[\\/:*?"<>|]+/g, '-').slice(0, maxLength) || fallback;
   }
@@ -153,12 +210,15 @@
     return Date.now() - (startedAt || activeReply?.startedAt || job?.startedAt || job?.createdAt || Date.now());
   }
 
-  function setImageJobDone(job, activeReply, outputs, startedAt = null) {
+  function setImageJobDone(job, activeReply, outputs, startedAt = null, usage = null) {
+    const normalizedUsage = normalizeImageUsage(usage);
     activeReply.outputs = outputs;
+    activeReply.usage = normalizedUsage;
     activeReply.error = null;
     activeReply.status = 'done';
     activeReply.durationMs = imageJobDuration(job, activeReply, startedAt);
     job.outputs = outputs;
+    job.usage = normalizedUsage;
     job.error = null;
     job.status = 'done';
     job.durationMs = activeReply.durationMs;
@@ -179,7 +239,7 @@
     if (nextOutputs.length === 0) {
       setImageJobFailed(job, activeReply, '接口未返回可显示的图片数据', 'error', startedAt);
     } else {
-      setImageJobDone(job, activeReply, nextOutputs, startedAt);
+      setImageJobDone(job, activeReply, nextOutputs, startedAt, session?.usage);
     }
   }
 
@@ -188,7 +248,7 @@
   }
 
   function parseImageOutputs(data, format) {
-    return (data.data || []).map(item => ({
+    const outputs = (data.data || []).map(item => ({
       b64: item.b64_json || '',
       url: item.url || '',
       revisedPrompt: item.revised_prompt || '',
@@ -196,6 +256,7 @@
       bytes: item.b64_json ? imageByteSize({ b64: item.b64_json }) : 0,
       createdAt: Date.now(),
     })).filter(item => item.b64 || item.url);
+    return imageResponseResult(outputs, data.usage);
   }
 
   function parseResponseImageOutputs(data, format) {
@@ -220,7 +281,7 @@
       Object.keys(value).forEach(key => scan(value[key]));
     };
     scan(data.output || data);
-    return outputs;
+    return imageResponseResult(outputs, data.usage || data.response?.usage);
   }
 
   function imageToolOptions(params = {}) {
@@ -313,6 +374,7 @@
       createdAt: startedAt,
       estimatedSeconds: estimateImageSeconds(params, inputImages),
       durationMs: null,
+      usage: null,
     };
   }
 
@@ -327,6 +389,11 @@
     imageByteSize,
     normalizeImageFormat,
     imageOutputMeta,
+    normalizeImageUsage,
+    imageUsageMeta,
+    imageResponseResult,
+    imageResultOutputs,
+    imageResultUsage,
     imageFilename,
     attachmentImageFilename,
     imageViewerItemsForJob,
