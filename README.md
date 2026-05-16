@@ -14,25 +14,24 @@ OwnChat 使用原生 HTML / CSS / JavaScript 实现，不需要后端服务和�
 
 适合个人部署、自用模型网关、OpenAI-compatible 服务和多模型调试。
 
-## 特性
+## 功能
 
 - 纯前端运行，无框架、无构建步骤
-- 支持对话模式和绘画模式
-- 兼容 OpenAI-style Chat Completions、Images API
-- 支持流式输出、停止生成、重新生成
+- 支持 OpenAI-style Chat Completions、Images API、Responses API `image_generation`
+- 支持对话流式输出、停止生成、重新生成和刷新恢复
 - 支持 reasoning / thinking / `<think>` 思考过程展示
 - 支持 Markdown、代码块、表格、任务列表和代码复制
-- 支持图片、PDF、文本、代码等附件
+- 支持图片、PDF、Office、文本、代码等附件
 - 支持多会话管理、搜索、重命名、删除和批量删除
-- 支持最多 4 张绘画参考图、重绘、以图编辑、图片查看、复制和下载
+- 支持绘画历史、参考图编辑、以图编辑、重绘、图片查看、复制和下载
+- 支持图片生成 token 用量记录和展示
 - 支持提示词优化模型和 Responses API 映射生图
 - 支持配置导入导出和 URL 参数导入
-- 支持 Service Worker 恢复流式回复和图片生成结果
 - 支持深色 / 浅色主题和移动端布局
 
 ## 快速开始
 
-直接部署静态文件即可。推荐用本地静态服务器打开：
+推荐用本地静态服务器打开：
 
 ```bash
 php -S 127.0.0.1:8097
@@ -71,9 +70,9 @@ http://127.0.0.1:8097
 
 对话和绘画配置互相隔离；如果使用同一个服务，可以填写相同的 Base URL 和 API Key。
 
-### URL 快速导入
+## URL 快速导入
 
-支持通过 GET 参数导入配置，适合从自己的配置页、脚本或书签首次打开时写入配置。
+支持通过 URL 参数导入配置，适合从自己的配置页、脚本或书签首次打开时写入配置。
 
 支持参数：
 
@@ -141,6 +140,7 @@ POST /v1/responses + image_generation
 - 图片查看器支持缩放、拖拽、切换、复制和下载
 - 支持提示词优化模型
 - 支持映射模式，通过 Responses API 调用 `image_generation` 工具
+- 支持保存图片接口返回的 `usage`，meta 中紧凑显示 token 总量，悬停显示输入、输出和总计明细
 
 ## Service Worker
 
@@ -166,7 +166,7 @@ OwnChat 不内置服务器，也不会主动上传配置和历史到除你配置
 
 ## 部署
 
-需要保留这些文件：
+直接部署静态文件即可。需要保留这些文件：
 
 ```text
 index.html
@@ -211,45 +211,76 @@ jszip.min.js
 
 Service Worker 需要 HTTPS 或 localhost。若 API 服务未开放 CORS，纯前端页面无法直接请求，需要服务端或网关支持 CORS。
 
+## 文件说明
+
+### 入口和样式
+
+| 文件 | 说明 |
+| --- | --- |
+| `index.html` | 应用入口 HTML，包含基础 DOM、首屏主题/模式防闪脚本和按顺序加载的脚本标签。 |
+| `style.css` | 全局样式、响应式布局、聊天/绘画/设置弹窗/图片查看器/tooltip 等 UI 样式。 |
+| `icon.png` | 应用图标，同时用于浏览器 favicon 和 AI 头像背景。 |
+| `README.md` | 项目说明文档。不是运行必需文件。 |
+
+### 应用主逻辑
+
+| 文件 | 说明 |
+| --- | --- |
+| `app.js` | 应用主控制器，负责状态编排、事件绑定、模式切换、设置面板、聊天发送、绘画生成、恢复流程和各模块协作。 |
+| `storage.js` | `localStorage` key 定义和通用保存/读取封装。 |
+| `persistence-db.js` | IndexedDB 持久化层，负责附件、绘画历史、临时聊天流 session、临时图片 session。 |
+| `api-client.js` | 通用 API 请求工具，负责 URL 规范化、fetch 包装和错误对象构建。 |
+| `service-worker-client.js` | 页面侧 Service Worker 注册和可用性检测。 |
+| `sw.js` | Service Worker，负责后台对话流请求、后台图片请求、停止请求、心跳和恢复 session 写入。 |
+| `config-import.js` | URL/文件配置导入、base64url 解码、配置摘要和 API Key 遮罩。 |
+| `ui-utils.js` | 通用 UI 小工具，例如复制菜单、文本复制、滚动和交互辅助。 |
+| `icons.js` | 应用内使用的 SVG 图标集合。 |
+
+### 对话模块
+
+| 文件 | 说明 |
+| --- | --- |
+| `chat-stream.js` | Chat Completions SSE 解析、usage 规范化、流状态累积和流结束数据生成。 |
+| `chat-renderer.js` | 对话消息 HTML 渲染，包含消息内容、meta、操作按钮、附件和 Markdown 输出。 |
+| `stream-ui.js` | 流式回复 DOM 渲染层，负责 typing、stream message、思考过程展开/收起和内容增量渲染。 |
+| `stream-session-poller.js` | 页面轮询 Service Worker 流式 session 时使用的进度状态、计时和终态判断工具。 |
+| `markdown-renderer.js` | Markdown 渲染、安全转义、代码高亮、`<think>` 拆分和链接/图片清洗。 |
+| `token-utils.js` | token 估算、上下文裁剪、数量格式化、`max_tokens` 显式参数处理。 |
+| `attachments.js` | 附件读取、文件类型识别、附件消息构建、API 消息转换和附件校验。 |
+
+### 绘画模块
+
+| 文件 | 说明 |
+| --- | --- |
+| `image-core.js` | 绘画核心数据工具，负责图片输出解析、图片 usage 规范化、结果 meta、文件名、参考图、任务状态和 reply 数据结构。 |
+| `image-api-client.js` | 图片 API 请求层，负责 Images generations、Images edits、Responses 映射生图和提示词优化请求。 |
+| `image-renderer.js` | 绘画工作区 HTML 渲染，负责用户提示词、参考图、生成结果、图片 meta、token meta 和操作按钮。 |
+| `image-viewer.js` | 图片查看器交互，负责打开、关闭、上一张/下一张、缩放、拖拽和平移。 |
+
+### 侧栏模块
+
+| 文件 | 说明 |
+| --- | --- |
+| `sidebar-renderer.js` | 侧栏渲染层，负责对话/绘画列表过滤、空状态、批量删除栏状态和侧栏 HTML。 |
+
+### 开发检查
+
+| 文件 | 说明 |
+| --- | --- |
+| `smoke.js` | 本地无依赖检查脚本，验证 `index.html` 脚本引用、部署清单和项目自有 JS 语法。不是运行必需文件。 |
+
+### 第三方库
+
+| 文件 | 说明 |
+| --- | --- |
+| `markdown-it.min.js` | Markdown 渲染库。 |
+| `pdf.min.js` | PDF.js 主库，用于解析 PDF 附件。 |
+| `pdf.worker.min.js` | PDF.js worker 文件。 |
+| `mammoth.browser.min.js` | Word 文档解析库，用于读取 `.docx` 等附件文本。 |
+| `xlsx.full.min.js` | 表格解析库，用于读取 `.xls`、`.xlsx`、`.csv`、`.tsv` 等附件。 |
+| `jszip.min.js` | ZIP 解析库，供 Office 文档解析等场景使用。 |
+
 ## 开发
-
-项目结构：
-
-```text
-.
-├── index.html
-├── style.css
-├── app.js
-├── sw.js
-├── icon.png
-├── storage.js
-├── markdown-renderer.js
-├── attachments.js
-├── chat-stream.js
-├── token-utils.js
-├── persistence-db.js
-├── api-client.js
-├── service-worker-client.js
-├── config-import.js
-├── ui-utils.js
-├── icons.js
-├── image-core.js
-├── image-api-client.js
-├── image-renderer.js
-├── image-viewer.js
-├── chat-renderer.js
-├── sidebar-renderer.js
-├── stream-ui.js
-├── stream-session-poller.js
-├── smoke.js
-├── markdown-it.min.js
-├── pdf.min.js
-├── pdf.worker.min.js
-├── mammoth.browser.min.js
-├── xlsx.full.min.js
-├── jszip.min.js
-└── README.md
-```
 
 没有构建步骤，修改后刷新浏览器即可。
 
