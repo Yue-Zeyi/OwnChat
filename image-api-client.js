@@ -93,12 +93,13 @@
     return {
       model,
       input: ImageCore.mappedImageInput(prompt, refs),
-      tools: [ImageCore.imageToolOptions(params)],
+      tools: [ImageCore.imageToolOptions(params, model)],
       tool_choice: 'required',
     };
   }
 
   function buildImageEditForm(model, prompt, params, refs = []) {
+    const effectiveParams = ImageCore.sanitizeImageParamsForModel(model, params);
     const form = new FormData();
     form.append('model', model);
     form.append('prompt', prompt.trim());
@@ -106,22 +107,24 @@
       const refBlob = ImageCore.dataUrlToBlob(item.base64);
       form.append('image', refBlob, ImageCore.filenameForBlob(item.name, refBlob));
     });
-    if (params.size !== 'auto') form.append('size', params.size);
-    if (params.quality !== 'auto') form.append('quality', params.quality);
-    if (params.outputFormat && !/^dall-e/i.test(model)) form.append('output_format', params.outputFormat);
-    if (params.background !== 'auto') form.append('background', params.background);
+    if (effectiveParams.size !== 'auto') form.append('size', effectiveParams.size);
+    if (effectiveParams.quality !== 'auto') form.append('quality', effectiveParams.quality);
+    if (effectiveParams.outputFormat && !/^dall-e/i.test(model)) form.append('output_format', effectiveParams.outputFormat);
+    if (effectiveParams.background !== 'auto') form.append('background', effectiveParams.background);
     return form;
   }
 
   function buildServiceWorkerRequest({ imageEndpoint, mapEndpoint = null, model, mapModel, prompt, params, refs = [], jobId, startedAt, timeoutMs }) {
+    const requestModel = mapModel && mapEndpoint ? mapEndpoint.model : model;
+    const effectiveParams = ImageCore.sanitizeImageParamsForModel(requestModel, params);
     const headers = authHeaders(imageEndpoint.apiKey);
-    const base = { type: 'start-image', jobId, startedAt, timeoutMs, outputFormat: params.outputFormat };
+    const base = { type: 'start-image', jobId, startedAt, timeoutMs, outputFormat: effectiveParams.outputFormat };
 
     if (mapModel && mapEndpoint) {
       return Object.assign(base, {
         url: Api.requestUrl(mapEndpoint.baseUrl, '/responses'),
         headers: authHeaders(mapEndpoint.apiKey),
-        body: JSON.stringify(buildMappedImageBody(mapEndpoint.model, prompt, params, refs)),
+        body: JSON.stringify(buildMappedImageBody(mapEndpoint.model, prompt, effectiveParams, refs)),
         requestType: 'responses',
       });
     }
@@ -135,10 +138,10 @@
           model,
           prompt: prompt.trim(),
           images: refs.map(item => ({ base64: item.base64, filename: item.name })),
-          size: params.size,
-          quality: params.quality,
-          outputFormat: params.outputFormat,
-          background: params.background,
+          size: effectiveParams.size,
+          quality: effectiveParams.quality,
+          outputFormat: effectiveParams.outputFormat,
+          background: effectiveParams.background,
         },
       });
     }
@@ -146,7 +149,7 @@
     return Object.assign(base, {
       url: Api.requestUrl(imageEndpoint.baseUrl, '/images/generations'),
       headers,
-      body: JSON.stringify(ImageCore.buildImageRequestBody(model, prompt, params)),
+      body: JSON.stringify(ImageCore.buildImageRequestBody(model, prompt, effectiveParams)),
       requestType: 'generations',
     });
   }

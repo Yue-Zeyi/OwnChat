@@ -180,6 +180,7 @@
       state.imageModelsCache,
       DEFAULT_IMAGE_MODELS,
     );
+    state.imageDefaults = sanitizeCurrentImageParams();
     if (['image', 'draw', 'painting'].includes(summary.mode)) state.mode = 'image';
     if (['chat', 'dialog', 'conversation'].includes(summary.mode)) state.mode = 'chat';
     persist();
@@ -416,6 +417,7 @@
     imageQuality: $('image-quality'),
     imageFormat: $('image-format'),
     imageBackground: $('image-background'),
+    imageBackgroundHint: $('image-background-hint'),
     imageRefInput: $('image-ref-input'),
     imageRefPreview: $('image-ref-preview'),
     imageRefBtn: $('image-ref-btn'),
@@ -704,6 +706,34 @@
 
   function imageReferencePayload(refs) {
     return ImageCore.imageReferencePayload(refs, MAX_IMAGE_REFS);
+  }
+
+  function effectiveImageRequestModel() {
+    return state.imageMapModel ? imageMapEndpoint()?.model : state.imageModel;
+  }
+
+  function sanitizeCurrentImageParams(params = state.imageDefaults) {
+    return ImageCore.sanitizeImageParamsForModel(effectiveImageRequestModel(), Object.assign({}, DEFAULT_IMAGE_PARAMS, params || {}));
+  }
+
+  function syncImageBackgroundSupport() {
+    if (!dom.imageBackground) return;
+    const model = effectiveImageRequestModel();
+    const transparentOption = Array.from(dom.imageBackground.options).find(opt => opt.value === 'transparent');
+    const transparentSupported = ImageCore.imageBackgroundSupported(model, 'transparent');
+    if (transparentOption) transparentOption.disabled = !transparentSupported;
+    if (!transparentSupported && dom.imageBackground.value === 'transparent') {
+      dom.imageBackground.value = 'auto';
+    }
+    if (dom.imageBackground.value === 'transparent' && dom.imageFormat.value === 'jpeg') {
+      dom.imageFormat.value = 'png';
+    }
+    const hintText = `${model || '当前绘画模型'} 不支持透明背景，已自动改用 auto。`;
+    dom.imageBackground.title = transparentSupported ? '背景' : hintText;
+    if (transparentSupported) dom.imageBackground.removeAttribute('aria-describedby');
+    else dom.imageBackground.setAttribute('aria-describedby', 'image-background-hint');
+    if (dom.imageBackgroundHint) dom.imageBackgroundHint.classList.toggle('hidden', transparentSupported);
+    if (dom.imageBackgroundHint) dom.imageBackgroundHint.textContent = hintText;
   }
 
   function renderImageRefPreview() {
@@ -1641,19 +1671,24 @@
 
   // ===== Image Mode =====
   function syncImageParams() {
+    state.imageDefaults = sanitizeCurrentImageParams();
     dom.imageSize.value = state.imageDefaults.size;
     dom.imageQuality.value = state.imageDefaults.quality;
     dom.imageFormat.value = state.imageDefaults.outputFormat;
     dom.imageBackground.value = state.imageDefaults.background;
+    syncImageBackgroundSupport();
   }
 
   function saveImageParams() {
-    state.imageDefaults = {
+    state.imageDefaults = sanitizeCurrentImageParams({
       size: dom.imageSize.value,
       quality: dom.imageQuality.value,
       outputFormat: dom.imageFormat.value,
       background: dom.imageBackground.value,
-    };
+    });
+    dom.imageFormat.value = state.imageDefaults.outputFormat;
+    dom.imageBackground.value = state.imageDefaults.background;
+    syncImageBackgroundSupport();
     persist();
   }
 
@@ -2117,6 +2152,7 @@
       return;
     }
     if (!prompt.trim() || state.isGeneratingImage) return;
+    params = sanitizeCurrentImageParams(params);
 
     state.isGeneratingImage = true;
     const controller = new AbortController();
@@ -2940,6 +2976,10 @@
   dom.settingsImageTab.addEventListener('click', () => {
     switchSettingsTab('image');
   });
+  [dom.cfgImageModelSelect, dom.cfgImageModelManual, dom.cfgImageMapModelSelect, dom.cfgImageMapModelManual].forEach(el => {
+    el.addEventListener('change', syncImageBackgroundSupport);
+    el.addEventListener('input', syncImageBackgroundSupport);
+  });
   dom.clearChatStorage.addEventListener('click', clearChatStorage);
   dom.clearImageStorage.addEventListener('click', clearImageStorage);
 
@@ -3062,9 +3102,11 @@
       state.imageMapModel = mapModel || '';
       state.imagePromptModel = promptModel || '';
       state.imageModelsCache = mergeUnique([im], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
+      state.imageDefaults = sanitizeCurrentImageParams();
     }
     persist();
     updateModelBadge();
+    syncImageParams();
     hideSettings();
     updateSendBtn();
     updateImageGenerateBtn();
@@ -3113,7 +3155,9 @@
     if (!opt) return;
     if (state.mode === 'image') {
       state.imageModel = opt.dataset.model;
+      state.imageDefaults = sanitizeCurrentImageParams();
       persist([KEYS.imageModel]);
+      syncImageParams();
     }
     else {
       const conv = currentConv() || newConv();
@@ -3408,6 +3452,7 @@
         outputFormat: btn.dataset.format || job.params?.outputFormat || DEFAULT_IMAGE_PARAMS.outputFormat,
         background: btn.dataset.background || job.params?.background || DEFAULT_IMAGE_PARAMS.background,
       });
+      state.imageDefaults = sanitizeCurrentImageParams();
       syncImageParams();
       updateImageGenerateBtn();
       persist();

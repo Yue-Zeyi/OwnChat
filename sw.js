@@ -210,14 +210,14 @@ async function startImage(data) {
       resp = await fetch(data.url, {
         method: 'POST',
         headers: data.headers,
-        body: data.body,
+        body: sanitizeImageRequestBody(data.body),
         signal: controller.signal,
       });
     } else if (requestType === 'responses') {
       resp = await fetch(data.url, {
         method: 'POST',
         headers: data.headers,
-        body: data.body,
+        body: sanitizeImageRequestBody(data.body),
         signal: controller.signal,
       });
     } else if (requestType === 'edit') {
@@ -235,7 +235,13 @@ async function startImage(data) {
       if (params.size && params.size !== 'auto') form.append('size', params.size);
       if (params.quality && params.quality !== 'auto') form.append('quality', params.quality);
       if (params.outputFormat && !/^dall-e/i.test(params.model)) form.append('output_format', params.outputFormat);
-      if (params.background && params.background !== 'auto') form.append('background', params.background);
+      if (
+        params.background &&
+        params.background !== 'auto' &&
+        !(params.background === 'transparent' && /(?:^|[/:])gpt-image-2(?:$|[-_.])/i.test(params.model || ''))
+      ) {
+        form.append('background', params.background);
+      }
 
       resp = await fetch(data.url, {
         method: 'POST',
@@ -343,6 +349,39 @@ function normalizeImageFormat(raw) {
   if (lower.includes('jpeg') || lower.includes('jpg')) return 'jpeg';
   if (lower.includes('webp')) return 'webp';
   return lower;
+}
+
+function imageModelDisallowsTransparentBackground(model) {
+  return /(?:^|[/:])gpt-image-2(?:$|[-_.])/i.test(model || '');
+}
+
+function sanitizeImageRequestBody(body) {
+  try {
+    const parsed = JSON.parse(body || '{}');
+    sanitizeImageRequestValue(parsed);
+    return JSON.stringify(parsed);
+  } catch {
+    return body;
+  }
+}
+
+function sanitizeImageRequestValue(value, inheritedModel = '') {
+  if (!value) return;
+  if (Array.isArray(value)) {
+    value.forEach(item => sanitizeImageRequestValue(item, inheritedModel));
+    return;
+  }
+  if (typeof value !== 'object') return;
+
+  const model = typeof value.model === 'string' ? value.model : inheritedModel;
+  if (value.background === 'transparent' && imageModelDisallowsTransparentBackground(model)) {
+    delete value.background;
+  }
+  if (value.background === 'transparent' && normalizeImageFormat(value.output_format || value.outputFormat) === 'jpeg') {
+    if (value.output_format) value.output_format = 'png';
+    if (value.outputFormat) value.outputFormat = 'png';
+  }
+  Object.keys(value).forEach(key => sanitizeImageRequestValue(value[key], model));
 }
 
 function normalizeImageUsage(usage) {

@@ -44,6 +44,27 @@
     return value || '';
   }
 
+  function normalizeImageModel(model) {
+    return (model || '').trim().toLowerCase();
+  }
+
+  function imageModelDisallowsTransparentBackground(model) {
+    return /(?:^|[/:])gpt-image-2(?:$|[-_.])/.test(normalizeImageModel(model));
+  }
+
+  function imageBackgroundSupported(model, background) {
+    return background !== 'transparent' || !imageModelDisallowsTransparentBackground(model);
+  }
+
+  function sanitizeImageParamsForModel(model, params = {}) {
+    const next = Object.assign({}, params);
+    if (!imageBackgroundSupported(model, next.background)) next.background = 'auto';
+    if (next.background === 'transparent' && normalizeImageFormat(next.outputFormat) === 'jpeg') {
+      next.outputFormat = 'png';
+    }
+    return next;
+  }
+
   function dataUrlForImage(out, fallbackFormat) {
     if (!out) return '';
     const format = normalizeImageFormat(out.format || fallbackFormat || 'png') || 'png';
@@ -283,12 +304,13 @@
     return imageResponseResult(outputs, data.usage || data.response?.usage);
   }
 
-  function imageToolOptions(params = {}) {
+  function imageToolOptions(params = {}, model = '') {
+    const effectiveParams = sanitizeImageParamsForModel(model, params);
     const opts = { type: 'image_generation' };
-    if (params.size !== 'auto') opts.size = params.size;
-    if (params.quality !== 'auto') opts.quality = params.quality;
-    if (params.outputFormat) opts.output_format = params.outputFormat;
-    if (params.background !== 'auto') opts.background = params.background;
+    if (effectiveParams.size !== 'auto') opts.size = effectiveParams.size;
+    if (effectiveParams.quality !== 'auto') opts.quality = effectiveParams.quality;
+    if (effectiveParams.outputFormat) opts.output_format = effectiveParams.outputFormat;
+    if (effectiveParams.background !== 'auto') opts.background = effectiveParams.background;
     return opts;
   }
 
@@ -305,15 +327,16 @@
   }
 
   function buildImageRequestBody(model, prompt, params = {}) {
+    const effectiveParams = sanitizeImageParamsForModel(model, params);
     const body = {
       model,
       prompt: prompt.trim(),
       n: 1,
     };
-    if (params.size !== 'auto') body.size = params.size;
-    if (params.quality !== 'auto') body.quality = params.quality;
-    if (params.outputFormat && !/^dall-e/i.test(model)) body.output_format = params.outputFormat;
-    if (params.background !== 'auto') body.background = params.background;
+    if (effectiveParams.size !== 'auto') body.size = effectiveParams.size;
+    if (effectiveParams.quality !== 'auto') body.quality = effectiveParams.quality;
+    if (effectiveParams.outputFormat && !/^dall-e/i.test(model)) body.output_format = effectiveParams.outputFormat;
+    if (effectiveParams.background !== 'auto') body.background = effectiveParams.background;
     return body;
   }
 
@@ -387,6 +410,10 @@
     dataUrlForImage,
     imageByteSize,
     normalizeImageFormat,
+    normalizeImageModel,
+    imageModelDisallowsTransparentBackground,
+    imageBackgroundSupported,
+    sanitizeImageParamsForModel,
     imageOutputMeta,
     normalizeImageUsage,
     imageUsageMeta,

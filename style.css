@@ -1887,6 +1887,17 @@ html[data-boot-mode="image"] .sidebar-new-image-mode {
   background: var(--bg-main);
 }
 
+.image-param-field select option:disabled {
+  color: var(--text-3);
+}
+
+.image-param-hint {
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .image-generate-btn {
   flex-shrink: 0;
 }
