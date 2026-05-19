@@ -1,7 +1,40 @@
 # OwnChat
 
 <div align="center">
-  <img src="icon.png" width="96" height="96" alt="OwnChat">
+  <svg width="96" height="96" viewBox="0 0 64 64" role="img" aria-label="OwnChat" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <radialGradient id="ownchat-bg" cx="30%" cy="24%" r="76%">
+        <stop stop-color="#ffffff"/>
+        <stop offset=".58" stop-color="#f6fbf7"/>
+        <stop offset="1" stop-color="#dff0e5"/>
+      </radialGradient>
+      <linearGradient id="ownchat-face" x1="16" y1="18" x2="49" y2="51" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#18723b"/>
+        <stop offset=".55" stop-color="#075125"/>
+        <stop offset="1" stop-color="#022412"/>
+      </linearGradient>
+      <linearGradient id="ownchat-light" x1="22" y1="29" x2="42" y2="43" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#a8ffbd"/>
+        <stop offset="1" stop-color="#55ef83"/>
+      </linearGradient>
+      <filter id="ownchat-shadow" x="-20%" y="-20%" width="140%" height="145%" color-interpolation-filters="sRGB">
+        <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#052a15" flood-opacity=".22"/>
+      </filter>
+    </defs>
+    <circle cx="32" cy="32" r="29" fill="#f8faf8"/>
+    <circle cx="32" cy="32" r="26" fill="url(#ownchat-bg)" stroke="#e4ece7" stroke-width="1.2"/>
+    <path d="M32 12v6" stroke="#0b5528" stroke-width="3" stroke-linecap="round"/>
+    <circle cx="32" cy="10.5" r="3.4" fill="#0b5528"/>
+    <circle cx="32" cy="10.5" r="1.35" fill="#8cffaa"/>
+    <rect x="8.5" y="30" width="6" height="11" rx="3" fill="#0b5528"/>
+    <rect x="49.5" y="30" width="6" height="11" rx="3" fill="#0b5528"/>
+    <path d="M19.5 20h25C50.9 20 56 25.1 56 31.5v5C56 42.9 50.9 48 44.5 48H31.6l-9.5 7.1L23.7 48h-4.2C13.1 48 8 42.9 8 36.5v-5C8 25.1 13.1 20 19.5 20z" fill="url(#ownchat-face)" filter="url(#ownchat-shadow)"/>
+    <path d="M16 29c2.1-2.6 5.3-3.9 9.4-3.9H39" fill="none" stroke="#2d9651" stroke-width="2.3" stroke-linecap="round" opacity=".55"/>
+    <rect x="21" y="30" width="6.2" height="10.5" rx="3.1" fill="url(#ownchat-light)"/>
+    <rect x="36.8" y="30" width="6.2" height="10.5" rx="3.1" fill="url(#ownchat-light)"/>
+    <path d="M27.8 42.2c2.4 2.3 6 2.3 8.4 0" fill="none" stroke="#83f6a5" stroke-width="2.8" stroke-linecap="round"/>
+    <path d="M48.5 16.5l1.7 3.6 3.6 1.7-3.6 1.7-1.7 3.6-1.7-3.6-3.6-1.7 3.6-1.7z" fill="#68f394"/>
+  </svg>
   <p><strong>纯前端、自托管、OpenAI-compatible 的对话和绘画客户端</strong></p>
   <p>
     <img alt="No build" src="https://img.shields.io/badge/build-none-10a37f">
@@ -170,35 +203,12 @@ OwnChat 不内置服务器，也不会主动上传配置和历史到除你配置
 
 ```text
 index.html
+boot.js
 style.css
-app.js
 sw.js
-icon.png
-storage.js
-markdown-renderer.js
-attachments.js
-chat-stream.js
-token-utils.js
-persistence-db.js
-api-client.js
-service-worker-client.js
-config-import.js
-ui-utils.js
-icons.js
-image-core.js
-image-api-client.js
-image-renderer.js
-image-viewer.js
-chat-renderer.js
-sidebar-renderer.js
-stream-ui.js
-stream-session-poller.js
-markdown-it.min.js
-pdf.min.js
+ownchat.js
+vendor.min.js
 pdf.worker.min.js
-mammoth.browser.min.js
-xlsx.full.min.js
-jszip.min.js
 ```
 
 可部署到：
@@ -211,86 +221,38 @@ jszip.min.js
 
 Service Worker 需要 HTTPS 或 localhost。若 API 服务未开放 CORS，纯前端页面无法直接请求，需要服务端或网关支持 CORS。
 
+页面内置了基础 CSP 和 `no-referrer` 元信息。若要禁止第三方站点嵌入页面，请在部署服务器上额外配置 `Content-Security-Policy: frame-ancestors 'none'` 或 `X-Frame-Options: DENY` 响应头；`frame-ancestors` 不能可靠地通过 HTML meta 生效。
+
 ## 文件说明
 
 ### 入口和样式
 
 | 文件 | 说明 |
 | --- | --- |
-| `index.html` | 应用入口 HTML，包含基础 DOM、首屏主题/模式防闪脚本和按顺序加载的脚本标签。 |
-| `style.css` | 全局样式、响应式布局、聊天/绘画/设置弹窗/图片查看器/tooltip 等 UI 样式。 |
-| `icon.png` | 应用图标，同时用于浏览器 favicon 和 AI 头像背景。 |
+| `index.html` | 应用入口 HTML，包含基础 DOM、基础安全元信息和按顺序加载的脚本标签。 |
+| `boot.js` | 首屏启动脚本，负责在 CSS 加载前恢复主题、模式和侧栏折叠状态，配合 CSP 避免内联脚本。 |
+| `style.css` | 全局样式、响应式布局、聊天/绘画/设置弹窗/图片查看器/tooltip 和内联 SVG 头像样式。 |
 | `README.md` | 项目说明文档。不是运行必需文件。 |
 
 ### 应用主逻辑
 
 | 文件 | 说明 |
 | --- | --- |
-| `app.js` | 应用主控制器，负责状态编排、事件绑定、模式切换、设置面板、聊天发送、绘画生成、恢复流程和各模块协作。 |
-| `storage.js` | `localStorage` key 定义和通用保存/读取封装。 |
-| `persistence-db.js` | IndexedDB 持久化层，负责附件、绘画历史、临时聊天流 session、临时图片 session。 |
-| `api-client.js` | 通用 API 请求工具，负责 URL 规范化、fetch 包装和错误对象构建。 |
-| `service-worker-client.js` | 页面侧 Service Worker 注册和可用性检测。 |
-| `sw.js` | Service Worker，负责后台对话流请求、后台图片请求、停止请求、心跳和恢复 session 写入。 |
-| `config-import.js` | URL/文件配置导入、base64url 解码、配置摘要和 API Key 遮罩。 |
-| `ui-utils.js` | 通用 UI 小工具，例如复制菜单、文本复制、滚动和交互辅助。 |
-| `icons.js` | 应用内使用的 SVG 图标集合。 |
+| `sw.js` | Service Worker，负责后台对话流请求、后台图片请求、停止请求、心跳和恢复 session 写入，并内置后台任务所需的协议工具。 |
+| `ownchat.js` | 页面业务主包，包含协议工具、存储、Markdown、附件、数据库、API、设置导入、UI 工具、对话渲染、绘画渲染、侧栏、流式 UI、轮询和应用主控制器。 |
 
-### 对话模块
-
-| 文件 | 说明 |
-| --- | --- |
-| `chat-stream.js` | Chat Completions SSE 解析、usage 规范化、流状态累积和流结束数据生成。 |
-| `chat-renderer.js` | 对话消息 HTML 渲染，包含消息内容、meta、操作按钮、附件和 Markdown 输出。 |
-| `stream-ui.js` | 流式回复 DOM 渲染层，负责 typing、stream message、思考过程展开/收起和内容增量渲染。 |
-| `stream-session-poller.js` | 页面轮询 Service Worker 流式 session 时使用的进度状态、计时和终态判断工具。 |
-| `markdown-renderer.js` | Markdown 渲染、安全转义、代码高亮、`<think>` 拆分和链接/图片清洗。 |
-| `token-utils.js` | token 估算、上下文裁剪、数量格式化、`max_tokens` 显式参数处理。 |
-| `attachments.js` | 附件读取、文件类型识别、附件消息构建、API 消息转换和附件校验。 |
-
-### 绘画模块
-
-| 文件 | 说明 |
-| --- | --- |
-| `image-core.js` | 绘画核心数据工具，负责图片输出解析、图片 usage 规范化、结果 meta、文件名、参考图、任务状态和 reply 数据结构。 |
-| `image-api-client.js` | 图片 API 请求层，负责 Images generations、Images edits、Responses 映射生图和提示词优化请求。 |
-| `image-renderer.js` | 绘画工作区 HTML 渲染，负责用户提示词、参考图、生成结果、图片 meta、token meta 和操作按钮。 |
-| `image-viewer.js` | 图片查看器交互，负责打开、关闭、上一张/下一张、缩放、拖拽和平移。 |
-
-### 侧栏模块
-
-| 文件 | 说明 |
-| --- | --- |
-| `sidebar-renderer.js` | 侧栏渲染层，负责对话/绘画列表过滤、空状态、批量删除栏状态和侧栏 HTML。 |
-
-### 开发检查
-
-| 文件 | 说明 |
-| --- | --- |
-| `smoke.js` | 本地无依赖检查脚本，验证 `index.html` 脚本引用、部署清单和项目自有 JS 语法。不是运行必需文件。 |
+对话、绘画、侧栏等页面模块已合并进 `ownchat.js`，部署时不再需要保留拆分后的模块文件。
 
 ### 第三方库
 
 | 文件 | 说明 |
 | --- | --- |
-| `markdown-it.min.js` | Markdown 渲染库。 |
-| `pdf.min.js` | PDF.js 主库，用于解析 PDF 附件。 |
+| `vendor.min.js` | 第三方前端库集合，包含 Markdown 渲染、PDF.js 主库、Word 文档解析、表格解析和 ZIP 解析。 |
 | `pdf.worker.min.js` | PDF.js worker 文件。 |
-| `mammoth.browser.min.js` | Word 文档解析库，用于读取 `.docx` 等附件文本。 |
-| `xlsx.full.min.js` | 表格解析库，用于读取 `.xls`、`.xlsx`、`.csv`、`.tsv` 等附件。 |
-| `jszip.min.js` | ZIP 解析库，供 Office 文档解析等场景使用。 |
 
 ## 开发
 
 没有构建步骤，修改后刷新浏览器即可。
-
-建议检查：
-
-```bash
-node smoke.js
-```
-
-`smoke.js` 会检查 `index.html` 引用脚本是否存在、部署清单是否包含页面脚本，并对项目自有 JS 执行语法检查。
 
 修改 `sw.js` 后，如果浏览器仍使用旧版本，可以在 DevTools 的 Application / Service Workers 中手动更新，或清理站点数据后重新加载。
 

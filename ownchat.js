@@ -1,3 +1,3439 @@
+// ===== Embedded shared protocol helpers =====
+(function () {
+  'use strict';
+
+  function normalizeUsage(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const input = Number(usage.prompt_tokens ?? usage.input_tokens ?? usage.input);
+    const output = Number(usage.completion_tokens ?? usage.output_tokens ?? usage.output);
+    const total = Number(usage.total_tokens ?? usage.total);
+    const normalized = {};
+    if (Number.isFinite(input)) normalized.input = input;
+    if (Number.isFinite(output)) normalized.output = output;
+    if (Number.isFinite(total)) normalized.total = total;
+    return Object.keys(normalized).length ? normalized : null;
+  }
+
+  function parseChatStreamEvent(json) {
+    const usage = normalizeUsage(json?.usage || json?.response?.usage);
+    const delta = json?.choices?.[0]?.delta || {};
+    return {
+      usage,
+      reasoning: delta.reasoning_content || delta.thinking || json?.delta_reasoning || json?.reasoning_delta || '',
+      content: delta.content || json?.delta || (json?.type === 'response.output_text.delta' ? json.delta : '') || '',
+    };
+  }
+
+  function parseSseLine(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed || !trimmed.startsWith('data:')) return null;
+    const payload = trimmed.slice(5).trim();
+    if (!payload || payload === '[DONE]') return null;
+    return JSON.parse(payload);
+  }
+
+  function createStreamState(seed = {}) {
+    return Object.assign({
+      content: '',
+      reasoning: '',
+      usage: null,
+      outputStartAt: null,
+    }, seed);
+  }
+
+  function applyStreamDelta(state, event, now = Date.now()) {
+    const next = createStreamState(state);
+    if (event?.usage) next.usage = event.usage;
+    if (event?.reasoning) next.reasoning += event.reasoning;
+    if (event?.content) {
+      if (!next.outputStartAt) next.outputStartAt = now;
+      next.content += event.content;
+    }
+    return next;
+  }
+
+  function finalizeChatStream(state, status = 'complete', now = Date.now(), extra = {}) {
+    const outputTimeMs = state?.outputStartAt ? now - state.outputStartAt : null;
+    return Object.assign({
+      assistantContent: state?.content || '',
+      reasoningContent: state?.reasoning || '',
+      usage: state?.usage || null,
+      outputStartAt: state?.outputStartAt || null,
+      outputEndAt: now,
+      outputTimeMs,
+      status,
+      updatedAt: now,
+    }, extra);
+  }
+
+  function removeStreamOptions(body) {
+    const copy = Object.assign({}, body);
+    delete copy.stream_options;
+    return copy;
+  }
+
+  function httpErrorText(status, text = '') {
+    const detail = String(text || '').slice(0, 500);
+    return `HTTP ${status}${detail ? `: ${detail}` : ''}`;
+  }
+
+  function fetchErrorText(error) {
+    return `Fetch failed: ${error?.message || String(error)}`;
+  }
+
+  const api = {
+    normalizeUsage,
+    parseChatStreamEvent,
+    parseSseLine,
+    createStreamState,
+    applyStreamDelta,
+    finalizeChatStream,
+    removeStreamOptions,
+    httpErrorText,
+    fetchErrorText,
+  };
+
+  if (typeof self !== 'undefined') self.OwnChatStream = api;
+  if (typeof window !== 'undefined') window.OwnChatStream = api;
+})();
+
+(function () {
+  'use strict';
+
+  function normalizeImageFormat(format) {
+    const value = (format || '').toLowerCase().replace(/^image\//, '');
+    if (value === 'jpg') return 'jpeg';
+    if (value.includes('jpeg')) return 'jpeg';
+    if (value.includes('png')) return 'png';
+    if (value.includes('webp')) return 'webp';
+    return value || '';
+  }
+
+  function normalizeImageModel(model) {
+    return (model || '').trim().toLowerCase();
+  }
+
+  function imageModelDisallowsTransparentBackground(model) {
+    return /(?:^|[/:])gpt-image-2(?:$|[-_.])/.test(normalizeImageModel(model));
+  }
+
+  function imageBackgroundSupported(model, background) {
+    return background !== 'transparent' || !imageModelDisallowsTransparentBackground(model);
+  }
+
+  function sanitizeImageParamsForModel(model, params = {}) {
+    const next = Object.assign({}, params);
+    if (!imageBackgroundSupported(model, next.background)) next.background = 'auto';
+    if (next.background === 'transparent' && normalizeImageFormat(next.outputFormat) === 'jpeg') {
+      next.outputFormat = 'png';
+    }
+    return next;
+  }
+
+  function sanitizeImageRequestValue(value, inheritedModel = '') {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      value.forEach(item => sanitizeImageRequestValue(item, inheritedModel));
+      return;
+    }
+    if (typeof value !== 'object') return;
+
+    const model = typeof value.model === 'string' ? value.model : inheritedModel;
+    if (value.background === 'transparent' && imageModelDisallowsTransparentBackground(model)) {
+      delete value.background;
+    }
+    if (value.background === 'transparent' && normalizeImageFormat(value.output_format || value.outputFormat) === 'jpeg') {
+      if (value.output_format) value.output_format = 'png';
+      if (value.outputFormat) value.outputFormat = 'png';
+    }
+    Object.keys(value).forEach(key => sanitizeImageRequestValue(value[key], model));
+  }
+
+  function sanitizeImageRequestBody(body) {
+    try {
+      const parsed = JSON.parse(body || '{}');
+      sanitizeImageRequestValue(parsed);
+      return JSON.stringify(parsed);
+    } catch {
+      return body;
+    }
+  }
+
+  function normalizeImageUsage(usage) {
+    if (!usage || typeof usage !== 'object') return null;
+    const input = Number(usage.input_tokens ?? usage.prompt_tokens ?? usage.input);
+    const output = Number(usage.output_tokens ?? usage.completion_tokens ?? usage.output);
+    const total = Number(usage.total_tokens ?? usage.total);
+    const imageInput = Number(usage.input_tokens_details?.image_tokens ?? usage.input_image_tokens ?? usage.details?.inputImage);
+    const textInput = Number(usage.input_tokens_details?.text_tokens ?? usage.input_text_tokens ?? usage.details?.inputText);
+    const imageOutput = Number(usage.output_tokens_details?.image_tokens ?? usage.output_image_tokens ?? usage.details?.outputImage);
+    const textOutput = Number(usage.output_tokens_details?.text_tokens ?? usage.output_text_tokens ?? usage.details?.outputText);
+    const normalized = {};
+    if (Number.isFinite(input)) normalized.input = input;
+    if (Number.isFinite(output)) normalized.output = output;
+    if (Number.isFinite(total)) normalized.total = total;
+    const details = {};
+    if (Number.isFinite(imageInput)) details.inputImage = imageInput;
+    if (Number.isFinite(textInput)) details.inputText = textInput;
+    if (Number.isFinite(imageOutput)) details.outputImage = imageOutput;
+    if (Number.isFinite(textOutput)) details.outputText = textOutput;
+    if (Object.keys(details).length) normalized.details = details;
+    return Object.keys(normalized).length ? normalized : null;
+  }
+
+  function dataUrlToBlob(dataUrl) {
+    const [header, data] = String(dataUrl || '').split(',');
+    const mime = header?.match(/data:([^;]+)/)?.[1] || 'image/png';
+    const bin = atob(data || '');
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  const api = {
+    normalizeImageFormat,
+    normalizeImageModel,
+    imageModelDisallowsTransparentBackground,
+    imageBackgroundSupported,
+    sanitizeImageParamsForModel,
+    sanitizeImageRequestValue,
+    sanitizeImageRequestBody,
+    normalizeImageUsage,
+    dataUrlToBlob,
+  };
+
+  if (typeof self !== 'undefined') self.OwnChatImageShared = api;
+  if (typeof window !== 'undefined') window.OwnChatImageShared = api;
+})();
+
+(function () {
+  'use strict';
+
+  const root = typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : globalThis);
+  const DEFAULT_CONTEXT_LIMIT = 256000;
+  const TOKEN_K = 1000;
+
+  function attachments() {
+    return root.OwnChatAttachments;
+  }
+
+  function estimateTokens(text) {
+    if (!text) return 0;
+    let tokens = 0;
+    for (const char of text) {
+      const code = char.charCodeAt(0);
+      if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3040 && code <= 0x30ff) || (code >= 0xac00 && code <= 0xd7af)) {
+        tokens += 1.5;
+      } else if (code > 127) {
+        tokens += 1.2;
+      } else {
+        tokens += 0.25;
+      }
+    }
+    return Math.ceil(tokens);
+  }
+
+  function tokensToK(tokens, fallback) {
+    if (tokens === null || tokens === undefined || tokens === '') return '';
+    const value = Number.isFinite(Number(tokens)) ? Number(tokens) : fallback;
+    return Math.round(value / TOKEN_K);
+  }
+
+  function kToTokens(value, fallback, opts = {}) {
+    if (value === null || value === undefined || String(value).trim() === '') return null;
+    const kValue = parseFloat(value);
+    if (!Number.isFinite(kValue) || kValue < 0) return fallback;
+    if (opts.allowZero && kValue === 0) return 0;
+    return Math.max(TOKEN_K, Math.round(kValue * TOKEN_K));
+  }
+
+  function explicitMaxTokens(conv) {
+    const value = Number(conv?.maxTokens);
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return Math.round(value);
+  }
+
+  function trimContextMessages(messages, systemPrompt, maxTokens) {
+    if (maxTokens === 0) {
+      const allMessages = [];
+      if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt });
+      allMessages.push(...messages);
+      return allMessages;
+    }
+    maxTokens = maxTokens || DEFAULT_CONTEXT_LIMIT;
+    const allMessages = [];
+    if (systemPrompt) allMessages.push({ role: 'system', content: systemPrompt });
+    allMessages.push(...messages);
+
+    let totalTokens = 0;
+    for (const message of allMessages) totalTokens += estimateMessageTokens(message);
+
+    if (totalTokens <= maxTokens) return allMessages;
+
+    const sysMsg = allMessages[0]?.role === 'system' ? allMessages[0] : null;
+    const rest = sysMsg ? allMessages.slice(1) : allMessages;
+
+    let lastUserIdx = -1;
+    for (let i = rest.length - 1; i >= 0; i--) {
+      if (rest[i].role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+
+    const keepTail = rest.slice(Math.max(0, lastUserIdx));
+    const tailTokens = keepTail.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+    const sysTokens = sysMsg ? estimateTokens(sysMsg.content) : 0;
+    const budget = maxTokens - sysTokens - tailTokens;
+
+    const recent = [];
+    let recentTokens = 0;
+    const history = rest.slice(0, Math.max(0, lastUserIdx));
+    for (let i = history.length - 1; i >= 0; i--) {
+      const message = history[i];
+      const tokens = estimateMessageTokens(message);
+      if (recentTokens + tokens > budget) break;
+      recent.unshift(message);
+      recentTokens += tokens;
+    }
+
+    const result = [];
+    if (sysMsg) result.push(sysMsg);
+    result.push(...recent, ...keepTail);
+    return result;
+  }
+
+  function apiMessagesTokenCount(messages) {
+    return messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
+  }
+
+  function estimateMessageTokens(msg) {
+    const content = msg?.content;
+    const files = Array.isArray(msg?.files) ? msg.files : [];
+    if (typeof content === 'string') return estimateTokens(content);
+    if (!Array.isArray(content)) return estimateTokens(JSON.stringify(content || ''));
+
+    const fileHelpers = attachments();
+    const filesById = new Map(files.filter(file => file?.fileId).map(file => [file.fileId, file]));
+    return content.reduce((sum, part) => {
+      if (part?.type === 'text' && part.attachmentFileId) {
+        const file = filesById.get(part.attachmentFileId);
+        const inlineText = file && fileHelpers?.fileTextInline ? fileHelpers.fileTextInline(file) : '';
+        if (inlineText && part.text !== inlineText) return sum + estimateTokens(inlineText);
+      }
+      if (part?.type === 'text') return sum + estimateTokens(part.text || '');
+      if (part?.type === 'image_url') return sum + 512;
+      return sum + estimateTokens(JSON.stringify(part || ''));
+    }, 0);
+  }
+
+  function formatTokenCount(value) {
+    const n = Math.max(0, Math.round(value || 0));
+    if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+    if (n >= 1000) return `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K`;
+    return String(n);
+  }
+
+  root.OwnChatTokens = {
+    DEFAULT_CONTEXT_LIMIT,
+    TOKEN_K,
+    estimateTokens,
+    tokensToK,
+    kToTokens,
+    explicitMaxTokens,
+    trimContextMessages,
+    apiMessagesTokenCount,
+    estimateMessageTokens,
+    formatTokenCount,
+  };
+})();
+
+// ===== Storage =====
+(function () {
+  'use strict';
+
+  const KEYS = {
+    baseUrl: 'nc_base_url',
+    apiKey: 'nc_api_key',
+    model: 'nc_model',
+    modelsCache: 'nc_models_cache',
+    conversations: 'nc_conversations',
+    currentConvId: 'nc_current_conv_id',
+    sidebarCollapsed: 'nc_sidebar_collapsed',
+    theme: 'nc_theme',
+    mode: 'nc_mode',
+    imageBaseUrl: 'nc_image_base_url',
+    imageApiKey: 'nc_image_api_key',
+    imageModel: 'nc_image_model',
+    imageMapModel: 'nc_image_map_model',
+    imagePromptModel: 'nc_image_prompt_model',
+    imageModelsCache: 'nc_image_models_cache',
+    currentImageJobId: 'nc_current_image_job_id',
+    imageDefaults: 'nc_image_defaults',
+  };
+
+  function save(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (error) {
+      console.warn('localStorage save failed:', key, error);
+    }
+  }
+
+  function load(key, fallback = null) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw == null ? fallback : JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+
+  window.OwnChatStorage = { KEYS, save, load };
+})();
+
+// ===== Markdown Rendering =====
+(function () {
+  'use strict';
+
+  const mdCopyIcon = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+  const MarkdownIt = window.markdownit || (typeof markdownit !== 'undefined' ? markdownit : null);
+  const mdParser = MarkdownIt ? MarkdownIt({
+    html: false,
+    linkify: true,
+    typographer: false,
+    breaks: false,
+    highlight(code, lang) {
+      const safeLang = (lang || '').trim();
+      const highlighted = highlightCode(code.replace(/\n$/, ''), safeLang);
+      return `<div class="code-block">${codeHeader(safeLang)}<pre><code>${highlighted}</code></pre></div>`;
+    },
+  }) : null;
+
+  if (mdParser) {
+    mdParser.core.ruler.after('inline', 'ownchat-task-list', (state) => {
+      const tokens = state.tokens;
+      for (let i = 2; i < tokens.length; i++) {
+        if (tokens[i].type !== 'inline') continue;
+        if (tokens[i - 1]?.type !== 'paragraph_open' || tokens[i - 2]?.type !== 'list_item_open') continue;
+
+        const match = tokens[i].content.match(/^\[([ xX])\]\s+/);
+        if (!match) continue;
+
+        const checked = match[1].trim() !== '';
+        tokens[i - 2].attrJoin('class', checked ? 'task-item task-checked' : 'task-item task-unchecked');
+        tokens[i].content = tokens[i].content.slice(match[0].length);
+        tokens[i].children = tokens[i].children || [];
+        if (tokens[i].children[0]?.type === 'text') {
+          tokens[i].children[0].content = tokens[i].children[0].content.slice(match[0].length);
+        }
+
+        const marker = new state.Token('html_inline', '', 0);
+        marker.content = `<span class="task-box">${checked ? '✓' : ''}</span>`;
+        tokens[i].children.unshift(marker);
+      }
+    });
+
+    const defaultLinkOpen = mdParser.renderer.rules.link_open || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+    mdParser.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+      const token = tokens[idx];
+      const hrefIdx = token.attrIndex('href');
+      if (hrefIdx >= 0) {
+        token.attrs[hrefIdx][1] = sanitizeUrlValue(token.attrs[hrefIdx][1]);
+      }
+      token.attrSet('target', '_blank');
+      token.attrSet('rel', 'noopener noreferrer');
+      return defaultLinkOpen(tokens, idx, options, env, self);
+    };
+    mdParser.renderer.rules.image = (tokens, idx) => {
+      const token = tokens[idx];
+      const src = token.attrGet('src') || '';
+      const alt = token.content || '';
+      return `<img src="${sanitizeUrl(src, { image: true })}" alt="${esc(stripMd(alt))}" loading="lazy">`;
+    };
+    mdParser.renderer.rules.fence = (tokens, idx, options) => {
+      const token = tokens[idx];
+      const lang = token.info ? token.info.trim().split(/\s+/)[0] : '';
+      const highlighted = options.highlight ? options.highlight(token.content, lang, '') : esc(token.content);
+      return highlighted || `<pre><code>${esc(token.content)}</code></pre>`;
+    };
+  }
+
+  function codeHeader(lang) {
+    const langLabel = lang ? `<span class="code-lang">${esc(lang)}</span>` : '';
+    return `<div class="code-header">${langLabel}<button class="code-copy-btn" type="button" title="复制代码">${mdCopyIcon}</button></div>`;
+  }
+
+  function renderMd(raw) {
+    if (!raw) return '';
+    if (mdParser) return mdParser.render(raw);
+    return esc(raw).replace(/\n/g, '<br>');
+  }
+
+  function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, char => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;',
+    })[char]);
+  }
+
+  function stripMd(text) {
+    return String(text ?? '').replace(/[*_~`[\]]/g, '');
+  }
+
+  function sanitizeUrl(rawUrl, opts = {}) {
+    return esc(sanitizeUrlValue(rawUrl, opts));
+  }
+
+  function sanitizeUrlValue(rawUrl, opts = {}) {
+    const url = String(rawUrl ?? '').trim().replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    if (!url) return '#';
+    if (opts.image && /^data:image\/(png|jpe?g|gif|webp);base64,[a-z0-9+/=]+$/i.test(url)) return url;
+    try {
+      const parsed = new URL(url, window.location.href);
+      const allowed = opts.image ? ['http:', 'https:'] : ['http:', 'https:', 'mailto:', 'tel:'];
+      if (allowed.includes(parsed.protocol)) return url;
+    } catch {
+      if (!opts.image && /^(#|\/(?!\/)|\.{1,2}\/)/.test(url)) return url;
+    }
+    return '#';
+  }
+
+  function splitThinkTags(raw) {
+    const text = raw || '';
+    const contentParts = [];
+    const reasoningParts = [];
+    const tagRe = /<\/?think>/ig;
+    let last = 0;
+    let inThink = false;
+    let sawThink = false;
+    let match;
+
+    while ((match = tagRe.exec(text))) {
+      sawThink = true;
+      if (/^<think>$/i.test(match[0])) {
+        if (inThink) {
+          reasoningParts.push(text.slice(last, match.index));
+        } else {
+          contentParts.push(text.slice(last, match.index));
+          inThink = true;
+        }
+      } else if (inThink) {
+        reasoningParts.push(text.slice(last, match.index));
+        inThink = false;
+      } else {
+        contentParts.push(text.slice(last, match.index));
+      }
+      last = match.index + match[0].length;
+    }
+
+    if (inThink) reasoningParts.push(text.slice(last));
+    else contentParts.push(text.slice(last));
+
+    const reasoning = reasoningParts.join('').replace(/^\s+|\s+$/g, '');
+    const content = sawThink ? contentParts.join('').replace(/^\s+/, '') : text;
+    return { reasoning, content, openThink: inThink };
+  }
+
+  function highlightCode(code, lang) {
+    const regions = [];
+    const add = (start, end, cls) => regions.push({ start, end, cls });
+
+    const stringRegions = [];
+    for (const match of code.matchAll(/"(?:[^"\\]|\\.)*"/g)) {
+      add(match.index, match.index + match[0].length, 'hl-string');
+      stringRegions.push([match.index, match.index + match[0].length]);
+    }
+    for (const match of code.matchAll(/'(?:[^'\\]|\\.)*'/g)) {
+      add(match.index, match.index + match[0].length, 'hl-string');
+      stringRegions.push([match.index, match.index + match[0].length]);
+    }
+
+    const inString = idx => stringRegions.some(([start, end]) => idx >= start && idx < end);
+
+    for (const match of code.matchAll(/\/\*[\s\S]*?\*\//g)) {
+      if (!inString(match.index)) add(match.index, match.index + match[0].length, 'hl-comment');
+    }
+    for (const match of code.matchAll(/\/\/.*$/gm)) {
+      if (!inString(match.index)) add(match.index, match.index + match[0].length, 'hl-comment');
+    }
+    if (/^(py|python|rb|ruby|sh|bash|yaml|yml|toml|r|perl|pl)/i.test(lang)) {
+      for (const match of code.matchAll(/#.*$/gm)) {
+        if (!inString(match.index)) add(match.index, match.index + match[0].length, 'hl-comment');
+      }
+    }
+
+    const kwSet = new Set(['function','return','if','else','for','while','do','switch','case','break','continue','class','extends','new','this','super','import','export','from','default','async','await','try','catch','finally','throw','const','let','var','def','elif','lambda','with','as','in','not','is','True','False','None','print','self','yield','raise','except','pass','assert','struct','enum','interface','type','namespace','using','public','private','protected','static','final','void','int','float','double','string','bool','char','long','short','byte','sizeof','null','undefined','true','false','typeof','instanceof']);
+    for (const match of code.matchAll(/\b([a-zA-Z_]\w*)\b/g)) {
+      if (kwSet.has(match[1])) add(match.index, match.index + match[0].length, 'hl-keyword');
+    }
+    for (const match of code.matchAll(/\b(\d+\.?\d*)\b/g)) add(match.index, match.index + match[0].length, 'hl-number');
+    for (const match of code.matchAll(/\b([a-zA-Z_]\w*)(\s*\()/g)) {
+      if (!kwSet.has(match[1])) add(match.index, match.index + match[1].length, 'hl-func');
+    }
+
+    regions.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
+
+    const kept = [];
+    for (const region of regions) {
+      if (kept.length && region.start < kept[kept.length - 1].end) continue;
+      kept.push(region);
+    }
+
+    let html = '';
+    let pos = 0;
+    for (const region of kept) {
+      if (region.start > pos) html += esc(code.slice(pos, region.start));
+      html += `<span class="${region.cls}">${esc(code.slice(region.start, region.end))}</span>`;
+      pos = region.end;
+    }
+    if (pos < code.length) html += esc(code.slice(pos));
+    return html;
+  }
+
+  window.OwnChatMarkdown = {
+    renderMd,
+    esc,
+    stripMd,
+    sanitizeUrl,
+    sanitizeUrlValue,
+    splitThinkTags,
+    highlightCode,
+  };
+})();
+
+// ===== Attachments =====
+(function () {
+  'use strict';
+
+  const TEXT_FILE_INLINE_MAX_BYTES = 1024 * 1024;
+  const EXTRACTABLE_FILE_MAX_BYTES = 10 * 1024 * 1024;
+  const PDF_TEXT_EXTRACT_MAX_BYTES = 10 * 1024 * 1024;
+  const TEXT_FILE_EXTENSIONS = new Set([
+    'txt', 'md', 'csv', 'json', 'py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css',
+    'xml', 'yaml', 'yml', 'php', 'java', 'go', 'rs', 'c', 'cpp', 'h', 'hpp',
+    'cs', 'rb', 'swift', 'kt', 'kts', 'vue', 'svelte', 'sh', 'bash', 'zsh',
+    'sql', 'toml', 'ini', 'env', 'log', 'tsv'
+  ]);
+  const EXTRACTABLE_FILE_EXTENSIONS = new Set(['docx', 'rtf', 'odt', 'pptx', 'xlsx']);
+  const UNSUPPORTED_BINARY_EXTENSIONS = new Set(['doc', 'ppt', 'xls']);
+  const IMAGE_FILE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'avif', 'heic', 'heif']);
+
+  function fileExtension(name = '') {
+    const match = String(name).toLowerCase().match(/\.([a-z0-9]+)$/);
+    return match ? match[1] : '';
+  }
+
+  function isPdfFile(file) {
+    return fileExtension(file?.name) === 'pdf' || (file?.type || '').toLowerCase() === 'application/pdf';
+  }
+
+  function isImageFile(file) {
+    return (file?.type || '').toLowerCase().startsWith('image/') || IMAGE_FILE_EXTENSIONS.has(fileExtension(file?.name));
+  }
+
+  function isTextFile(file) {
+    if (isImageFile(file)) return false;
+    const ext = fileExtension(file?.name);
+    if (isPdfFile(file) || EXTRACTABLE_FILE_EXTENSIONS.has(ext) || UNSUPPORTED_BINARY_EXTENSIONS.has(ext)) return false;
+    const type = (file?.type || '').toLowerCase();
+    if (type.startsWith('text/')) return true;
+    if (/json|xml|csv|yaml|markdown|javascript|typescript|x-sh|x-shellscript|x-php|x-python|sql|toml/.test(type)) return true;
+    return TEXT_FILE_EXTENSIONS.has(ext);
+  }
+
+  function isExtractableFile(file) {
+    return EXTRACTABLE_FILE_EXTENSIONS.has(fileExtension(file?.name));
+  }
+
+  function unsupportedAttachmentReason(file) {
+    if (isImageFile(file)) return '';
+    const ext = fileExtension(file?.name);
+    if (UNSUPPORTED_BINARY_EXTENSIONS.has(ext)) {
+      const target = ext === 'doc' ? 'docx' : (ext === 'ppt' ? 'pptx' : 'xlsx');
+      return `${file?.name || '附件'} 是旧版 Office 二进制格式，请转为 ${target} 或 PDF 后上传`;
+    }
+    if (!isTextFile(file) && !isExtractableFile(file) && !isPdfFile(file)) {
+      return `${file?.name || '附件'} 当前不支持，请转为文本、PDF 或新版 Office 文件`;
+    }
+    return '';
+  }
+
+  function maxChatAttachmentBytes(file) {
+    if (isImageFile(file)) return null;
+    const ext = fileExtension(file?.name);
+    if (isTextFile(file)) return TEXT_FILE_INLINE_MAX_BYTES;
+    if (EXTRACTABLE_FILE_EXTENSIONS.has(ext)) return EXTRACTABLE_FILE_MAX_BYTES;
+    if (isPdfFile(file)) return PDF_TEXT_EXTRACT_MAX_BYTES;
+    return 0;
+  }
+
+  function storedTextBytes(value) {
+    if (value == null) return 0;
+    const text = typeof value === 'string' ? value : JSON.stringify(value);
+    if (!text) return 0;
+    if (typeof Blob !== 'undefined') return new Blob([text]).size;
+    return new TextEncoder().encode(text).length;
+  }
+
+  function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    const kb = bytes / 1024;
+    if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB`;
+    const mb = kb / 1024;
+    return `${mb.toFixed(mb >= 100 ? 0 : 2)} MB`;
+  }
+
+  function validateReadyFiles(files) {
+    const unsupported = files.find(f => unsupportedAttachmentReason(f));
+    if (unsupported) return [unsupportedAttachmentReason(unsupported)];
+    const oversizedText = files.find(f => typeof f.text === 'string' && storedTextBytes(f.text) > TEXT_FILE_INLINE_MAX_BYTES);
+    if (oversizedText) return [`${oversizedText.name || '附件'} 超过 ${formatBytes(TEXT_FILE_INLINE_MAX_BYTES)}，无法作为内联文本发送`];
+    return [];
+  }
+
+  function createPendingEntry(file, name) {
+    return { name: name || file?.name || 'attachment', size: file?.size || 0, type: file?.type || '', loading: true };
+  }
+
+  function isReady(entry) {
+    return !!(entry && !entry.loading && !entry.error && (entry.base64 || typeof entry.text === 'string'));
+  }
+
+  function hasError(entry) {
+    return !!entry?.error;
+  }
+
+  function isLoading(entry) {
+    return !!entry?.loading || (!hasError(entry) && !isReady(entry));
+  }
+
+  function failEntry(entry, message) {
+    entry.loading = false;
+    entry.error = true;
+    entry.errorText = message || '读取失败';
+    return entry;
+  }
+
+  async function readIntoEntry(entry, file) {
+    const unsupportedReason = unsupportedAttachmentReason(entry);
+    if (unsupportedReason) {
+      return failEntry(entry, unsupportedReason.replace(`${entry.name} `, ''));
+    }
+    const maxBytes = maxChatAttachmentBytes(entry);
+    if (maxBytes !== null && (file?.size || 0) > maxBytes) {
+      return failEntry(entry, `超过 ${formatBytes(maxBytes)}`);
+    }
+    try {
+      Object.assign(entry, await readAttachment(file));
+      entry.loading = false;
+      delete entry.error;
+      delete entry.errorText;
+    } catch (err) {
+      failEntry(entry, err?.message || '读取失败');
+    }
+    return entry;
+  }
+
+  function fileTextInline(file) {
+    if (typeof file?.text === 'string') {
+      const source = file.extractionLabel ? ` · ${file.extractionLabel}` : '';
+      return `[文件: ${file.name || '附件'}${source}]\n${file.text}`;
+    }
+    return `[文件: ${file?.name || '附件'}]\n此文件不是文本/代码文件，当前接口无法直接读取正文。`;
+  }
+
+  function promptPartsFromReadyFiles(userText, files) {
+    const contentParts = [{ type: 'text', text: userText }];
+    for (const file of files) {
+      if (file.base64) {
+        contentParts.push({ type: 'image_url', image_url: { url: file.base64 } });
+      } else {
+        contentParts.push({ type: 'text', text: fileTextInline(file) });
+      }
+    }
+    return contentParts;
+  }
+
+  function metadataFromReadyFiles(files) {
+    return files.map(file => ({
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      base64: file.base64,
+      text: file.text,
+      extractionLabel: file.extractionLabel,
+    }));
+  }
+
+  function messageFromReadyFiles(userText, files, meta = {}) {
+    return Object.assign({
+      role: 'user',
+      content: promptPartsFromReadyFiles(userText, files),
+      files: metadataFromReadyFiles(files),
+    }, meta);
+  }
+
+  function apiMessagesFromPromptMessages(messages) {
+    return messages.map(msg => {
+      if (typeof msg.content === 'string') return { role: msg.role, content: msg.content };
+      if (Array.isArray(msg.content)) {
+        const content = msg.content.filter(part => part?.type === 'text' || part?.type === 'image_url');
+        if (content.every(part => part?.type === 'text')) {
+          return { role: msg.role, content: content.map(part => part.text || '').filter(Boolean).join('\n\n') };
+        }
+        return { role: msg.role, content };
+      }
+      return { role: msg.role, content: String(msg.content || '') };
+    });
+  }
+
+  function xmlTextContent(xml) {
+    return String(xml || '')
+      .replace(/<w:tab\s*\/>/g, '\t')
+      .replace(/<w:br\s*\/>|<text:line-break\s*\/>|<a:br\s*\/>/g, '\n')
+      .replace(/<\/w:p>|<\/text:p>|<\/a:p>/g, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&apos;/g, "'")
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(/[ \t]{2,}/g, ' ')
+      .trim();
+  }
+
+  function rtfToText(rtf) {
+    return String(rtf || '')
+      .replace(/\\'[0-9a-fA-F]{2}/g, match => String.fromCharCode(parseInt(match.slice(2), 16)))
+      .replace(/\\par[d]?|\\line/g, '\n')
+      .replace(/\\tab/g, '\t')
+      .replace(/\\u(-?\d+)\??/g, (_, code) => String.fromCharCode(Number(code) < 0 ? Number(code) + 65536 : Number(code)))
+      .replace(/[{}]/g, '')
+      .replace(/\\[a-zA-Z]+-?\d* ?/g, '')
+      .replace(/\\[^a-zA-Z\s]/g, '')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  async function extractPdfTextWithPdfJs(arrayBuffer) {
+    const pdfjs = window.pdfjsLib;
+    if (!pdfjs?.getDocument) throw new Error('PDF.js 不可用');
+    if (pdfjs.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
+      pdfjs.GlobalWorkerOptions.workerSrc = 'pdf.worker.min.js';
+    }
+    const pdf = await pdfjs.getDocument({ data: arrayBuffer.slice(0) }).promise;
+    const pages = [];
+    for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+      const page = await pdf.getPage(pageNo);
+      const content = await page.getTextContent();
+      const text = content.items.map(item => item.str || '').join(' ').replace(/[ \t]{2,}/g, ' ').trim();
+      if (text) pages.push(`## 第 ${pageNo} 页\n${text}`);
+    }
+    return pages.join('\n\n').trim();
+  }
+
+  async function extractDocxTextWithMammoth(arrayBuffer) {
+    if (!window.mammoth?.extractRawText) throw new Error('Mammoth 不可用');
+    const result = await window.mammoth.extractRawText({ arrayBuffer: arrayBuffer.slice(0) });
+    return (result.value || '').trim();
+  }
+
+  function extractXlsxTextWithSheetJs(arrayBuffer) {
+    if (!window.XLSX?.read) throw new Error('SheetJS 不可用');
+    const workbook = window.XLSX.read(arrayBuffer, { type: 'array' });
+    return workbook.SheetNames.map(name => {
+      const csv = window.XLSX.utils.sheet_to_csv(workbook.Sheets[name], { blankrows: false }).trim();
+      return csv ? `## ${name}\n${csv}` : '';
+    }).filter(Boolean).join('\n\n').trim();
+  }
+
+  async function readZipEntriesWithJsZip(arrayBuffer, wantedNames) {
+    if (!window.JSZip?.loadAsync) throw new Error('JSZip 不可用');
+    const zip = await window.JSZip.loadAsync(arrayBuffer);
+    const entries = new Map();
+    for (const name of wantedNames) {
+      const item = zip.file(name);
+      if (item) entries.set(name, await item.async('string'));
+    }
+    return entries;
+  }
+
+  async function extractZipXmlText(arrayBuffer, wantedNames) {
+    return readZipEntriesWithJsZip(arrayBuffer, wantedNames);
+  }
+
+  function rowsToCsv(rows) {
+    return rows
+      .filter(row => row.some(cell => String(cell || '').trim()))
+      .map(row => row.map(cell => {
+        const value = String(cell || '').replace(/\s+/g, ' ').trim();
+        return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+      }).join(','))
+      .join('\n');
+  }
+
+  function columnNameToIndex(name) {
+    let index = 0;
+    for (const char of name) index = index * 26 + char.charCodeAt(0) - 64;
+    return index - 1;
+  }
+
+  function extractXlsxText(entries) {
+    const sharedXml = entries.get('xl/sharedStrings.xml') || '';
+    const sharedStrings = Array.from(sharedXml.matchAll(/<si\b[\s\S]*?<\/si>/g)).map(match => xmlTextContent(match[0]));
+    const sheetRows = [];
+    for (const [name, xml] of entries) {
+      if (!/^xl\/worksheets\/sheet\d+\.xml$/.test(name)) continue;
+      const rows = [];
+      for (const rowMatch of xml.matchAll(/<row\b[\s\S]*?<\/row>/g)) {
+        const row = [];
+        for (const cellMatch of rowMatch[0].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>/g)) {
+          const attrs = cellMatch[1];
+          const body = cellMatch[2];
+          const ref = attrs.match(/\br="([A-Z]+)\d+"/)?.[1];
+          const col = ref ? columnNameToIndex(ref) : row.length;
+          const type = attrs.match(/\bt="([^"]+)"/)?.[1] || '';
+          let value = '';
+          if (type === 'inlineStr') value = xmlTextContent(body);
+          else {
+            const raw = body.match(/<v>([\s\S]*?)<\/v>/)?.[1] || '';
+            value = type === 's' ? (sharedStrings[Number(raw)] || '') : raw;
+          }
+          row[col] = value;
+        }
+        rows.push(row);
+      }
+      const csv = rowsToCsv(rows);
+      if (csv) sheetRows.push(`## ${name.split('/').pop()}\n${csv}`);
+    }
+    return sheetRows.join('\n\n').trim();
+  }
+
+  async function extractDocumentText(file, arrayBuffer) {
+    const ext = fileExtension(file.name);
+    if (ext === 'rtf') return { text: rtfToText(new TextDecoder().decode(arrayBuffer)), label: 'RTF 提取文本' };
+    if (ext === 'pdf') {
+      try {
+        const text = await extractPdfTextWithPdfJs(arrayBuffer);
+        if (text) return { text, label: 'PDF.js 提取文本' };
+      } catch (err) {
+        throw new Error(err?.message || 'PDF.js 提取失败');
+      }
+      return { text: '', label: 'PDF.js 提取文本' };
+    }
+
+    if (ext === 'docx') {
+      try {
+        const text = await extractDocxTextWithMammoth(arrayBuffer);
+        if (text) return { text, label: 'Mammoth 提取文本' };
+      } catch { /* fall back to XML extraction */ }
+      const entries = await extractZipXmlText(arrayBuffer, ['word/document.xml']);
+      return { text: xmlTextContent(entries.get('word/document.xml')), label: 'DOCX 提取文本' };
+    }
+    if (ext === 'odt') {
+      const entries = await extractZipXmlText(arrayBuffer, ['content.xml']);
+      return { text: xmlTextContent(entries.get('content.xml')), label: 'ODT 提取文本' };
+    }
+    if (ext === 'pptx') {
+      const wanted = [];
+      for (let i = 1; i <= 120; i++) wanted.push(`ppt/slides/slide${i}.xml`);
+      const entries = await extractZipXmlText(arrayBuffer, wanted);
+      const slides = [];
+      for (const [name, xml] of entries) {
+        const text = xmlTextContent(xml);
+        if (text) slides.push(`## ${name.split('/').pop()}\n${text}`);
+      }
+      return { text: slides.join('\n\n'), label: 'PPTX 提取文本' };
+    }
+    if (ext === 'xlsx') {
+      try {
+        const text = extractXlsxTextWithSheetJs(arrayBuffer);
+        if (text) return { text, label: 'SheetJS 提取表格' };
+      } catch { /* fall back to XML extraction */ }
+      const wanted = ['xl/sharedStrings.xml'];
+      for (let i = 1; i <= 80; i++) wanted.push(`xl/worksheets/sheet${i}.xml`);
+      const entries = await extractZipXmlText(arrayBuffer, wanted);
+      return { text: extractXlsxText(entries), label: 'XLSX 提取文本' };
+    }
+    return { text: '', label: '' };
+  }
+
+  async function readAttachment(file) {
+    const readAsDataUrl = () => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = ev => resolve(ev.target.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    const readAsText = () => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = ev => resolve(ev.target.result);
+      reader.onerror = reject;
+      reader.readAsText(file);
+    });
+    const readAsArrayBuffer = () => new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = ev => resolve(ev.target.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+
+    if (isImageFile(file)) {
+      return { base64: await readAsDataUrl() };
+    }
+    if (isTextFile(file)) {
+      return { text: await readAsText(), extractionLabel: '文本文件' };
+    }
+    if (isExtractableFile(file) || isPdfFile(file)) {
+      const extracted = await extractDocumentText(file, await readAsArrayBuffer());
+      if (!extracted.text.trim()) {
+        throw new Error(isPdfFile(file) ? '未提取到文本，可能是扫描版 PDF' : '未提取到文本');
+      }
+      if (storedTextBytes(extracted.text) > TEXT_FILE_INLINE_MAX_BYTES) {
+        throw new Error(`提取文本超过 ${formatBytes(TEXT_FILE_INLINE_MAX_BYTES)}`);
+      }
+      return { text: extracted.text, extractionLabel: extracted.label };
+    }
+    throw new Error('不支持');
+  }
+
+  window.OwnChatAttachments = {
+    limits: {
+      textInlineMaxBytes: TEXT_FILE_INLINE_MAX_BYTES,
+      extractableFileMaxBytes: EXTRACTABLE_FILE_MAX_BYTES,
+      pdfTextExtractMaxBytes: PDF_TEXT_EXTRACT_MAX_BYTES,
+    },
+    isTextFile,
+    createPendingEntry,
+    isReady,
+    hasError,
+    isLoading,
+    storedTextBytes,
+    formatBytes,
+    readIntoEntry,
+    validateReadyFiles,
+    fileTextInline,
+    messageFromReadyFiles,
+    apiMessagesFromPromptMessages,
+  };
+})();
+
+// ===== Persistence DB =====
+(function () {
+  'use strict';
+
+  const IMAGE_DB = { name: 'ownchat_image_db', version: 3, store: 'jobs', fileStore: 'files' };
+  const STREAM_KEY = 'active_stream';
+  const IMAGE_KEY = 'active_image';
+  const STREAM_DB_NAME = 'ownchat_stream_db';
+  const STREAM_DB_VERSION = 2;
+  const STREAM_STORE = 'sessions';
+
+  let imageDbPromise = null;
+  let imageDbWarned = false;
+  let imageSaveErrorHandler = null;
+  let streamDbPromise = null;
+
+  function setImageSaveErrorHandler(handler) {
+    imageSaveErrorHandler = typeof handler === 'function' ? handler : null;
+  }
+
+  function idbRequest(req, fallback = null) {
+    return new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result ?? fallback);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbTxDone(tx) {
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  }
+
+  function openImageDb() {
+    if (imageDbPromise) return imageDbPromise;
+    imageDbPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        reject(new Error('IndexedDB unavailable'));
+        return;
+      }
+      const req = indexedDB.open(IMAGE_DB.name, IMAGE_DB.version);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IMAGE_DB.store)) {
+          const store = db.createObjectStore(IMAGE_DB.store, { keyPath: 'id' });
+          store.createIndex('createdAt', 'createdAt');
+        }
+        if (!db.objectStoreNames.contains(IMAGE_DB.fileStore)) {
+          db.createObjectStore(IMAGE_DB.fileStore, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return imageDbPromise;
+  }
+
+  async function imageDbGetAllJobs() {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.store, 'readonly');
+      const jobs = await idbRequest(tx.objectStore(IMAGE_DB.store).getAll(), []);
+      return jobs.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+    } catch (error) {
+      console.warn('Image history load failed:', error);
+      return [];
+    }
+  }
+
+  async function imageDbPutJob(job) {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.store, 'readwrite');
+      tx.objectStore(IMAGE_DB.store).put(job);
+      await idbTxDone(tx);
+    } catch (error) {
+      console.warn('Image history save failed:', error);
+      if (!imageDbWarned) {
+        imageDbWarned = true;
+        if (imageSaveErrorHandler) imageSaveErrorHandler(error);
+      }
+    }
+  }
+
+  async function imageDbDeleteJob(id) {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.store, 'readwrite');
+      tx.objectStore(IMAGE_DB.store).delete(id);
+      await idbTxDone(tx);
+    } catch (error) {
+      console.warn('Image history delete failed:', error);
+    }
+  }
+
+  async function imageDbClearJobs() {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.store, 'readwrite');
+      tx.objectStore(IMAGE_DB.store).clear();
+      await idbTxDone(tx);
+    } catch (error) {
+      console.warn('Image history clear failed:', error);
+    }
+  }
+
+  async function fileDbPut(attachmentRecord) {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
+      tx.objectStore(IMAGE_DB.fileStore).put(attachmentRecord);
+      await idbTxDone(tx);
+      return true;
+    } catch (error) {
+      console.warn('File attachment save failed:', error);
+      return false;
+    }
+  }
+
+  async function fileDbGetAll() {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.fileStore, 'readonly');
+      return await idbRequest(tx.objectStore(IMAGE_DB.fileStore).getAll(), []);
+    } catch (error) {
+      console.warn('File attachments load failed:', error);
+      return [];
+    }
+  }
+
+  async function fileDbDelete(id) {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
+      tx.objectStore(IMAGE_DB.fileStore).delete(id);
+      await idbTxDone(tx);
+    } catch (error) {
+      console.warn('File attachment delete failed:', error);
+    }
+  }
+
+  async function fileDbClearAll() {
+    try {
+      const db = await openImageDb();
+      const tx = db.transaction(IMAGE_DB.fileStore, 'readwrite');
+      tx.objectStore(IMAGE_DB.fileStore).clear();
+      await idbTxDone(tx);
+    } catch (error) {
+      console.warn('File attachments clear failed:', error);
+    }
+  }
+
+  function openStreamDb() {
+    if (streamDbPromise) return streamDbPromise;
+    streamDbPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        reject(new Error('IndexedDB unavailable'));
+        return;
+      }
+      const req = indexedDB.open(STREAM_DB_NAME, STREAM_DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STREAM_STORE)) {
+          db.createObjectStore(STREAM_STORE, { keyPath: 'id' });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    return streamDbPromise;
+  }
+
+  async function writeStreamSession(meta) {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).put(Object.assign({ id: STREAM_KEY, assistantContent: '', reasoningContent: '', status: 'streaming', updatedAt: Date.now() }, meta));
+      await idbTxDone(tx);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function getStreamSession() {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readonly');
+      return await idbRequest(tx.objectStore(STREAM_STORE).get(STREAM_KEY), null);
+    } catch {
+      return null;
+    }
+  }
+
+  async function getStableStreamSession(baseSession) {
+    if (!baseSession || !['complete', 'error', 'stopped'].includes(baseSession.status)) return baseSession;
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const latest = await getStreamSession();
+    if (!latest || (latest.convId && baseSession.convId && latest.convId !== baseSession.convId)) return baseSession;
+    return Object.assign({}, baseSession, latest);
+  }
+
+  async function clearStreamSession() {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).delete(STREAM_KEY);
+      await idbTxDone(tx);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function getImageSession() {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readonly');
+      return normalizeImageSession(await idbRequest(tx.objectStore(STREAM_STORE).get(IMAGE_KEY), null));
+    } catch {
+      return null;
+    }
+  }
+
+  function normalizeImageSession(session) {
+    if (!session) return null;
+    if ((session.status === 'connecting' || session.status === 'streaming')) {
+      if (typeof session.outputs === 'string' && session.outputs.trim()) {
+        return Object.assign({}, session, { status: 'complete' });
+      }
+      if (session.error) {
+        return Object.assign({}, session, { status: 'error' });
+      }
+    }
+    return session;
+  }
+
+  function parseImageSessionOutputs(session) {
+    try {
+      const raw = session?.outputs;
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw !== 'string' || !raw.trim()) return [];
+      const outputs = JSON.parse(raw);
+      return Array.isArray(outputs) ? outputs : [];
+    } catch {
+      return [];
+    }
+  }
+
+  async function clearImageSession() {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).delete(IMAGE_KEY);
+      await idbTxDone(tx);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function clearImageSessionForJob(jobId, statuses = []) {
+    try {
+      const session = await getImageSession();
+      if (!session || session.jobId !== jobId) return;
+      if (statuses.length && !statuses.includes(session.status)) return;
+      await clearImageSession();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function writeImageSession(meta) {
+    try {
+      const db = await openStreamDb();
+      const tx = db.transaction(STREAM_STORE, 'readwrite');
+      tx.objectStore(STREAM_STORE).put(Object.assign({ id: IMAGE_KEY, status: 'stopped', updatedAt: Date.now() }, meta));
+      await idbTxDone(tx);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  function collectConversationFileIds(conversations) {
+    const ids = new Set();
+    for (const conv of conversations || []) {
+      if (!conv) continue;
+      for (const msg of conv.messages || []) {
+        if (Array.isArray(msg.files)) {
+          msg.files.forEach(file => {
+            if (file?.fileId) ids.add(file.fileId);
+          });
+        }
+        if (Array.isArray(msg.content)) {
+          msg.content.forEach(part => {
+            const fileId = part?.type === 'image_url' ? part.image_url?.fileId : null;
+            if (fileId) ids.add(fileId);
+          });
+        }
+      }
+    }
+    return Array.from(ids);
+  }
+
+  function collectDeletedOnlyFileIds(deletedConversations, remainingConversations) {
+    const deletedIds = new Set(collectConversationFileIds(deletedConversations));
+    const remainingIds = new Set(collectConversationFileIds(remainingConversations));
+    return Array.from(deletedIds).filter(id => !remainingIds.has(id));
+  }
+
+  function generateFileId(convId, msgIndex, partIndex) {
+    return `${convId}_${msgIndex}_${partIndex}`;
+  }
+
+  function stripFilesFromConversations(conversations) {
+    const Attachments = window.OwnChatAttachments;
+    const fileMap = [];
+    const queuedFileIds = new Set();
+    const queueFile = attachmentRecord => {
+      if (!attachmentRecord?.id || queuedFileIds.has(attachmentRecord.id)) return;
+      queuedFileIds.add(attachmentRecord.id);
+      fileMap.push(attachmentRecord);
+    };
+    const stripped = conversations.map(conv => {
+      const strippedConv = Object.assign({}, conv);
+      strippedConv.messages = conv.messages.map((msg, msgIdx) => {
+        const imageFileIds = [];
+        const textFileRefs = [];
+        let changed = false;
+        const strippedMsg = Object.assign({}, msg);
+        if (msg.files && msg.files.length) {
+          strippedMsg.files = msg.files.map((file, fileIdx) => {
+            const fileId = file.fileId || generateFileId(conv.id, msgIdx, fileIdx);
+            if (file.base64) {
+              queueFile({ id: fileId, base64: file.base64, name: file.name, type: file.type, size: file.size });
+              imageFileIds.push(fileId);
+              changed = true;
+              return { name: file.name, type: file.type, size: file.size, fileId };
+            }
+            if (typeof file.text === 'string') {
+              const ref = { fileId, name: file.name, type: file.type, size: file.size, text: file.text, extractionLabel: file.extractionLabel };
+              queueFile({ id: fileId, text: file.text, extractionLabel: file.extractionLabel, name: file.name, type: file.type, size: file.size });
+              textFileRefs.push(ref);
+              changed = true;
+              return { name: file.name, type: file.type, size: file.size, fileId, extractionLabel: file.extractionLabel };
+            }
+            if (file.fileId) {
+              if ((file.type || '').startsWith('image/')) imageFileIds.push(file.fileId);
+              else textFileRefs.push({ fileId: file.fileId, name: file.name, type: file.type, size: file.size, text: file.text, extractionLabel: file.extractionLabel });
+            }
+            return file;
+          });
+        }
+        if (Array.isArray(msg.content)) {
+          let imageIdx = 0;
+          let textIdx = 0;
+          strippedMsg.content = msg.content.map((part, partIdx) => {
+            if (part.type === 'image_url' && part.image_url?.url?.startsWith('data:')) {
+              const fileId = part.image_url.fileId || imageFileIds[imageIdx] || generateFileId(conv.id, msgIdx, partIdx);
+              imageIdx += 1;
+              queueFile({ id: fileId, base64: part.image_url.url, name: '', type: 'image_url' });
+              changed = true;
+              return Object.assign({}, part, { image_url: { url: fileId, fileId } });
+            }
+            if (part.type === 'image_url' && part.image_url?.fileId) imageIdx += 1;
+            if (part.type === 'text' && partIdx > 0 && textIdx < textFileRefs.length) {
+              const ref = textFileRefs[textIdx];
+              const expectedText = typeof ref.text === 'string' && Attachments?.fileTextInline ? Attachments.fileTextInline(ref) : '';
+              if (expectedText && part.text === expectedText) {
+                textIdx += 1;
+                changed = true;
+                return {
+                  type: 'text',
+                  text: `[文件: ${ref.name || '附件'}]\n附件文本已移至本地索引，加载后会自动恢复。`,
+                  attachmentFileId: ref.fileId,
+                };
+              }
+            }
+            return part;
+          });
+        }
+        return changed ? strippedMsg : msg;
+      });
+      return strippedConv;
+    });
+    return { stripped, fileMap };
+  }
+
+  async function hydrateFilesInConversations(conversations) {
+    const Attachments = window.OwnChatAttachments;
+    const allFiles = await fileDbGetAll();
+    const fileById = new Map(allFiles.map(file => [file.id, file]));
+    for (const conv of conversations) {
+      for (const msg of conv.messages) {
+        if (msg.files && msg.files.length) {
+          for (const file of msg.files) {
+            if (file.fileId) {
+              const stored = fileById.get(file.fileId);
+              if (stored) {
+                if (stored.base64) file.base64 = stored.base64;
+                if (stored.text && !file.text) file.text = stored.text;
+                if (stored.extractionLabel && !file.extractionLabel) file.extractionLabel = stored.extractionLabel;
+                delete file.missing;
+              } else {
+                file.missing = true;
+              }
+            }
+          }
+        }
+        if (Array.isArray(msg.content)) {
+          for (const part of msg.content) {
+            if (part.type === 'image_url' && part.image_url?.fileId) {
+              const stored = fileById.get(part.image_url.fileId);
+              if (stored) {
+                part.image_url.url = stored.base64;
+                delete part.image_url.missing;
+              } else {
+                part.image_url.missing = true;
+              }
+            }
+            if (part.type === 'text' && part.attachmentFileId) {
+              const stored = fileById.get(part.attachmentFileId);
+              if (stored?.text && Attachments?.fileTextInline) {
+                part.text = Attachments.fileTextInline(stored);
+                delete part.missing;
+              } else {
+                part.missing = true;
+              }
+            }
+          }
+        }
+      }
+    }
+    return conversations;
+  }
+
+  window.OwnChatDb = {
+    IMAGE_KEY,
+    setImageSaveErrorHandler,
+    imageDbGetAllJobs,
+    imageDbPutJob,
+    imageDbDeleteJob,
+    imageDbClearJobs,
+    fileDbPut,
+    fileDbGetAll,
+    fileDbDelete,
+    fileDbClearAll,
+    writeStreamSession,
+    getStreamSession,
+    getStableStreamSession,
+    clearStreamSession,
+    getImageSession,
+    normalizeImageSession,
+    parseImageSessionOutputs,
+    clearImageSession,
+    clearImageSessionForJob,
+    writeImageSession,
+    collectConversationFileIds,
+    collectDeletedOnlyFileIds,
+    stripFilesFromConversations,
+    hydrateFilesInConversations,
+  };
+})();
+
+// ===== API Client =====
+(function () {
+  'use strict';
+
+  function normalizeUrl(u) {
+    u = (u || '').trim();
+    if (!u) throw new Error('Base URL 不能为空');
+    if (!/^(https?:\/\/|\/)/i.test(u)) throw new Error('Base URL 需要以 http://、https:// 或 / 开头');
+    u = u.replace(/\/+$/, '');
+    if (!u.endsWith('/v1')) u += '/v1';
+    return u;
+  }
+
+  function requestUrl(baseUrl, path) {
+    return normalizeUrl(baseUrl) + path;
+  }
+
+  function describeNetworkError(err, url) {
+    const msg = err?.message || String(err);
+    if (!/Failed to fetch|NetworkError|Load failed|fetch/i.test(msg)) return err;
+    let target = url;
+    try { target = new URL(url, window.location.href).origin; } catch { /* keep raw url */ }
+    const hints = [`浏览器没有拿到 ${target} 的可用响应`];
+    try {
+      const parsed = new URL(url, window.location.href);
+      if (window.location.protocol === 'https:' && parsed.protocol === 'http:') {
+        hints.push('当前页面是 HTTPS，但接口是 HTTP，浏览器会拦截混合内容');
+      }
+      if (parsed.origin !== window.location.origin) {
+        hints.push('这是跨域请求，如 Network 面板显示 CORS 错误才需要检查 Access-Control-Allow-Origin');
+      }
+      if (/api\.openai\.com$/i.test(parsed.hostname)) {
+        hints.push('浏览器直连 OpenAI API 容易被 CORS 拦截，建议通过本地或服务端代理转发');
+      }
+    } catch { /* ignore */ }
+    if (window.location.protocol === 'file:') {
+      hints.push('当前是 file:// 打开页面，建议用本地静态服务访问页面');
+    }
+    const message = `网络请求失败：${hints.join('；')}。请检查 Base URL、代理服务和浏览器控制台 Network 面板。`;
+    const error = new Error(message);
+    error.diagnostics = [
+      `请求地址: ${url}`,
+      `页面地址: ${window.location.href}`,
+      `原始错误: ${msg}`,
+      `排查建议: ${hints.join('；')}`,
+    ].join('\n');
+    return error;
+  }
+
+  function httpError(status, message, url, context = {}) {
+    const error = new Error(message || `HTTP ${status}`);
+    error.diagnostics = [
+      `请求地址: ${url}`,
+      `HTTP 状态: ${status}`,
+      `错误信息: ${message || `HTTP ${status}`}`,
+      `当前模式: ${context.mode || '未知'}`,
+      `对话模型: ${context.chatModel || '未配置'}`,
+      `绘画模型: ${context.imageModel || '未配置'}`,
+    ].join('\n');
+    return error;
+  }
+
+  async function apiFetch(url, options = {}) {
+    try {
+      return await fetch(url, options);
+    } catch (err) {
+      if (err?.name === 'AbortError') throw err;
+      throw describeNetworkError(err, url);
+    }
+  }
+
+  window.OwnChatApi = {
+    normalizeUrl,
+    requestUrl,
+    describeNetworkError,
+    httpError,
+    apiFetch,
+  };
+})();
+
+// ===== Service Worker Client =====
+(function () {
+  'use strict';
+
+  let registrationPromise = null;
+
+  function canUseServiceWorker() {
+    return 'serviceWorker' in navigator && window.location.protocol !== 'file:';
+  }
+
+  function register() {
+    if (!canUseServiceWorker()) return Promise.resolve(null);
+    if (!registrationPromise) {
+      registrationPromise = navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(e => {
+        console.warn('SW registration failed:', e);
+        return null;
+      });
+    }
+    return registrationPromise;
+  }
+
+  async function ensureTarget(timeoutMs = 5000) {
+    if (!canUseServiceWorker()) return null;
+    if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
+
+    const registration = await register();
+    if (navigator.serviceWorker.controller) return navigator.serviceWorker.controller;
+    if (registration?.active) return registration.active;
+
+    return new Promise(resolve => {
+      let done = false;
+      const finish = target => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        navigator.serviceWorker.removeEventListener('controllerchange', onControllerChange);
+        resolve(target || navigator.serviceWorker.controller || null);
+      };
+      const onControllerChange = () => finish(navigator.serviceWorker.controller);
+      const timer = setTimeout(() => finish(null), timeoutMs);
+      navigator.serviceWorker.addEventListener('controllerchange', onControllerChange);
+      navigator.serviceWorker.ready.then(reg => {
+        finish(navigator.serviceWorker.controller || reg.active || null);
+      }).catch(() => finish(null));
+    });
+  }
+
+  window.OwnChatServiceWorker = {
+    canUseServiceWorker,
+    register,
+    ensureTarget,
+  };
+})();
+
+// ===== Config Import =====
+(function () {
+  'use strict';
+
+  const CONFIG_QUERY_KEYS = ['config', 'config_b64', 'oc_config', 'oc_config_b64'];
+
+  function cleanUrl() {
+    if (!window.history?.replaceState) return;
+    const url = new URL(window.location.href);
+    CONFIG_QUERY_KEYS.forEach(k => url.searchParams.delete(k));
+    window.history.replaceState({}, document.title, url.href);
+  }
+
+  function decodeBase64Url(value) {
+    const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+    return decodeURIComponent(Array.from(atob(padded), c => `%${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join(''));
+  }
+
+  function stringValue(...values) {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim()) return value.trim();
+    }
+    return '';
+  }
+
+  function arrayValue(value) {
+    return Array.isArray(value) ? value.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()) : [];
+  }
+
+  function mergeUnique(...lists) {
+    return Array.from(new Set(lists.flat().filter(Boolean)));
+  }
+
+  function parse(text) {
+    const cfg = JSON.parse(text);
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) throw new Error('配置必须是 JSON 对象');
+    return cfg;
+  }
+
+  function summary(cfg) {
+    const chat = cfg.chat && typeof cfg.chat === 'object' ? cfg.chat : {};
+    const image = cfg.image && typeof cfg.image === 'object' ? cfg.image : {};
+    return {
+      chatBaseUrl: stringValue(chat.baseUrl, chat.base_url, cfg.baseUrl, cfg.base_url),
+      chatApiKey: stringValue(chat.apiKey, chat.api_key, cfg.apiKey, cfg.api_key),
+      chatModel: stringValue(chat.model, cfg.model),
+      imageBaseUrl: stringValue(image.baseUrl, image.base_url, cfg.imageBaseUrl, cfg.image_base_url),
+      imageApiKey: stringValue(image.apiKey, image.api_key, cfg.imageApiKey, cfg.image_api_key),
+      imageModel: stringValue(image.model, cfg.imageModel, cfg.image_model),
+      imageMapModel: stringValue(image.mapModel, image.map_model, cfg.imageMapModel, cfg.image_map_model),
+      imagePromptModel: stringValue(image.promptModel, image.prompt_model, cfg.imagePromptModel, cfg.image_prompt_model),
+      mode: stringValue(cfg.mode),
+      imageDefaults: image.defaults && typeof image.defaults === 'object' ? image.defaults : null,
+      chatModels: mergeUnique(arrayValue(chat.models), arrayValue(cfg.models)),
+      imageModels: mergeUnique(arrayValue(image.models), arrayValue(cfg.imageModels), arrayValue(cfg.image_models)),
+      hasImageMapModel: 'mapModel' in image || 'map_model' in image || 'imageMapModel' in cfg || 'image_map_model' in cfg,
+      hasImagePromptModel: 'promptModel' in image || 'prompt_model' in image || 'imagePromptModel' in cfg || 'image_prompt_model' in cfg,
+    };
+  }
+
+  function maskKey(value) {
+    if (!value) return '未提供';
+    if (value.length <= 10) return `${value.slice(0, 3)}***`;
+    return `${value.slice(0, 6)}...${value.slice(-4)}`;
+  }
+
+  function fromCurrentUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('config') || params.get('oc_config');
+    const rawB64 = params.get('config_b64') || params.get('oc_config_b64');
+    if (!raw && !rawB64) return null;
+    return parse(rawB64 ? decodeBase64Url(rawB64) : raw);
+  }
+
+  window.OwnChatConfigImport = {
+    cleanUrl,
+    decodeBase64Url,
+    parse,
+    summary,
+    maskKey,
+    fromCurrentUrl,
+  };
+})();
+
+// ===== UI Utilities =====
+(function () {
+  'use strict';
+
+  const icons = {
+    person: '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>',
+    copy: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    refresh: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-8.36L23 10"/></svg>',
+    edit: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+    download: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+    maximize: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>',
+    aiAvatar: '<div class="ai-avatar" aria-label="AI"></div>',
+  };
+
+  let dialogReturnFocus = null;
+
+  function copyText(text, onSuccess, onFailure) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(onSuccess).catch(() => fallbackCopy(text, onSuccess, onFailure));
+    } else {
+      fallbackCopy(text, onSuccess, onFailure);
+    }
+  }
+
+  function fallbackCopy(text, onSuccess, onFailure) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      document.execCommand('copy');
+      if (typeof onSuccess === 'function') onSuccess();
+    } catch {
+      if (typeof onFailure === 'function') onFailure();
+    }
+    document.body.removeChild(ta);
+  }
+
+  function closeCopyMenus(root) {
+    root?.querySelectorAll('.copy-menu.open').forEach(menu => menu.classList.remove('open'));
+  }
+
+  function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function showDialog(modal) {
+    if (!modal) return;
+    dialogReturnFocus = document.activeElement;
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(() => modal.focus({ preventScroll: true }));
+  }
+
+  function hideDialog(modal) {
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.setAttribute('aria-hidden', 'true');
+    const focusTarget = dialogReturnFocus;
+    dialogReturnFocus = null;
+    if (focusTarget && typeof focusTarget.focus === 'function') {
+      requestAnimationFrame(() => focusTarget.focus({ preventScroll: true }));
+    }
+  }
+
+  function openDialog(modals) {
+    return (modals || []).find(modal => modal && !modal.classList.contains('hidden')) || null;
+  }
+
+  function trapDialogFocus(event, modal) {
+    const focusable = Array.from(modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'))
+      .filter(el => !el.disabled && el.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
+  window.OwnChatUiUtils = {
+    copyText,
+    fallbackCopy,
+    closeCopyMenus,
+    downloadJson,
+  };
+  window.OwnChatDialogs = {
+    show: showDialog,
+    hide: hideDialog,
+    open: openDialog,
+    trapFocus: trapDialogFocus,
+  };
+  window.OwnChatIcons = icons;
+})();
+
+// ===== Image Core =====
+(function () {
+  'use strict';
+
+  const Shared = window.OwnChatImageShared;
+
+  function imageReferenceList(refs, maxRefs = Infinity) {
+    const list = Array.isArray(refs) ? refs.slice() : (refs ? [refs] : []);
+    return list.filter(ref => ref?.base64).slice(0, maxRefs);
+  }
+
+  function imageReferencePayload(refs, maxRefs = Infinity) {
+    return imageReferenceList(refs, maxRefs).map(ref => ({
+      name: ref.name,
+      type: ref.type,
+      base64: ref.base64,
+    }));
+  }
+
+  function imageJobReplies(job) {
+    if (!job) return [];
+    return Array.isArray(job.replies) ? job.replies : [];
+  }
+
+  function ensureImageJobReplies(job) {
+    if (!job) return [];
+    if (!Array.isArray(job.replies)) job.replies = [];
+    return job.replies;
+  }
+
+  function currentImageActiveReply(job) {
+    const replies = ensureImageJobReplies(job);
+    return replies.find(reply => reply.status === 'generating') || replies[replies.length - 1] || null;
+  }
+
+  function imageReplyOutput(job, replyIndex, outputIndex) {
+    const reply = imageJobReplies(job)[Number.isFinite(replyIndex) ? replyIndex : 0];
+    return {
+      reply,
+      out: reply?.outputs?.[Number.isFinite(outputIndex) ? outputIndex : 0],
+    };
+  }
+
+  function normalizeImageFormat(format) {
+    return Shared.normalizeImageFormat(format);
+  }
+
+  function normalizeImageModel(model) {
+    return Shared.normalizeImageModel(model);
+  }
+
+  function imageModelDisallowsTransparentBackground(model) {
+    return Shared.imageModelDisallowsTransparentBackground(model);
+  }
+
+  function imageBackgroundSupported(model, background) {
+    return Shared.imageBackgroundSupported(model, background);
+  }
+
+  function sanitizeImageParamsForModel(model, params = {}) {
+    return Shared.sanitizeImageParamsForModel(model, params);
+  }
+
+  function dataUrlForImage(out, fallbackFormat) {
+    if (!out) return '';
+    const format = normalizeImageFormat(out.format || fallbackFormat || 'png') || 'png';
+    if (out.url) {
+      const sanitizeUrl = window.OwnChatMarkdown?.sanitizeUrl || (url => url);
+      return sanitizeUrl(out.url, { image: true });
+    }
+    return `data:image/${format};base64,${out.b64 || ''}`;
+  }
+
+  function imageByteSize(out) {
+    if (Number.isFinite(out?.bytes)) return out.bytes;
+    if (!out?.b64) return 0;
+    const clean = out.b64.replace(/\s/g, '');
+    const padding = clean.endsWith('==') ? 2 : clean.endsWith('=') ? 1 : 0;
+    return Math.max(0, Math.floor(clean.length * 3 / 4) - padding);
+  }
+
+  function imageOutputMeta(out, fallbackFormat) {
+    const size = out?.width && out?.height ? `${out.width}x${out.height}` : '尺寸读取中';
+    const format = normalizeImageFormat(out?.format || fallbackFormat || '') || '未知格式';
+    const bytes = window.OwnChatAttachments?.formatBytes?.(imageByteSize(out)) || '大小未知';
+    return [size, format.toUpperCase(), bytes].filter(Boolean);
+  }
+
+  function normalizeImageUsage(usage) {
+    return Shared.normalizeImageUsage(usage);
+  }
+
+  function imageUsageMeta(usage) {
+    const normalized = normalizeImageUsage(usage);
+    if (!normalized) return [];
+    const formatCount = value => window.OwnChatTokens?.formatTokenCount?.(value) || String(value);
+    const primary = Number.isFinite(normalized.total)
+      ? normalized.total
+      : (Number.isFinite(normalized.output) ? normalized.output : normalized.input);
+    if (!Number.isFinite(primary)) return [];
+    const parts = [];
+    if (Number.isFinite(normalized.input)) parts.push(`输入 ${formatCount(normalized.input)}`);
+    if (Number.isFinite(normalized.output)) parts.push(`输出 ${formatCount(normalized.output)}`);
+    if (Number.isFinite(normalized.total)) parts.push(`总计 ${formatCount(normalized.total)}`);
+    return [{
+      text: `Tokens ${formatCount(primary)}`,
+      title: parts.join(' / '),
+    }];
+  }
+
+  function imageResponseResult(outputs, usage = null) {
+    return {
+      outputs: Array.isArray(outputs) ? outputs : [],
+      usage: normalizeImageUsage(usage),
+    };
+  }
+
+  function imageResultOutputs(result) {
+    if (Array.isArray(result)) return result;
+    return Array.isArray(result?.outputs) ? result.outputs : [];
+  }
+
+  function imageResultUsage(result) {
+    return normalizeImageUsage(result?.usage);
+  }
+
+  function safeFileStem(value, fallback, maxLength = 60) {
+    return (value || fallback).replace(/[\\/:*?"<>|]+/g, '-').slice(0, maxLength) || fallback;
+  }
+
+  function imageFilename(job, out) {
+    const ext = out?.format || job?.params?.outputFormat || 'png';
+    return `${safeFileStem(job?.title, 'ownchat-image')}.${ext}`;
+  }
+
+  function attachmentImageFilename(item) {
+    const fallback = `attachment.${item?.format || 'png'}`;
+    return safeFileStem(item?.name, fallback, 80);
+  }
+
+  function imageViewerItemsForJob(job, scope = 'outputs', maxRefs = Infinity) {
+    if (!job) return [];
+    const items = [];
+    imageJobReplies(job).forEach((reply, replyIndex) => {
+      if (scope === 'inputs') {
+        imageReferencePayload(reply.inputImages || job.inputImages, maxRefs).forEach((inputImage, refIndex) => {
+          const format = (inputImage.type || '').replace(/^image\//, '') || (reply.params || job.params)?.outputFormat || 'png';
+          items.push({
+            jobId: job.id,
+            inputRef: true,
+            inputImage,
+            replyIndex,
+            refIndex,
+            src: inputImage.base64,
+            out: { b64: inputImage.base64.split(',').pop(), format },
+          });
+        });
+      }
+      if (scope !== 'outputs') return;
+      (reply.outputs || []).forEach((output, index) => {
+        items.push({
+          jobId: job.id,
+          replyIndex,
+          index,
+          src: dataUrlForImage(output, (reply.params || job.params)?.outputFormat),
+          out: output,
+        });
+      });
+    });
+    return items;
+  }
+
+  function estimateImageSeconds(params = {}, refs = []) {
+    const qualityFactor = params.quality === 'high' ? 130 : params.quality === 'medium' ? 95 : params.quality === 'low' ? 60 : 90;
+    const sizeFactor = params.size === '3840x2160' || params.size === '2160x3840'
+      ? 95
+      : params.size === '1536x1024' || params.size === '1024x1536'
+        ? 35
+        : params.size === 'auto' ? 15 : 20;
+    const editFactor = (Array.isArray(refs) ? refs.length > 0 : !!refs) ? 35 : 0;
+    return Math.max(60, qualityFactor + sizeFactor + editFactor);
+  }
+
+  function formatDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    const seconds = Math.round(ms / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const restSeconds = seconds % 60;
+    return restSeconds ? `${minutes}m ${restSeconds}s` : `${minutes}m`;
+  }
+
+  function formatDateTime(ts) {
+    const date = new Date(ts || Date.now());
+    const pad = value => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+
+  function imageTimeoutMs(params, refs = []) {
+    return Math.max(30 * 60 * 1000, estimateImageSeconds(params, refs) * 1000 * 3);
+  }
+
+  function imageStaleTimeoutMs() {
+    return 10 * 60 * 1000;
+  }
+
+  function imageJobDuration(job, activeReply, startedAt = null) {
+    return Date.now() - (startedAt || activeReply?.startedAt || job?.startedAt || job?.createdAt || Date.now());
+  }
+
+  function setImageJobDone(job, activeReply, outputs, startedAt = null, usage = null) {
+    const normalizedUsage = normalizeImageUsage(usage);
+    activeReply.outputs = outputs;
+    activeReply.usage = normalizedUsage;
+    activeReply.error = null;
+    activeReply.status = 'done';
+    activeReply.durationMs = imageJobDuration(job, activeReply, startedAt);
+    job.outputs = outputs;
+    job.usage = normalizedUsage;
+    job.error = null;
+    job.status = 'done';
+    job.durationMs = activeReply.durationMs;
+  }
+
+  function setImageJobFailed(job, activeReply, message, status = 'error', startedAt = null) {
+    const isCancelled = status === 'cancelled';
+    activeReply.error = message || (isCancelled ? '请求已中断' : '生成失败');
+    activeReply.status = isCancelled ? 'cancelled' : 'error';
+    activeReply.durationMs = imageJobDuration(job, activeReply, startedAt);
+    job.error = activeReply.error;
+    job.status = activeReply.status;
+    job.durationMs = activeReply.durationMs;
+  }
+
+  function completeImageJobFromSession(job, activeReply, session, startedAt) {
+    const nextOutputs = window.OwnChatDb?.parseImageSessionOutputs?.(session) || [];
+    if (nextOutputs.length === 0) {
+      setImageJobFailed(job, activeReply, '接口未返回可显示的图片数据', 'error', startedAt);
+    } else {
+      setImageJobDone(job, activeReply, nextOutputs, startedAt, session?.usage);
+    }
+  }
+
+  function failImageJobFromSession(job, activeReply, message, status = 'error', startedAt = null) {
+    setImageJobFailed(job, activeReply, message, status, startedAt);
+  }
+
+  function parseImageOutputs(data, format) {
+    const outputs = (data.data || []).map(item => ({
+      b64: item.b64_json || '',
+      url: item.url || '',
+      revisedPrompt: item.revised_prompt || '',
+      format: normalizeImageFormat(item.output_format || item.mime_type || format),
+      bytes: item.b64_json ? imageByteSize({ b64: item.b64_json }) : 0,
+      createdAt: Date.now(),
+    })).filter(item => item.b64 || item.url);
+    return imageResponseResult(outputs, data.usage);
+  }
+
+  function parseResponseImageOutputs(data, format) {
+    const outputs = [];
+    const scan = value => {
+      if (!value) return;
+      if (Array.isArray(value)) {
+        value.forEach(scan);
+        return;
+      }
+      if (typeof value !== 'object') return;
+      if ((value.type === 'image_generation_call' || value.type === 'image_generation') && value.result) {
+        outputs.push({
+          b64: value.result,
+          url: '',
+          revisedPrompt: '',
+          format: normalizeImageFormat(value.output_format || value.mime_type || format),
+          bytes: imageByteSize({ b64: value.result }),
+          createdAt: Date.now(),
+        });
+      }
+      Object.keys(value).forEach(key => scan(value[key]));
+    };
+    scan(data.output || data);
+    return imageResponseResult(outputs, data.usage || data.response?.usage);
+  }
+
+  function imageToolOptions(params = {}, model = '') {
+    const effectiveParams = sanitizeImageParamsForModel(model, params);
+    const opts = { type: 'image_generation' };
+    if (effectiveParams.size !== 'auto') opts.size = effectiveParams.size;
+    if (effectiveParams.quality !== 'auto') opts.quality = effectiveParams.quality;
+    if (effectiveParams.outputFormat) opts.output_format = effectiveParams.outputFormat;
+    if (effectiveParams.background !== 'auto') opts.background = effectiveParams.background;
+    return opts;
+  }
+
+  function mappedImageInput(prompt, refs) {
+    const list = imageReferenceList(refs);
+    if (!list.length) return prompt.trim();
+    return [{
+      role: 'user',
+      content: [
+        { type: 'input_text', text: prompt.trim() },
+        ...list.map(item => ({ type: 'input_image', image_url: item.base64 })),
+      ],
+    }];
+  }
+
+  function buildImageRequestBody(model, prompt, params = {}) {
+    const effectiveParams = sanitizeImageParamsForModel(model, params);
+    const body = {
+      model,
+      prompt: prompt.trim(),
+      n: 1,
+    };
+    if (effectiveParams.size !== 'auto') body.size = effectiveParams.size;
+    if (effectiveParams.quality !== 'auto') body.quality = effectiveParams.quality;
+    if (effectiveParams.outputFormat && !/^dall-e/i.test(model)) body.output_format = effectiveParams.outputFormat;
+    if (effectiveParams.background !== 'auto') body.background = effectiveParams.background;
+    return body;
+  }
+
+  function extractChatText(data) {
+    const msg = data?.choices?.[0]?.message;
+    if (!msg) return '';
+    if (typeof msg.content === 'string') return msg.content.trim();
+    if (Array.isArray(msg.content)) {
+      return msg.content.map(part => part.text || '').join('').trim();
+    }
+    return '';
+  }
+
+  function promptLanguageInstruction(prompt) {
+    const cjkCount = (prompt.match(/[\u3400-\u9fff]/g) || []).length;
+    const latinCount = (prompt.match(/[a-zA-Z]/g) || []).length;
+    if (cjkCount > 0 && cjkCount >= latinCount * 0.3) {
+      return {
+        label: '中文',
+        instruction: '用户原提示词主要是中文，优化结果必须使用中文输出。不要翻译成英文，不要中英混写，除非原文中的品牌名、专有名词或参数本身是英文。',
+      };
+    }
+    return {
+      label: '原文语言',
+      instruction: '优化结果必须使用用户原提示词的主要语言输出。不要擅自切换语言；只有原文是英文时才输出英文。',
+    };
+  }
+
+  function dataUrlToBlob(dataUrl) {
+    return Shared.dataUrlToBlob(dataUrl);
+  }
+
+  function filenameForBlob(name, blob) {
+    const ext = blob.type.includes('jpeg') ? 'jpg' : blob.type.includes('webp') ? 'webp' : 'png';
+    const base = (name || 'reference').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60);
+    return `${base || 'reference'}.${ext}`;
+  }
+
+  function createImageReply({ jobId, prompt, params, refs, startedAt, model, mapModel, replyId = `${jobId}-reply-${Date.now()}` }) {
+    const inputImages = imageReferencePayload(refs);
+    return {
+      id: replyId,
+      model,
+      mapModel,
+      prompt: prompt.trim(),
+      inputImages,
+      params: Object.assign({}, params),
+      outputs: [],
+      error: null,
+      status: 'generating',
+      startedAt,
+      createdAt: startedAt,
+      estimatedSeconds: estimateImageSeconds(params, inputImages),
+      durationMs: null,
+      usage: null,
+    };
+  }
+
+  window.OwnChatImageCore = {
+    imageReferenceList,
+    imageReferencePayload,
+    imageJobReplies,
+    ensureImageJobReplies,
+    currentImageActiveReply,
+    imageReplyOutput,
+    dataUrlForImage,
+    imageByteSize,
+    normalizeImageFormat,
+    normalizeImageModel,
+    imageModelDisallowsTransparentBackground,
+    imageBackgroundSupported,
+    sanitizeImageParamsForModel,
+    imageOutputMeta,
+    normalizeImageUsage,
+    imageUsageMeta,
+    imageResponseResult,
+    imageResultOutputs,
+    imageResultUsage,
+    imageFilename,
+    attachmentImageFilename,
+    imageViewerItemsForJob,
+    estimateImageSeconds,
+    formatDuration,
+    formatDateTime,
+    imageTimeoutMs,
+    imageStaleTimeoutMs,
+    imageJobDuration,
+    setImageJobDone,
+    setImageJobFailed,
+    completeImageJobFromSession,
+    failImageJobFromSession,
+    parseImageOutputs,
+    parseResponseImageOutputs,
+    imageToolOptions,
+    mappedImageInput,
+    buildImageRequestBody,
+    extractChatText,
+    promptLanguageInstruction,
+    dataUrlToBlob,
+    filenameForBlob,
+    createImageReply,
+  };
+})();
+
+// ===== Image API Client =====
+(function () {
+  'use strict';
+
+  const Api = window.OwnChatApi;
+  const ImageCore = window.OwnChatImageCore;
+
+  function authHeaders(apiKey) {
+    return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
+  }
+
+  async function parseError(resp) {
+    return resp.json().catch(() => ({ error: { message: `HTTP ${resp.status}` } }));
+  }
+
+  async function requestMappedImage(endpoint, prompt, params, refs = [], signal = null) {
+    const url = Api.requestUrl(endpoint.baseUrl, '/responses');
+    const body = buildMappedImageBody(endpoint.model, prompt, params, refs);
+    const resp = await Api.apiFetch(url, {
+      method: 'POST',
+      headers: authHeaders(endpoint.apiKey),
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!resp.ok) {
+      const err = await parseError(resp);
+      throw Api.httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
+    }
+    return ImageCore.parseResponseImageOutputs(await resp.json(), params.outputFormat);
+  }
+
+  async function optimizePrompt(endpoint, prompt, signal = null) {
+    const lang = ImageCore.promptLanguageInstruction(prompt);
+    const url = Api.requestUrl(endpoint.baseUrl, '/chat/completions');
+    const resp = await Api.apiFetch(url, {
+      method: 'POST',
+      headers: authHeaders(endpoint.apiKey),
+      body: JSON.stringify({
+        model: endpoint.model,
+        temperature: 0.4,
+        messages: [
+          {
+            role: 'system',
+            content: `你是专业图像生成提示词编辑器。把用户需求优化成更适合图像生成模型的提示词。${lang.instruction}只输出优化后的提示词，不要解释，不要使用 Markdown。保留用户核心意图，补充主体、构图、风格、光线、色彩、细节、画面质量。不要加入违反安全或版权的内容。`,
+          },
+          {
+            role: 'user',
+            content: `请优化下面的绘画提示词。\n输出语言要求：${lang.label}。\n如果原文是中文，结果必须是中文。\n\n原提示词：\n${prompt}`,
+          },
+        ],
+      }),
+      signal,
+    });
+    if (!resp.ok) {
+      const err = await parseError(resp);
+      throw Api.httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
+    }
+    return ImageCore.extractChatText(await resp.json()).replace(/^["“]|["”]$/g, '').trim();
+  }
+
+  async function requestOneImage(endpoint, model, prompt, params, signal = null) {
+    const url = Api.requestUrl(endpoint.baseUrl, '/images/generations');
+    const body = ImageCore.buildImageRequestBody(model, prompt, params);
+    const resp = await Api.apiFetch(url, {
+      method: 'POST',
+      headers: authHeaders(endpoint.apiKey),
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!resp.ok) {
+      const err = await parseError(resp);
+      throw Api.httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
+    }
+    return ImageCore.parseImageOutputs(await resp.json(), params.outputFormat);
+  }
+
+  async function requestImageEdit(endpoint, model, prompt, params, refs = [], signal = null) {
+    const url = Api.requestUrl(endpoint.baseUrl, '/images/edits');
+    const form = buildImageEditForm(model, prompt, params, refs);
+    const resp = await Api.apiFetch(url, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${endpoint.apiKey}` },
+      body: form,
+      signal,
+    });
+    if (!resp.ok) {
+      const err = await parseError(resp);
+      throw Api.httpError(resp.status, err.error?.message || `HTTP ${resp.status}`, url);
+    }
+    return ImageCore.parseImageOutputs(await resp.json(), params.outputFormat);
+  }
+
+  function buildMappedImageBody(model, prompt, params, refs = []) {
+    return {
+      model,
+      input: ImageCore.mappedImageInput(prompt, refs),
+      tools: [ImageCore.imageToolOptions(params, model)],
+      tool_choice: 'required',
+    };
+  }
+
+  function buildImageEditForm(model, prompt, params, refs = []) {
+    const effectiveParams = ImageCore.sanitizeImageParamsForModel(model, params);
+    const form = new FormData();
+    form.append('model', model);
+    form.append('prompt', prompt.trim());
+    ImageCore.imageReferenceList(refs).forEach(item => {
+      const refBlob = ImageCore.dataUrlToBlob(item.base64);
+      form.append('image', refBlob, ImageCore.filenameForBlob(item.name, refBlob));
+    });
+    if (effectiveParams.size !== 'auto') form.append('size', effectiveParams.size);
+    if (effectiveParams.quality !== 'auto') form.append('quality', effectiveParams.quality);
+    if (effectiveParams.outputFormat && !/^dall-e/i.test(model)) form.append('output_format', effectiveParams.outputFormat);
+    if (effectiveParams.background !== 'auto') form.append('background', effectiveParams.background);
+    return form;
+  }
+
+  function buildServiceWorkerRequest({ imageEndpoint, mapEndpoint = null, model, mapModel, prompt, params, refs = [], jobId, startedAt, timeoutMs }) {
+    const requestModel = mapModel && mapEndpoint ? mapEndpoint.model : model;
+    const effectiveParams = ImageCore.sanitizeImageParamsForModel(requestModel, params);
+    const headers = authHeaders(imageEndpoint.apiKey);
+    const base = { type: 'start-image', jobId, startedAt, timeoutMs, outputFormat: effectiveParams.outputFormat };
+
+    if (mapModel && mapEndpoint) {
+      return Object.assign(base, {
+        url: Api.requestUrl(mapEndpoint.baseUrl, '/responses'),
+        headers: authHeaders(mapEndpoint.apiKey),
+        body: JSON.stringify(buildMappedImageBody(mapEndpoint.model, prompt, effectiveParams, refs)),
+        requestType: 'responses',
+      });
+    }
+
+    if (refs.length) {
+      return Object.assign(base, {
+        url: Api.requestUrl(imageEndpoint.baseUrl, '/images/edits'),
+        headers,
+        requestType: 'edit',
+        formParams: {
+          model,
+          prompt: prompt.trim(),
+          images: refs.map(item => ({ base64: item.base64, filename: item.name })),
+          size: effectiveParams.size,
+          quality: effectiveParams.quality,
+          outputFormat: effectiveParams.outputFormat,
+          background: effectiveParams.background,
+        },
+      });
+    }
+
+    return Object.assign(base, {
+      url: Api.requestUrl(imageEndpoint.baseUrl, '/images/generations'),
+      headers,
+      body: JSON.stringify(ImageCore.buildImageRequestBody(model, prompt, effectiveParams)),
+      requestType: 'generations',
+    });
+  }
+
+  window.OwnChatImageApi = {
+    requestMappedImage,
+    optimizePrompt,
+    requestOneImage,
+    requestImageEdit,
+    buildServiceWorkerRequest,
+  };
+})();
+
+// ===== Image Renderer =====
+(function () {
+  'use strict';
+
+  const ImageCore = window.OwnChatImageCore;
+  const Tokens = window.OwnChatTokens;
+  const Markdown = window.OwnChatMarkdown;
+
+  function esc(value) {
+    return Markdown.esc(value);
+  }
+
+  function renderWorkspace(selectedJob, options = {}) {
+    if (options.isLoading) {
+      return {
+        hasSelected: false,
+        html: `
+          <div class="image-history-loading" role="status" aria-live="polite">
+            <div class="image-spinner"></div>
+            <span>正在加载绘画历史...</span>
+          </div>
+        `,
+      };
+    }
+    return {
+      hasSelected: !!selectedJob,
+      html: selectedJob ? renderImageJob(selectedJob, options) : '',
+    };
+  }
+
+  function renderImageJob(job, options = {}) {
+    const defaultParams = options.defaultParams || {};
+    const userMessage = renderUserMessage(job, job.prompt, job.inputImages, job.createdAt, job.params || defaultParams, '', options);
+    const replies = ImageCore.imageJobReplies(job);
+    const replyMessages = replies.map((reply, replyIndex) => renderReplyMessage(job, reply, replyIndex, options)).join('');
+    const progressMessage = renderProgressMessage(job, options);
+
+    return `
+      <article class="image-job-card" data-id="${esc(job.id)}">
+        ${userMessage}
+        ${replyMessages}
+        ${progressMessage}
+      </article>
+    `;
+  }
+
+  function renderUserMessage(job, prompt, inputImages, createdAt, params, replyIndex, options = {}) {
+    const icons = options.icons || {};
+    const refs = ImageCore.imageReferencePayload(inputImages, options.maxRefs);
+    const inputRef = refs.length
+      ? `<div class="image-input-ref-list">
+          ${refs.map((inputImage, refIndex) => `
+            <div class="image-input-ref">
+              <img src="${esc(inputImage.base64)}" alt="${esc(inputImage.name || '参考图')}" class="image-input-preview" data-job="${esc(job.id)}" data-reply="${esc(String(replyIndex))}" data-ref="${refIndex}">
+              <span>${esc(inputImage.name || `参考图 ${refIndex + 1}`)}</span>
+            </div>
+          `).join('')}
+        </div>`
+      : '';
+
+    return `
+      <div class="image-chat-msg user">
+        <div class="image-chat-inner">
+          <div class="image-chat-avatar">${icons.person || ''}</div>
+          <div class="image-chat-bubble image-chat-bubble-prompt">
+            <div class="image-chat-prompt">${esc(prompt || '')}</div>
+            ${inputRef}
+            <div class="image-msg-meta">
+              <span>${ImageCore.formatDateTime(createdAt || job.createdAt)}</span>
+              <span>~${Tokens.formatTokenCount(Tokens.estimateTokens(prompt))} tokens</span>
+              <button class="msg-action-btn image-action" data-action="copy-prompt" data-job="${esc(job.id)}" data-prompt="${esc(prompt || '')}" type="button" title="复制提示词" data-tooltip="复制提示词">${icons.copy || ''}</button>
+              <button class="msg-action-btn image-action" data-action="reuse" data-job="${esc(job.id)}" data-prompt="${esc(prompt || '')}" data-size="${esc(params.size || '')}" data-quality="${esc(params.quality || '')}" data-format="${esc(params.outputFormat || '')}" data-background="${esc(params.background || '')}" type="button" title="复用到输入框" data-tooltip="复用到输入框">${icons.edit || ''}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderReplyMessage(job, reply, replyIndex, options = {}) {
+    const defaultParams = options.defaultParams || {};
+    const params = reply.params || job.params || defaultParams;
+    const replyUserMessage = replyIndex > 0
+      ? renderUserMessage(job, reply.prompt || job.prompt, reply.inputImages || null, reply.createdAt || reply.startedAt, params, replyIndex, options)
+      : '';
+
+    if (reply.status === 'generating' && !(reply.outputs || []).length && !reply.error) {
+      return replyUserMessage;
+    }
+
+    const aiMetaParts = [
+      metaText(reply.model || job.model),
+      metaText(reply.mapModel && options.formatSourcedModel ? `映射 ${options.formatSourcedModel(reply.mapModel)}` : ''),
+      metaText(reply.durationMs ? `耗时 ${ImageCore.formatDuration(reply.durationMs)}` : ''),
+      ...ImageCore.imageUsageMeta(reply.usage || job.usage).map(metaText),
+      metaText(ImageCore.formatDateTime(reply.durationMs ? (reply.startedAt || reply.createdAt || job.createdAt) + reply.durationMs : (reply.createdAt || job.createdAt))),
+    ].filter(Boolean).join('');
+
+    const outputs = (reply.outputs || []).map((out, index) => renderOutput(job, reply, replyIndex, out, index, options)).join('');
+
+    return `
+      ${replyUserMessage}
+      <div class="image-chat-msg ai">
+        <div class="image-chat-inner">
+          <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
+          <div class="image-chat-bubble image-chat-bubble-result">
+            ${reply.error ? `<div class="image-error">${esc(reply.error)}</div>` : ''}
+            <div class="image-results">${outputs}</div>
+            <div class="image-msg-meta">${aiMetaParts}</div>
+            <div class="image-job-actions">
+              <button class="btn-secondary image-action" data-action="edit-latest" data-job="${esc(job.id)}" data-reply="${replyIndex}" type="button">编辑</button>
+              <button class="btn-secondary image-action" data-action="retry" data-job="${esc(job.id)}" data-reply="${replyIndex}" type="button">${reply.status === 'generating' ? '生成中' : '重绘'}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderOutput(job, reply, replyIndex, out, index, options = {}) {
+    const icons = options.icons || {};
+    const params = reply.params || job.params || options.defaultParams || {};
+    const outputMeta = ImageCore.imageOutputMeta(out, params.outputFormat).map(esc).join('<span>·</span>');
+    return `
+      <div class="image-result" data-job="${esc(job.id)}" data-reply="${replyIndex}" data-index="${index}">
+        <img src="${esc(ImageCore.dataUrlForImage(out, params.outputFormat))}" alt="${esc(job.prompt)}" loading="eager" decoding="async" class="image-preview">
+        <div class="image-result-meta">${outputMeta}</div>
+        <div class="image-result-actions">
+          <button class="msg-action-btn image-action" data-action="view" data-job="${esc(job.id)}" data-reply="${replyIndex}" data-index="${index}" title="放大查看" data-tooltip="放大查看">${icons.maximize || ''}</button>
+          <button class="msg-action-btn image-action" data-action="use-as-ref" data-job="${esc(job.id)}" data-reply="${replyIndex}" data-index="${index}" title="以图编辑" data-tooltip="以图编辑">${icons.edit || ''}</button>
+          <button class="msg-action-btn image-action" data-action="copy-image" data-job="${esc(job.id)}" data-reply="${replyIndex}" data-index="${index}" title="复制图片" data-tooltip="复制图片">${icons.copy || ''}</button>
+          <button class="msg-action-btn image-action" data-action="download" data-job="${esc(job.id)}" data-reply="${replyIndex}" data-index="${index}" title="下载" data-tooltip="下载">${icons.download || ''}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function metaText(item) {
+    if (!item) return '';
+    const meta = typeof item === 'object' ? item : { text: item };
+    const tooltip = meta.title && meta.title !== meta.text ? ` data-tooltip="${esc(meta.title)}"` : '';
+    return `<span${tooltip}><span class="image-meta-label">${esc(meta.text)}</span></span>`;
+  }
+
+  function renderProgressMessage(job, options = {}) {
+    if (job.status !== 'generating') return '';
+    const now = options.now || Date.now();
+    const waitedMs = now - (job.startedAt || job.createdAt);
+    const progress = `<div class="image-progress" data-job="${esc(job.id)}">
+      <div class="image-progress-indicator">
+        <div class="image-spinner"></div>
+      </div>
+      <div class="image-progress-body">
+        <div class="image-progress-title">正在生成图片</div>
+        <div class="image-progress-stats">
+          <span class="image-progress-elapsed">耗时 ${ImageCore.formatDuration(waitedMs)}</span>
+        </div>
+        <div class="image-progress-note">正在生成，请勿关闭页面</div>
+      </div>
+      <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${esc(job.id)}" type="button">取消</button>
+    </div>`;
+
+    return `
+      <div class="image-chat-msg ai">
+        <div class="image-chat-inner">
+          <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
+          <div class="image-chat-bubble image-chat-bubble-progress">${progress}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  window.OwnChatImageRenderer = {
+    renderWorkspace,
+    renderImageJob,
+    renderUserMessage,
+    renderReplyMessage,
+    renderOutput,
+    renderProgressMessage,
+  };
+})();
+
+// ===== Image Viewer =====
+(function () {
+  'use strict';
+
+  let dom = null;
+  let callbacks = {};
+  let mounted = false;
+  let viewer = null;
+  let transform = { scale: 1, x: 0, y: 0 };
+  let dragging = null;
+  let touch = null;
+
+  function mount(elements, opts = {}) {
+    dom = elements;
+    callbacks = opts || {};
+    if (mounted) return;
+    mounted = true;
+
+    dom.closeBtn?.addEventListener('click', close);
+    dom.backdrop?.addEventListener('click', close);
+    dom.prevBtn?.addEventListener('click', () => switchImage(-1));
+    dom.nextBtn?.addEventListener('click', () => switchImage(1));
+    dom.img?.addEventListener('wheel', zoom, { passive: false });
+    dom.img?.addEventListener('pointerdown', startDrag);
+    dom.viewer?.addEventListener('pointermove', moveDrag);
+    dom.viewer?.addEventListener('pointerup', endDrag);
+    dom.viewer?.addEventListener('pointercancel', endDrag);
+    dom.img?.addEventListener('dblclick', resetTransform);
+    dom.img?.addEventListener('touchstart', startTouch, { passive: false });
+    dom.img?.addEventListener('touchmove', moveTouch, { passive: false });
+    dom.img?.addEventListener('touchend', endTouch);
+    dom.img?.addEventListener('touchcancel', endTouch);
+    dom.copyBtn?.addEventListener('click', () => callbacks.onCopy?.(current()));
+    dom.downloadBtn?.addEventListener('click', () => callbacks.onDownload?.(current()));
+    document.addEventListener('keydown', handleKeydown);
+  }
+
+  function openItems(items, itemIndex = 0) {
+    viewer = {
+      items: Array.isArray(items) ? items : [],
+      itemIndex: Math.max(0, itemIndex),
+    };
+    resetTransform();
+    sync();
+    dom.viewer.classList.remove('hidden');
+  }
+
+  function openAttachment(item) {
+    viewer = Object.assign({ attachment: true }, item);
+    resetTransform();
+    sync();
+    dom.viewer.classList.remove('hidden');
+  }
+
+  function close() {
+    dom.viewer.classList.add('hidden');
+    dom.img.src = '';
+    viewer = null;
+    dragging = null;
+    touch = null;
+    dom.counter.textContent = '';
+    dom.counter.classList.add('hidden');
+    dom.prevBtn.classList.add('hidden');
+    dom.nextBtn.classList.add('hidden');
+  }
+
+  function isOpen() {
+    return !!dom?.viewer && !dom.viewer.classList.contains('hidden');
+  }
+
+  function current() {
+    if (!viewer) return null;
+    if (viewer.attachment) return viewer;
+    if (!Array.isArray(viewer.items)) return null;
+    return viewer.items[viewer.itemIndex || 0] || null;
+  }
+
+  function sync() {
+    if (!viewer) return;
+    if (viewer.attachment) {
+      dom.img.src = viewer.src;
+      dom.counter.textContent = '';
+      dom.counter.classList.add('hidden');
+      dom.prevBtn.classList.add('hidden');
+      dom.nextBtn.classList.add('hidden');
+      return;
+    }
+    if (!Array.isArray(viewer.items)) return;
+    const total = viewer.items.length;
+    const itemIndex = Math.min(Math.max(viewer.itemIndex || 0, 0), Math.max(total - 1, 0));
+    viewer.itemIndex = itemIndex;
+    const item = viewer.items[itemIndex];
+    if (item) dom.img.src = item.src;
+    dom.counter.textContent = total > 1 ? `${itemIndex + 1} / ${total}` : '';
+    dom.counter.classList.toggle('hidden', total <= 1);
+    dom.prevBtn.classList.toggle('hidden', total <= 1);
+    dom.nextBtn.classList.toggle('hidden', total <= 1);
+  }
+
+  function switchImage(direction) {
+    if (!viewer || !Array.isArray(viewer.items) || viewer.items.length <= 1) return;
+    const total = viewer.items.length;
+    viewer.itemIndex = (viewer.itemIndex + direction + total) % total;
+    resetTransform();
+    sync();
+  }
+
+  function clampScale(scale) {
+    return Math.min(8, Math.max(0.25, scale));
+  }
+
+  function applyTransform() {
+    const t = transform;
+    dom.img.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.scale})`;
+    dom.img.classList.toggle('is-zoomed', t.scale > 1.01);
+  }
+
+  function resetTransform() {
+    transform = { scale: 1, x: 0, y: 0 };
+    dragging = null;
+    applyTransform();
+  }
+
+  function zoom(e) {
+    if (!isOpen()) return;
+    e.preventDefault();
+    const nextScale = clampScale(transform.scale * (e.deltaY < 0 ? 1.16 : 1 / 1.16));
+    if (Math.abs(nextScale - transform.scale) < 0.001) return;
+
+    const rect = dom.img.getBoundingClientRect();
+    const cx = e.clientX - (rect.left + rect.width / 2);
+    const cy = e.clientY - (rect.top + rect.height / 2);
+    const ratio = nextScale / transform.scale;
+    transform = {
+      scale: nextScale,
+      x: transform.x - cx * (ratio - 1),
+      y: transform.y - cy * (ratio - 1),
+    };
+    applyTransform();
+  }
+
+  function startDrag(e) {
+    if (!isOpen()) return;
+    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+    e.preventDefault();
+    dragging = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      originX: transform.x,
+      originY: transform.y,
+    };
+    dom.img.setPointerCapture?.(e.pointerId);
+    dom.viewer.classList.add('is-panning');
+  }
+
+  function moveDrag(e) {
+    if (!dragging || dragging.pointerId !== e.pointerId) return;
+    e.preventDefault();
+    transform.x = dragging.originX + e.clientX - dragging.startX;
+    transform.y = dragging.originY + e.clientY - dragging.startY;
+    applyTransform();
+  }
+
+  function endDrag(e) {
+    if (!dragging || dragging.pointerId !== e.pointerId) return;
+    e.preventDefault();
+    dragging = null;
+    dom.img.releasePointerCapture?.(e.pointerId);
+    dom.viewer.classList.remove('is-panning');
+  }
+
+  function touchDistance(touches) {
+    const [a, b] = touches;
+    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  }
+
+  function touchCenter(touches) {
+    const [a, b] = touches;
+    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+  }
+
+  function startTouch(e) {
+    if (!isOpen() || e.touches.length !== 2) return;
+    e.preventDefault();
+    touch = {
+      distance: touchDistance(e.touches),
+      center: touchCenter(e.touches),
+      scale: transform.scale,
+      x: transform.x,
+      y: transform.y,
+    };
+  }
+
+  function moveTouch(e) {
+    if (!touch || e.touches.length !== 2) return;
+    e.preventDefault();
+    const center = touchCenter(e.touches);
+    transform = {
+      scale: clampScale(touch.scale * (touchDistance(e.touches) / touch.distance)),
+      x: touch.x + center.x - touch.center.x,
+      y: touch.y + center.y - touch.center.y,
+    };
+    applyTransform();
+  }
+
+  function endTouch(e) {
+    if (e.touches.length < 2) touch = null;
+  }
+
+  function handleKeydown(e) {
+    if (!isOpen()) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      switchImage(-1);
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      switchImage(1);
+    }
+  }
+
+  window.OwnChatImageViewer = {
+    mount,
+    openItems,
+    openAttachment,
+    close,
+    current,
+    switchImage,
+    resetTransform,
+    isOpen,
+  };
+})();
+
+// ===== Chat Renderer =====
+(function () {
+  'use strict';
+
+  const Markdown = window.OwnChatMarkdown;
+  const Tokens = window.OwnChatTokens;
+  const Attachments = window.OwnChatAttachments;
+  const Stream = window.OwnChatStream;
+
+  function esc(value) {
+    return Markdown.esc(value);
+  }
+
+  function messageTextContent(msg) {
+    if (!msg) return '';
+    if (typeof msg.content === 'string') return msg.content;
+    if (Array.isArray(msg.content)) {
+      return msg.content.filter(part => part.type === 'text').map(part => part.text || '').join('\n\n');
+    }
+    return '';
+  }
+
+  function copyableMessageText(msg) {
+    const text = messageTextContent(msg);
+    if (msg?.role !== 'assistant') return text;
+    return Markdown.splitThinkTags(text).content.trim();
+  }
+
+  function copyableMessagePlainText(msg) {
+    const text = copyableMessageText(msg);
+    if (!text) return '';
+    const tmp = document.createElement('div');
+    tmp.innerHTML = Markdown.renderMd(text);
+    tmp.querySelectorAll('.code-header, .code-copy-btn').forEach(el => el.remove());
+    tmp.querySelectorAll('br').forEach(el => el.replaceWith('\n'));
+    tmp.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote, pre, tr').forEach(el => {
+      el.appendChild(document.createTextNode('\n'));
+    });
+    tmp.querySelectorAll('table, ul, ol, .code-block').forEach(el => {
+      el.appendChild(document.createTextNode('\n'));
+    });
+    return tmp.textContent
+      .replace(/\u2713/g, '✓ ')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function formatShortDuration(ms) {
+    if (!Number.isFinite(ms) || ms < 0) return '';
+    return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`;
+  }
+
+  function renderMessages(conv, options = {}) {
+    const messages = Array.isArray(conv?.messages) ? conv.messages : [];
+    const showThinking = options.showThinking !== false;
+    return messages.map((msg, index) => renderMessage(msg, index, showThinking, options)).join('');
+  }
+
+  function renderMessage(msg, index, showThinking, options = {}) {
+    const isUser = msg.role === 'user';
+    const icons = options.icons || {};
+    const avatar = isUser ? (icons.person || '') : (icons.aiAvatar || '');
+    const splitContent = !isUser && typeof msg.content === 'string' ? Markdown.splitThinkTags(msg.content) : null;
+    const reasoningText = showThinking && !isUser ? (msg.reasoningContent || splitContent?.reasoning || '') : '';
+    const mainContent = splitContent?.reasoning ? splitContent.content : msg.content;
+    const contentHtml = isUser
+      ? renderUserContent(msg)
+      : renderAssistantContent(msg, mainContent, reasoningText);
+    const metaRow = renderMessageMeta(msg, index, isUser, icons);
+
+    return `
+      <div class="chat-msg ${isUser ? 'user' : 'ai'}">
+        <div class="chat-msg-inner">
+          <div class="chat-msg-avatar">${avatar}</div>
+          <div class="chat-msg-body">${contentHtml}${metaRow}</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderUserContent(msg) {
+    if (typeof msg.content === 'string') return esc(msg.content).replace(/\n/g, '<br>');
+    if (!Array.isArray(msg.content)) return '';
+
+    let contentHtml = '';
+    const textPart = msg.content.find(part => part.type === 'text')?.text || '';
+    if (textPart) contentHtml += esc(textPart).replace(/\n/g, '<br>');
+
+    const imgParts = msg.content.filter(part => part.type === 'image_url');
+    if (imgParts.length) {
+      const fileMeta = Array.isArray(msg.files) ? msg.files.filter(file => file.base64 || file.fileId) : [];
+      contentHtml += `<div class="msg-images">${imgParts.map((part, imgIdx) => {
+        const file = fileMeta[imgIdx] || {};
+        const name = file.name || `attachment-${imgIdx + 1}`;
+        if (part.image_url?.missing || file.missing) {
+          return `<div class="msg-img-missing" title="${esc(name)}">附件已丢失</div>`;
+        }
+        return `<img src="${esc(part.image_url?.url || '')}" class="msg-img" loading="lazy" data-action="view-attachment-image" data-name="${esc(name)}" alt="${esc(name)}">`;
+      }).join('')}</div>`;
+    }
+
+    return contentHtml + renderMessageFileAttachments(msg);
+  }
+
+  function renderAssistantContent(msg, mainContent, reasoningText) {
+    let contentHtml = '';
+    if (reasoningText) {
+      const thinkingTimeStr = msg.reasoningTimeMs != null ? formatShortDuration(msg.reasoningTimeMs) : '';
+      contentHtml += `
+        <div class="thinking-block">
+          <button class="thinking-toggle" type="button">
+            <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+            <span>思考过程</span>${thinkingTimeStr ? ` · ${thinkingTimeStr}` : ''}
+          </button>
+          <div class="thinking-content"><div class="msg-md">${Markdown.renderMd(reasoningText)}</div></div>
+        </div>
+      `;
+    }
+
+    const mainText = typeof mainContent === 'string' ? mainContent : '';
+    if (msg.streaming && !mainText.trim() && !reasoningText) {
+      contentHtml += `
+        <div class="stream-waiting">
+          <div class="typing-dots"><span></span><span></span><span></span></div>
+        </div>
+      `;
+    }
+    contentHtml += `<div class="msg-md">${Markdown.renderMd(mainText)}</div>`;
+    return contentHtml;
+  }
+
+  function renderMessageMeta(msg, index, isUser, icons = {}) {
+    const metaParts = [];
+    if (isUser && msg.timestamp) {
+      metaParts.push(`<span class="msg-meta-item">${formatDateTime(msg.timestamp)}</span>`);
+    }
+    if (isUser && msg.includeContext === false) {
+      metaParts.push('<span class="msg-meta-item">未带上文</span>');
+    }
+    if (!isUser && msg.firstTokenMs !== undefined) {
+      metaParts.push(`<span class="msg-meta-item">首字 ${formatShortDuration(msg.firstTokenMs)}</span>`);
+    }
+    if (!isUser && msg.outputTimeMs != null) {
+      metaParts.push(`<span class="msg-meta-item">输出 ${formatShortDuration(msg.outputTimeMs)}</span>`);
+    }
+
+    const usage = Stream.normalizeUsage(msg.usage);
+    if (usage && !isUser) {
+      const usageParts = [];
+      if (usage.input != null) usageParts.push(`输入 ${Tokens.formatTokenCount(usage.input)}`);
+      if (usage.output != null) usageParts.push(`输出 ${Tokens.formatTokenCount(usage.output)}`);
+      if (usage.total != null) usageParts.push(`总计 ${Tokens.formatTokenCount(usage.total)}`);
+      if (usageParts.length) metaParts.push(`<span class="msg-meta-item">${usageParts.join(' / ')}</span>`);
+    } else if (msg.tokens) {
+      metaParts.push(`<span class="msg-meta-item">~${Tokens.formatTokenCount(msg.tokens)} tokens</span>`);
+    }
+    if (!isUser && msg.model) metaParts.push(`<span class="msg-meta-item msg-model-tag">${esc(msg.model)}</span>`);
+
+    metaParts.push(`
+      <span class="copy-menu">
+        <button class="msg-action-btn" data-action="copy-menu" data-idx="${index}" title="复制" data-tooltip="复制">${icons.copy || ''}</button>
+        <span class="copy-menu-popover">
+          <button type="button" data-action="copy-md" data-idx="${index}">复制 Markdown</button>
+          <button type="button" data-action="copy-text" data-idx="${index}">复制纯文本</button>
+        </span>
+      </span>
+    `);
+    if (isUser) metaParts.push(`<button class="msg-action-btn" data-action="edit" data-idx="${index}" title="继续提问" data-tooltip="继续提问">${icons.edit || ''}</button>`);
+    if (!isUser) metaParts.push(`<button class="msg-action-btn" data-action="retry" data-idx="${index}" title="重新生成，会替换这条回复之后的内容" data-tooltip="重新生成，会替换后续内容">${icons.refresh || ''}</button>`);
+
+    return metaParts.length ? `<div class="msg-meta">${metaParts.join('')}</div>` : '';
+  }
+
+  function formatDateTime(ts) {
+    const date = new Date(ts);
+    const pad = value => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+
+  function renderMessageFileIcon() {
+    return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+  }
+
+  function renderMessageFileAttachments(msg) {
+    const files = Array.isArray(msg?.files) ? msg.files : [];
+    const docFiles = files.filter(file => file && !(file.type || '').startsWith('image/') && (file.fileId || typeof file.text === 'string'));
+    if (!docFiles.length) return '';
+    return `<div class="msg-files">${docFiles.map(file => {
+      const type = file.type || '文件';
+      const size = Attachments.formatBytes(file.size);
+      const status = file.missing ? '附件数据已丢失' : (file.extractionLabel || (Attachments.isTextFile(file) ? '源码文本输入' : '文本兼容输入'));
+      const meta = [type, size, status].filter(Boolean).join(' · ');
+      return `
+        <div class="msg-file" title="${esc(file.name || '附件')}">
+          <span class="msg-file-icon">${renderMessageFileIcon()}</span>
+          <span class="msg-file-info">
+            <span class="msg-file-name">${esc(file.name || '附件')}</span>
+            <span class="msg-file-meta">${esc(meta || '已随消息发送')}</span>
+          </span>
+        </div>
+      `;
+    }).join('')}</div>`;
+  }
+
+  window.OwnChatChatRenderer = {
+    messageTextContent,
+    copyableMessageText,
+    copyableMessagePlainText,
+    formatShortDuration,
+    renderMessages,
+    renderMessage,
+    renderMessageFileAttachments,
+  };
+})();
+
+// ===== Sidebar Renderer =====
+(function () {
+  'use strict';
+
+  const { esc } = window.OwnChatMarkdown;
+  const ChatRenderer = window.OwnChatChatRenderer;
+
+  const CHAT_NEW_BUTTON_HTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+    新对话
+  `;
+
+  const IMAGE_NEW_BUTTON_HTML = `
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <rect x="3" y="3" width="18" height="18" rx="2"/>
+      <circle cx="8.5" cy="8.5" r="1.5"/>
+      <path d="M21 15l-5-5L5 21"/>
+    </svg>
+    新绘画
+  `;
+
+  const RENAME_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>';
+
+  function normalizedSearch(search) {
+    return String(search || '').trim().toLowerCase();
+  }
+
+  function imageJobTitle(job) {
+    return job?.title || job?.prompt || '未命名绘画';
+  }
+
+  function renderBulkCheckbox(id, label, bulkMode, selectedIds) {
+    if (!bulkMode) return '';
+    const checked = selectedIds?.has(id) ? ' checked' : '';
+    return `<label class="conv-item-check" title="选择${esc(label)}">
+      <input type="checkbox" data-action="bulk-check" data-id="${esc(id)}"${checked}>
+      <span></span>
+    </label>`;
+  }
+
+  function renderSidebarItem({ id, title, active, bulkMode, selectedIds }) {
+    return `
+      <div class="conv-item ${active ? 'active' : ''} ${bulkMode ? 'bulk-mode' : ''}" data-id="${esc(id)}">
+        ${renderBulkCheckbox(id, title, bulkMode, selectedIds)}
+        <span class="conv-item-title">${esc(title)}</span>
+        <button class="conv-item-rename" type="button" title="重命名">${RENAME_ICON}</button>
+        <button class="conv-item-delete" type="button" title="删除">&times;</button>
+      </div>
+    `;
+  }
+
+  function buildImageView({ jobs, search, currentId, bulkMode, selectedIds, isLoading }) {
+    if (isLoading) {
+      return {
+        searchPlaceholder: '搜索绘画...',
+        newButtonHtml: IMAGE_NEW_BUTTON_HTML,
+        visibleIds: [],
+        listHtml: '<div class="sidebar-empty">正在加载绘画历史...</div>',
+      };
+    }
+
+    const q = normalizedSearch(search);
+    const filtered = q
+      ? (jobs || []).filter(job => `${job.title || ''} ${job.prompt || ''} ${job.model || ''}`.toLowerCase().includes(q))
+      : (jobs || []);
+    const visibleIds = filtered.map(job => job.id);
+
+    return {
+      searchPlaceholder: '搜索绘画...',
+      newButtonHtml: IMAGE_NEW_BUTTON_HTML,
+      visibleIds,
+      listHtml: filtered.map(job => renderSidebarItem({
+        id: job.id,
+        title: imageJobTitle(job),
+        active: job.id === currentId,
+        bulkMode,
+        selectedIds,
+      })).join('') || '<div class="sidebar-empty">没有匹配的绘画</div>',
+    };
+  }
+
+  function buildChatView({ conversations, search, currentId, bulkMode, selectedIds }) {
+    const q = normalizedSearch(search);
+    const filtered = q
+      ? (conversations || []).filter(conv => {
+          const body = (conv.messages || []).map(ChatRenderer.messageTextContent).join(' ');
+          return `${conv.title || ''} ${conv.systemPrompt || ''} ${body}`.toLowerCase().includes(q);
+        })
+      : (conversations || []);
+    const visibleIds = filtered.map(conv => conv.id);
+
+    return {
+      searchPlaceholder: '搜索对话...',
+      newButtonHtml: CHAT_NEW_BUTTON_HTML,
+      visibleIds,
+      listHtml: filtered.map(conv => renderSidebarItem({
+        id: conv.id,
+        title: conv.title || '未命名对话',
+        active: conv.id === currentId,
+        bulkMode,
+        selectedIds,
+      })).join('') || '<div class="sidebar-empty">没有匹配的对话</div>',
+    };
+  }
+
+  function bulkBarState({ visibleIds, selectedIds, bulkMode }) {
+    const ids = Array.isArray(visibleIds) ? visibleIds : [];
+    const selected = ids.filter(id => selectedIds?.has(id)).length;
+    return {
+      active: !!bulkMode,
+      total: ids.length,
+      selected,
+      selectAllDisabled: ids.length === 0,
+      selectAllText: ids.length > 0 && selected === ids.length ? '取消全选' : '全选',
+      deleteDisabled: selected === 0,
+      deleteText: selected ? `删除 ${selected}` : '删除',
+    };
+  }
+
+  function applyBulkBar(elements, state) {
+    elements.bar.classList.toggle('is-active', state.active);
+    elements.toggle.classList.toggle('hidden', state.active);
+    elements.selectAll.classList.toggle('hidden', !state.active);
+    elements.delete.classList.toggle('hidden', !state.active);
+    elements.cancel.classList.toggle('hidden', !state.active);
+    elements.selectAll.disabled = state.selectAllDisabled;
+    elements.selectAll.textContent = state.selectAllText;
+    elements.delete.disabled = state.deleteDisabled;
+    elements.delete.textContent = state.deleteText;
+  }
+
+  window.OwnChatSidebarRenderer = {
+    buildImageView,
+    buildChatView,
+    bulkBarState,
+    applyBulkBar,
+  };
+})();
+
+// ===== Stream UI =====
+(function () {
+  'use strict';
+
+  const Markdown = window.OwnChatMarkdown;
+  const ChatRenderer = window.OwnChatChatRenderer;
+
+  let streamRafPending = false;
+  let streamRafCallbacks = new Map();
+
+  function scheduleStreamRender(callback, renderKey = callback) {
+    if (typeof callback !== 'function') return;
+    streamRafCallbacks.set(renderKey, callback);
+    if (streamRafPending) return;
+    streamRafPending = true;
+    requestAnimationFrame(() => {
+      streamRafPending = false;
+      const callbacks = Array.from(streamRafCallbacks.values());
+      streamRafCallbacks = new Map();
+      callbacks.forEach(fn => fn());
+    });
+  }
+
+  function addTyping(messagesEl, welcomeEl, onBeforeAppend, aiAvatar) {
+    const el = document.createElement('div');
+    el.className = 'chat-msg ai';
+    el.id = 'typing-el';
+    el.innerHTML = `
+      <div class="chat-msg-inner">
+        <div class="chat-msg-avatar">${aiAvatar || ''}</div>
+        <div class="chat-msg-body">
+          <div class="typing-dots"><span></span><span></span><span></span></div>
+        </div>
+      </div>
+    `;
+    messagesEl.classList.add('has-messages');
+    welcomeEl.classList.add('hidden');
+    if (typeof onBeforeAppend === 'function') onBeforeAppend();
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return el;
+  }
+
+  function removeTyping(doc = document) {
+    doc.getElementById('typing-el')?.remove();
+  }
+
+  function addStreamMsg(messagesEl, aiAvatar) {
+    const el = document.createElement('div');
+    el.className = 'chat-msg ai';
+    el.id = 'stream-el';
+    el.innerHTML = `
+      <div class="chat-msg-inner">
+        <div class="chat-msg-avatar">${aiAvatar || ''}</div>
+        <div class="chat-msg-body">
+          <div class="stream-waiting">
+            <div class="typing-dots"><span></span><span></span><span></span></div>
+          </div>
+          <div class="thinking-block hidden">
+            <button class="thinking-toggle" type="button">
+              <svg class="thinking-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+              <span class="thinking-label">思考中...</span>
+            </button>
+            <div class="thinking-content"><div class="msg-md"></div></div>
+          </div>
+          <div class="msg-md"></div>
+        </div>
+      </div>
+    `;
+    messagesEl.appendChild(el);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return {
+      thinkingMd: el.querySelector('.thinking-content .msg-md'),
+      thinkingBlock: el.querySelector('.thinking-block'),
+      thinkingLabel: el.querySelector('.thinking-label'),
+      contentMd: el.querySelector('.chat-msg-body > .msg-md'),
+      waiting: el.querySelector('.stream-waiting'),
+    };
+  }
+
+  function updateStream(messagesEl, el, text) {
+    scheduleStreamRender(() => {
+      el.innerHTML = Markdown.renderMd(text);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }, el);
+  }
+
+  function renderStreamContent(messagesEl, streamEls, content, opts = {}) {
+    scheduleStreamRender(() => {
+      if (opts.hideWaiting !== false) streamEls.waiting?.classList.add('hidden');
+      streamEls.contentMd.innerHTML = Markdown.renderMd(content);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }, streamEls?.contentMd || streamEls);
+  }
+
+  function showThinkingContent(messagesEl, streamEls, reasoningContent, opts = {}) {
+    if (!streamEls?.thinkingBlock || !reasoningContent || opts.showThinking === false) return;
+    scheduleStreamRender(() => {
+      streamEls.waiting?.classList.add('hidden');
+      streamEls.thinkingBlock.classList.remove('hidden');
+      if (opts.resetUserToggle) delete streamEls.thinkingBlock.dataset.userToggled;
+      if (opts.expanded !== false && streamEls.thinkingBlock.dataset.userToggled !== 'true') {
+        streamEls.thinkingBlock.classList.add('expanded');
+      }
+      streamEls.thinkingMd.innerHTML = Markdown.renderMd(reasoningContent);
+      if (opts.label) streamEls.thinkingLabel.textContent = opts.label;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }, streamEls.thinkingMd);
+  }
+
+  function updateThinkingStream(messagesEl, streamEls, reasoningContent, reasoningStartTime, streamStartTime, showThinking) {
+    if (!showThinking || !reasoningContent) return;
+    scheduleStreamRender(() => {
+      streamEls.waiting?.classList.add('hidden');
+      if (streamEls.thinkingBlock.classList.contains('hidden')) {
+        streamEls.thinkingBlock.classList.remove('hidden');
+      }
+      if (!streamEls.thinkingDone && streamEls.thinkingBlock.dataset.userToggled !== 'true') {
+        streamEls.thinkingBlock.classList.add('expanded');
+      }
+      const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
+      if (!streamEls.thinkingDone) streamEls.thinkingLabel.textContent = `思考中... · ${ChatRenderer.formatShortDuration(thinkingMs)}`;
+      streamEls.thinkingMd.innerHTML = Markdown.renderMd(reasoningContent);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }, streamEls.thinkingMd);
+  }
+
+  function finishThinkingStream(streamEls, reasoningStartTime, streamStartTime, endedAt = Date.now(), reasoningContent = '') {
+    if (!streamEls?.thinkingBlock || streamEls.thinkingBlock.classList.contains('hidden')) return null;
+    const thinkingMs = endedAt - (reasoningStartTime || streamStartTime);
+    applyThinkingDoneLabel(streamEls, thinkingMs, reasoningContent);
+    return thinkingMs;
+  }
+
+  function hideEmptyThinkingStream(streamEls) {
+    if (!streamEls?.thinkingBlock || streamEls.thinkingMd?.textContent?.trim()) return;
+    streamEls.thinkingBlock.classList.add('hidden');
+    streamEls.thinkingBlock.classList.remove('expanded');
+    delete streamEls.thinkingBlock.dataset.userToggled;
+  }
+
+  function applyThinkingDoneLabel(streamEls, thinkingMs, reasoningContent = '') {
+    if (!streamEls?.thinkingBlock) return;
+    streamEls.thinkingDone = true;
+    streamEls.thinkingBlock.classList.remove('expanded');
+    delete streamEls.thinkingBlock.dataset.userToggled;
+    if (reasoningContent) streamEls.thinkingMd.innerHTML = Markdown.renderMd(reasoningContent);
+    if (Number.isFinite(thinkingMs)) streamEls.thinkingLabel.textContent = `思考过程 · ${ChatRenderer.formatShortDuration(thinkingMs)}`;
+    else streamEls.thinkingLabel.textContent = '思考过程';
+  }
+
+  window.OwnChatStreamUi = {
+    scheduleStreamRender,
+    addTyping,
+    removeTyping,
+    addStreamMsg,
+    updateStream,
+    renderStreamContent,
+    showThinkingContent,
+    updateThinkingStream,
+    finishThinkingStream,
+    hideEmptyThinkingStream,
+    applyThinkingDoneLabel,
+  };
+})();
+
+// ===== Stream Session Poller =====
+(function () {
+  'use strict';
+
+  const Stream = window.OwnChatStream;
+
+  function createProgressState(seed = {}) {
+    const now = Date.now();
+    return {
+      streamStartTime: numberOr(seed.streamStartTime, now),
+      firstTokenTime: nullableNumber(seed.firstTokenTime),
+      outputStartTime: nullableNumber(seed.outputStartTime),
+      reasoningStartTime: nullableNumber(seed.reasoningStartTime),
+      reasoningEndTime: nullableNumber(seed.reasoningEndTime),
+      lastContent: seed.lastContent || '',
+    };
+  }
+
+  function numberOr(value, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  function nullableNumber(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function normalizeSession(session) {
+    return {
+      content: session?.assistantContent || '',
+      reasoning: session?.reasoningContent || '',
+      usage: Stream.normalizeUsage(session?.usage),
+      status: session?.status || '',
+    };
+  }
+
+  function isTerminalSession(session) {
+    return session?.status === 'complete' || session?.status === 'error' || session?.status === 'stopped';
+  }
+
+  function applyProgress(state, session, now = Date.now()) {
+    const progress = normalizeSession(session);
+
+    if (progress.content && state.firstTokenTime === null) {
+      state.firstTokenTime = now - state.streamStartTime;
+      state.outputStartTime = now;
+    }
+    if (progress.reasoning && state.reasoningStartTime === null) {
+      state.reasoningStartTime = now;
+    }
+    if (progress.reasoning && progress.content && state.reasoningEndTime === null) {
+      state.reasoningEndTime = now;
+    }
+
+    const contentChanged = progress.content !== state.lastContent;
+    if (contentChanged) state.lastContent = progress.content;
+
+    return Object.assign({ contentChanged }, progress);
+  }
+
+  function outputTimeMs(state, session, endedAt = Date.now()) {
+    const sessionOutputTimeMs = session?.outputTimeMs != null ? Number(session.outputTimeMs) : null;
+    if (Number.isFinite(sessionOutputTimeMs)) return sessionOutputTimeMs;
+    const localOutputTimeMs = state.outputStartTime ? endedAt - state.outputStartTime : null;
+    return Number.isFinite(localOutputTimeMs) ? localOutputTimeMs : null;
+  }
+
+  function reasoningTimeMs(state) {
+    if (state.reasoningEndTime === null) return null;
+    return state.reasoningEndTime - (state.reasoningStartTime || state.streamStartTime);
+  }
+
+  function ensureSessionOutputTime(session, state, now = Date.now()) {
+    if (!session || session.outputTimeMs != null) return;
+    const time = outputTimeMs(state, session, now);
+    if (Number.isFinite(time)) session.outputTimeMs = time;
+  }
+
+  window.OwnChatStreamSessionPoller = {
+    createProgressState,
+    normalizeSession,
+    isTerminalSession,
+    applyProgress,
+    outputTimeMs,
+    reasoningTimeMs,
+    ensureSessionOutputTime,
+  };
+})();
+
+// ===== App Controller =====
 (function () {
   'use strict';
 
@@ -53,6 +3489,7 @@
   const ImageViewer = window.OwnChatImageViewer;
   const ImageApi = window.OwnChatImageApi;
   const SidebarRenderer = window.OwnChatSidebarRenderer;
+  const Dialogs = window.OwnChatDialogs;
   const {
     imageJobReplies,
     ensureImageJobReplies,
@@ -79,6 +3516,7 @@
   const MAX_IMAGE_REFS = 4;
 
   const state = {
+    appClientId: (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
     mode: load(KEYS.mode) || 'chat',
     baseUrl: load(KEYS.baseUrl) || '',
     apiKey: load(KEYS.apiKey) || '',
@@ -204,12 +3642,12 @@
       ['映射模型', summary.hasImageMapModel ? (summary.imageMapModel || '关闭') : '不修改'],
       ['提示词优化模型', summary.hasImagePromptModel ? (summary.imagePromptModel || '关闭') : '不修改'],
     ].map(([k, v]) => `<div class="config-preview-row"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('');
-    dom.configImportModal.classList.remove('hidden');
+    showModal(dom.configImportModal);
   }
 
   function hideConfigImportConfirm() {
     state.pendingImportConfig = null;
-    dom.configImportModal.classList.add('hidden');
+    hideModal(dom.configImportModal);
   }
 
   function importConfigFromUrl() {
@@ -512,6 +3950,13 @@
     document.documentElement.setAttribute('data-theme', state.theme);
   }
 
+  function updateModeA11y(mode = state.mode) {
+    dom.modeChatBtn.setAttribute('aria-selected', mode === 'chat' ? 'true' : 'false');
+    dom.modeImageBtn.setAttribute('aria-selected', mode === 'image' ? 'true' : 'false');
+    dom.messages.setAttribute('aria-hidden', mode === 'chat' ? 'false' : 'true');
+    dom.imageWorkspace.setAttribute('aria-hidden', mode === 'image' ? 'false' : 'true');
+  }
+
   function toggleTheme() {
     state.theme = state.theme === 'dark' ? 'light' : 'dark';
     applyTheme();
@@ -775,6 +4220,7 @@
     dom.modeChatBtn.parentElement.classList.toggle('is-image', mode === 'image');
     dom.modeChatBtn.classList.toggle('active', mode === 'chat');
     dom.modeImageBtn.classList.toggle('active', mode === 'image');
+    updateModeA11y(mode);
     dom.messages.classList.toggle('hidden', mode !== 'chat');
     dom.welcome.classList.toggle('hidden', mode !== 'chat' || !!currentConv()?.messages.length);
     dom.inputArea.classList.toggle('hidden', mode !== 'chat');
@@ -1188,6 +4634,7 @@
       // === SW proxy mode: SW makes the only fetch, page reads from IndexedDB ===
       navigator.serviceWorker.controller.postMessage({
         type: 'start-stream',
+        ownerId: state.appClientId,
         url: streamUrl,
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
         body: JSON.stringify(reqBody),
@@ -1199,7 +4646,7 @@
 
       // Set up abort via SW message
       state.chatAbortController = { abort: () => {
-        navigator.serviceWorker.controller.postMessage({ type: 'stop-stream' });
+        navigator.serviceWorker.controller.postMessage({ type: 'stop-stream', ownerId: state.appClientId });
       }};
 
       removeTyping();
@@ -1583,12 +5030,40 @@
     const promptRef = parsePromptModelRef(state.imagePromptModel);
     dom.cfgImagePromptModelManual.placeholder = promptRef.model ? `当前 ${promptRef.source}:${promptRef.model}` : '可选，如 chat:gpt-5.5 或 image:gpt-image-2';
     switchSettingsTab(tab === 'image' ? 'image' : 'chat');
-    dom.settingsModal.classList.remove('hidden');
+    showModal(dom.settingsModal);
     updateStorageStats();
   }
 
   function hideSettings() {
-    dom.settingsModal.classList.add('hidden');
+    hideModal(dom.settingsModal);
+  }
+
+  function showModal(modal) {
+    Dialogs.show(modal);
+  }
+
+  function hideModal(modal) {
+    Dialogs.hide(modal);
+  }
+
+  function openModal() {
+    return Dialogs.open([dom.configImportModal, dom.settingsModal]);
+  }
+
+  function trapModalFocus(event, modal) {
+    Dialogs.trapFocus(event, modal);
+  }
+
+  function handleModalKeydown(event) {
+    const modal = openModal();
+    if (!modal) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (modal === dom.configImportModal) hideConfigImportConfirm();
+      else hideSettings();
+      return;
+    }
+    if (event.key === 'Tab') trapModalFocus(event, modal);
   }
 
   function switchSettingsTab(tab) {
@@ -2065,8 +5540,10 @@
 
   function renderImageWorkspace() {
     const selected = currentImageJob();
-    dom.imageEmpty.classList.toggle('hidden', !!selected);
+    const isLoading = state.isImageHistoryLoading;
+    dom.imageEmpty.classList.toggle('hidden', isLoading || !!selected);
     dom.imageGallery.innerHTML = ImageRenderer.renderWorkspace(selected, {
+      isLoading,
       defaultParams: DEFAULT_IMAGE_PARAMS,
       maxRefs: MAX_IMAGE_REFS,
       formatSourcedModel,
@@ -2235,7 +5712,7 @@
       if (swTarget) {
         // === SW background mode: Service Worker owns the long image request ===
         const stopSwImage = (status = 'stopped') => {
-          try { swTarget.postMessage({ type: 'stop-image', status }); } catch { /* ignore */ }
+          try { swTarget.postMessage({ type: 'stop-image', status, ownerId: state.appClientId }); } catch { /* ignore */ }
         };
         state.imageAbortController = { abort: () => {
           stopSwImage();
@@ -2252,6 +5729,7 @@
           startedAt,
           timeoutMs: requestTimeoutMs,
         });
+        swData.ownerId = state.appClientId;
         swTarget.postMessage(swData);
 
         const handleImageSession = async session => {
@@ -2597,7 +6075,7 @@
         dom.messages.scrollTop = dom.messages.scrollHeight;
 
         state.chatAbortController = { abort: () => {
-          navigator.serviceWorker.controller.postMessage({ type: 'stop-stream' });
+          navigator.serviceWorker.controller.postMessage({ type: 'stop-stream', ownerId: state.appClientId });
         }};
 
         state.chatPollTimer = setInterval(async () => {
@@ -3066,6 +6544,7 @@
   document.addEventListener('click', (e) => {
     if (!e.target.closest('.copy-menu')) closeCopyMenus();
   });
+  document.addEventListener('keydown', handleModalKeydown);
 
   dom.cfgSave.addEventListener('click', () => {
     const savingImageTab = dom.settingsImageTab.classList.contains('active');
@@ -3650,6 +7129,9 @@
 
   // ===== Init =====
   applyTheme();
+  dom.settingsModal.setAttribute('aria-hidden', 'true');
+  dom.configImportModal.setAttribute('aria-hidden', 'true');
+  updateModeA11y();
   setupTextareaResizeHandles();
 
   // Register Service Worker for long requests and refresh recovery.
@@ -4039,7 +7521,7 @@
       const stopRecoveredSwImage = async () => {
         try {
           const target = await ensureServiceWorkerTarget(1000);
-          target?.postMessage({ type: 'stop-image', status: 'timeout' });
+          target?.postMessage({ type: 'stop-image', status: 'timeout', ownerId: state.appClientId });
         } catch { /* ignore */ }
       };
       state.isGeneratingImage = true;
