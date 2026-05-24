@@ -3186,6 +3186,21 @@
 
   let streamRafPending = false;
   let streamRafCallbacks = new Map();
+  const AUTO_SCROLL_THRESHOLD = 96;
+
+  function isNearBottom(messagesEl, threshold = AUTO_SCROLL_THRESHOLD) {
+    if (!messagesEl) return true;
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= threshold;
+  }
+
+  function scrollToBottom(messagesEl) {
+    if (!messagesEl) return;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function maybeScrollToBottom(messagesEl, shouldFollow) {
+    if (shouldFollow) scrollToBottom(messagesEl);
+  }
 
   function scheduleStreamRender(callback, renderKey = callback) {
     if (typeof callback !== 'function') return;
@@ -3216,7 +3231,7 @@
     welcomeEl.classList.add('hidden');
     if (typeof onBeforeAppend === 'function') onBeforeAppend();
     messagesEl.appendChild(el);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollToBottom(messagesEl);
     return el;
   }
 
@@ -3225,6 +3240,7 @@
   }
 
   function addStreamMsg(messagesEl, aiAvatar) {
+    const shouldFollow = isNearBottom(messagesEl);
     const el = document.createElement('div');
     el.className = 'chat-msg ai';
     el.id = 'stream-el';
@@ -3247,7 +3263,7 @@
       </div>
     `;
     messagesEl.appendChild(el);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    maybeScrollToBottom(messagesEl, shouldFollow);
     return {
       thinkingMd: el.querySelector('.thinking-content .msg-md'),
       thinkingBlock: el.querySelector('.thinking-block'),
@@ -3258,22 +3274,25 @@
   }
 
   function updateStream(messagesEl, el, text) {
+    const shouldFollow = isNearBottom(messagesEl);
     scheduleStreamRender(() => {
       el.innerHTML = Markdown.renderMd(text);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      maybeScrollToBottom(messagesEl, shouldFollow);
     }, el);
   }
 
   function renderStreamContent(messagesEl, streamEls, content, opts = {}) {
+    const shouldFollow = isNearBottom(messagesEl);
     scheduleStreamRender(() => {
       if (opts.hideWaiting !== false) streamEls.waiting?.classList.add('hidden');
       streamEls.contentMd.innerHTML = Markdown.renderMd(content);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      maybeScrollToBottom(messagesEl, shouldFollow);
     }, streamEls?.contentMd || streamEls);
   }
 
   function showThinkingContent(messagesEl, streamEls, reasoningContent, opts = {}) {
     if (!streamEls?.thinkingBlock || !reasoningContent || opts.showThinking === false) return;
+    const shouldFollow = isNearBottom(messagesEl);
     scheduleStreamRender(() => {
       streamEls.waiting?.classList.add('hidden');
       streamEls.thinkingBlock.classList.remove('hidden');
@@ -3283,12 +3302,13 @@
       }
       streamEls.thinkingMd.innerHTML = Markdown.renderMd(reasoningContent);
       if (opts.label) streamEls.thinkingLabel.textContent = opts.label;
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      maybeScrollToBottom(messagesEl, shouldFollow);
     }, streamEls.thinkingMd);
   }
 
   function updateThinkingStream(messagesEl, streamEls, reasoningContent, reasoningStartTime, streamStartTime, showThinking) {
     if (!showThinking || !reasoningContent) return;
+    const shouldFollow = isNearBottom(messagesEl);
     scheduleStreamRender(() => {
       streamEls.waiting?.classList.add('hidden');
       if (streamEls.thinkingBlock.classList.contains('hidden')) {
@@ -3300,7 +3320,7 @@
       const thinkingMs = Date.now() - (reasoningStartTime || streamStartTime);
       if (!streamEls.thinkingDone) streamEls.thinkingLabel.textContent = `思考中... · ${ChatRenderer.formatShortDuration(thinkingMs)}`;
       streamEls.thinkingMd.innerHTML = Markdown.renderMd(reasoningContent);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      maybeScrollToBottom(messagesEl, shouldFollow);
     }, streamEls.thinkingMd);
   }
 
@@ -3333,6 +3353,9 @@
     addTyping,
     removeTyping,
     addStreamMsg,
+    isNearBottom,
+    scrollToBottom,
+    maybeScrollToBottom,
     updateStream,
     renderStreamContent,
     showThinkingContent,
@@ -4371,7 +4394,7 @@
       },
     });
 
-    dom.messages.scrollTop = dom.messages.scrollHeight;
+    StreamUi.scrollToBottom(dom.messages);
   }
 
   function addTyping() {
@@ -6072,7 +6095,7 @@
           showThinkingContent(streamEls, initialReasoning);
           streamProgress.reasoningStartTime = Date.now() - 1000;
         }
-        dom.messages.scrollTop = dom.messages.scrollHeight;
+        StreamUi.scrollToBottom(dom.messages);
 
         state.chatAbortController = { abort: () => {
           navigator.serviceWorker.controller.postMessage({ type: 'stop-stream', ownerId: state.appClientId });
@@ -6133,7 +6156,7 @@
       if (conversationShowThinking(conv) && existingReasoning) {
         showThinkingContent(state.streamEls, existingReasoning);
       }
-      dom.messages.scrollTop = dom.messages.scrollHeight;
+      StreamUi.scrollToBottom(dom.messages);
 
       // Start a poll for the fallback mode to update the recreated stream UI from conv.messages
       // (since the fallback flow's streamEls is stale and its DOM updates are lost)
@@ -6160,7 +6183,6 @@
         if (conversationShowThinking(conv) && r) {
           showThinkingContent(state.streamEls, r);
         }
-        dom.messages.scrollTop = dom.messages.scrollHeight;
       }, 500);
     }
   }
@@ -7277,7 +7299,7 @@
         </div>
       `;
       dom.messages.appendChild(el);
-      dom.messages.scrollTop = dom.messages.scrollHeight;
+      StreamUi.scrollToBottom(dom.messages);
       return {
         contentMd: el.querySelector('.chat-msg-body > .msg-md'),
         thinkingMd: el.querySelector('.thinking-content .msg-md'),
@@ -7389,15 +7411,17 @@
       if (session.status === 'connecting' || !recoveryEls) return;
 
       if (conversationShowThinking(conv) && msg.reasoningContent && recoveryEls.thinkingMd) {
+        const shouldFollow = StreamUi.isNearBottom(dom.messages);
         scheduleStreamRender(() => {
           recoveryEls.waiting?.classList.add('hidden');
           recoveryEls.thinkingMd.innerHTML = renderMd(msg.reasoningContent);
           recoveryEls.thinkingLabel.textContent = msg.content?.trim() ? '思考过程' : '正在恢复思考过程...';
           if (msg.content?.trim()) recoveryEls.thinkingBlock?.classList.remove('expanded');
           recoveryEls.contentMd.innerHTML = renderMd(msg.content);
-          dom.messages.scrollTop = dom.messages.scrollHeight;
+          StreamUi.maybeScrollToBottom(dom.messages, shouldFollow);
         });
       } else {
+        const shouldFollow = StreamUi.isNearBottom(dom.messages);
         scheduleStreamRender(() => {
           if (conversationShowThinking(conv)) {
             recoveryEls.waiting?.classList.add('hidden');
@@ -7406,7 +7430,7 @@
             recoveryEls.waiting?.classList.toggle('hidden', !!(msg.content || '').trim());
           }
           recoveryEls.contentMd.innerHTML = renderMd(msg.content);
-          dom.messages.scrollTop = dom.messages.scrollHeight;
+          StreamUi.maybeScrollToBottom(dom.messages, shouldFollow);
         });
       }
     }, 500);
