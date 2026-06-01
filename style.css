@@ -1839,6 +1839,71 @@ html[data-boot-mode="image"] .sidebar-new-image-mode {
   opacity: 1
 }
 
+.image-result-actions-visible {
+  opacity: 1
+}
+
+.image-result-failed {
+  border-color: rgba(239, 68, 68, 0.38);
+  background: color-mix(in srgb, var(--bg-code) 82%, var(--danger) 18%)
+}
+
+.image-result-retrying {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--border) 48%);
+  background: color-mix(in srgb, var(--bg-code) 84%, var(--accent) 16%)
+}
+
+.image-failed-body {
+  display: flex;
+  min-height: 178px;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 26px 18px 58px;
+  text-align: center
+}
+
+.image-failed-mark {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+  font-weight: 700;
+  font-size: 18px;
+  line-height: 1
+}
+
+.image-failed-title {
+  color: var(--text-1);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35
+}
+
+.image-failed-text {
+  max-width: 100%;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden
+}
+
+.image-result-meta-failed {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.08)
+}
+
 .image-viewer {
   position: fixed;
   inset: 0;
@@ -2920,6 +2985,31 @@ html[data-boot-mode="image"] .sidebar-new-image-mode {
   opacity: 0.55
 }
 
+.settings-storage-action {
+  flex-shrink: 0;
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-hover);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition), border-color var(--transition)
+}
+
+.settings-storage-action:hover {
+  border-color: var(--accent);
+  color: var(--text-1);
+  background: var(--bg-input)
+}
+
+.settings-storage-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55
+}
+
 .settings-storage-summary {
   display: block;
   margin-top: 3px;
@@ -2927,6 +3017,10 @@ html[data-boot-mode="image"] .sidebar-new-image-mode {
   font-size: 12px;
   line-height: 1.4;
   overflow-wrap: anywhere
+}
+
+.settings-storage-summary.is-warning {
+  color: var(--danger)
 }
 
 .tool-chip-group {

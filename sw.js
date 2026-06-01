@@ -603,6 +603,7 @@ async function startImage(data) {
 
   try {
     const requestCount = Math.max(1, Math.min(10, Math.round(Number(data.count) || 1)));
+    const maxParallel = Math.max(1, Math.min(requestCount, Math.round(Number(data.maxParallel) || 5)));
     const fetchOnce = async () => {
       let resp;
       if (requestType === 'generations' || requestType === 'responses') {
@@ -699,62 +700,96 @@ async function startImage(data) {
     let completedCount = 0;
     let successCount = 0;
     let failedCount = 0;
+    const currentOutputs = () => outputs.filter(Boolean).slice(0, requestCount);
+    const successOutputs = () => currentOutputs().filter(out => out && !out.failed && (out.b64 || out.url));
+    const failedOutput = (error, requestIndex) => ({
+      failed: true,
+      requestIndex,
+      error: String(error?.message || error || '生成失败'),
+      createdAt: Date.now(),
+    });
     const publishProgress = async () => {
       await updateImageSession({
         id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
         status: 'streaming', updatedAt: Date.now(),
-        outputs: JSON.stringify(outputs),
+        outputs: JSON.stringify(currentOutputs()),
         usage: combineUsages(usages),
         completedCount,
-        successCount,
+        successCount: successOutputs().length,
         failedCount,
         totalCount: requestCount,
+        maxParallel,
       }, { persist: false });
     };
-    const settled = await Promise.allSettled(Array.from({ length: requestCount }, async () => {
+    const runQueue = async worker => {
+      const settled = new Array(requestCount);
+      let nextIndex = 0;
+      let active = 0;
+      return new Promise(resolve => {
+        const launch = () => {
+          if (nextIndex >= requestCount && active === 0) {
+            resolve(settled);
+            return;
+          }
+          while (active < maxParallel && nextIndex < requestCount && !controller.signal.aborted) {
+            const index = nextIndex++;
+            active += 1;
+            Promise.resolve()
+              .then(() => worker(index))
+              .then(value => {
+                settled[index] = { status: 'fulfilled', value };
+              }, reason => {
+                settled[index] = { status: 'rejected', reason };
+              })
+              .finally(() => {
+                active -= 1;
+                launch();
+              });
+          }
+          if (controller.signal.aborted && active === 0) resolve(settled);
+        };
+        launch();
+      });
+    };
+    const settled = await runQueue(async requestIndex => {
       try {
         const result = await fetchOnce();
-        const resultOutputs = parseResultOutputs(result);
+        const resultOutputs = parseResultOutputs(result).map(out => Object.assign({}, out, { requestIndex }));
         if (!resultOutputs.length) throw new Error('接口未返回可显示的图片数据');
         const usage = OwnChatImageShared.normalizeImageUsage(result.usage || result.response?.usage);
-        outputs.push(...resultOutputs);
-        successCount += resultOutputs.length;
+        outputs[requestIndex] = resultOutputs[0];
+        successCount = successOutputs().length;
         if (usage) usages.push(usage);
         completedCount += 1;
         await publishProgress();
         return result;
       } catch (error) {
+        outputs[requestIndex] = failedOutput(error, requestIndex);
         failedCount += 1;
         completedCount += 1;
         await publishProgress();
         throw error;
       }
-    }));
+    });
     if (controller.signal.aborted) {
       const abortError = new Error('Aborted');
       abortError.name = 'AbortError';
       throw abortError;
     }
     const failed = settled.filter(item => item.status === 'rejected');
-    if (!outputs.length) {
-      const firstError = failed[0]?.reason;
-      throw firstError || new Error('接口未返回可显示的图片数据');
-    }
-    if (!settled.some(item => item.status === 'fulfilled') && failed.length) {
-      throw failed[0].reason || new Error('No response received');
-    }
-    if (!outputs.length) throw new Error('接口未返回可显示的图片数据');
 
     const usage = combineUsages(usages);
     await updateImageSession({
       id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
       status: 'complete', updatedAt: Date.now(),
-      outputs: JSON.stringify(outputs),
+      outputs: JSON.stringify(currentOutputs()),
       usage,
       completedCount: requestCount,
-      successCount,
+      successCount: successOutputs().length,
       failedCount,
       totalCount: requestCount,
+      maxParallel,
+      error: !successOutputs().length && failed.length ? String(failed[0]?.reason?.message || failed[0]?.reason || '生成失败') : '',
     });
   } catch (e) {
     if (e?.name === 'AbortError') {
