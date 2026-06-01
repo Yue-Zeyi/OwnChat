@@ -1252,7 +1252,7 @@
 
   function normalizeImageSession(session) {
     if (!session) return null;
-    if ((session.status === 'connecting' || session.status === 'streaming')) {
+    if (session.status === 'connecting') {
       if (typeof session.outputs === 'string' && session.outputs.trim()) {
         return Object.assign({}, session, { status: 'complete' });
       }
@@ -1940,6 +1940,29 @@
     return normalizeImageUsage(result?.usage);
   }
 
+  function combineImageUsages(usages) {
+    const normalized = (usages || []).map(normalizeImageUsage).filter(Boolean);
+    if (!normalized.length) return null;
+    const combined = {};
+    const add = (target, key, value) => {
+      if (Number.isFinite(value)) target[key] = (target[key] || 0) + value;
+    };
+    normalized.forEach(usage => {
+      add(combined, 'input', usage.input);
+      add(combined, 'output', usage.output);
+      add(combined, 'total', usage.total);
+      if (usage.details) {
+        combined.details = combined.details || {};
+        add(combined.details, 'inputImage', usage.details.inputImage);
+        add(combined.details, 'inputText', usage.details.inputText);
+        add(combined.details, 'outputImage', usage.details.outputImage);
+        add(combined.details, 'outputText', usage.details.outputText);
+      }
+    });
+    if (combined.details && !Object.keys(combined.details).length) delete combined.details;
+    return Object.keys(combined).length ? combined : null;
+  }
+
   function safeFileStem(value, fallback, maxLength = 60) {
     return (value || fallback).replace(/[\\/:*?"<>|]+/g, '-').slice(0, maxLength) || fallback;
   }
@@ -2209,6 +2232,7 @@
     imageResponseResult,
     imageResultOutputs,
     imageResultUsage,
+    combineImageUsages,
     imageFilename,
     attachmentImageFilename,
     imageViewerItemsForJob,
@@ -2341,6 +2365,7 @@
     const form = new FormData();
     form.append('model', model);
     form.append('prompt', prompt.trim());
+    form.append('n', '1');
     ImageCore.imageReferenceList(refs).forEach(item => {
       const refBlob = ImageCore.dataUrlToBlob(item.base64);
       form.append('image', refBlob, ImageCore.filenameForBlob(item.name, refBlob));
@@ -2356,7 +2381,7 @@
     const requestModel = mapModel && mapEndpoint ? mapEndpoint.model : model;
     const effectiveParams = ImageCore.sanitizeImageParamsForModel(requestModel, params);
     const headers = authHeaders(imageEndpoint.apiKey);
-    const base = { type: 'start-image', jobId, startedAt, timeoutMs, outputFormat: effectiveParams.outputFormat };
+    const base = { type: 'start-image', jobId, startedAt, timeoutMs, outputFormat: effectiveParams.outputFormat, count: effectiveParams.count || 1 };
 
     if (mapModel && mapEndpoint) {
       return Object.assign(base, {
@@ -2472,7 +2497,7 @@
               <span>${ImageCore.formatDateTime(createdAt || job.createdAt)}</span>
               <span>~${Tokens.formatTokenCount(Tokens.estimateTokens(prompt))} tokens</span>
               <button class="msg-action-btn image-action" data-action="copy-prompt" data-job="${esc(job.id)}" data-prompt="${esc(prompt || '')}" type="button" title="复制提示词" data-tooltip="复制提示词">${icons.copy || ''}</button>
-              <button class="msg-action-btn image-action" data-action="reuse" data-job="${esc(job.id)}" data-prompt="${esc(prompt || '')}" data-size="${esc(params.size || '')}" data-quality="${esc(params.quality || '')}" data-format="${esc(params.outputFormat || '')}" data-background="${esc(params.background || '')}" type="button" title="复用到输入框" data-tooltip="复用到输入框">${icons.edit || ''}</button>
+              <button class="msg-action-btn image-action" data-action="reuse" data-job="${esc(job.id)}" data-prompt="${esc(prompt || '')}" data-size="${esc(params.size || '')}" data-quality="${esc(params.quality || '')}" data-count="${esc(params.count || 1)}" data-format="${esc(params.outputFormat || '')}" data-background="${esc(params.background || '')}" type="button" title="复用到输入框" data-tooltip="复用到输入框">${icons.edit || ''}</button>
             </div>
           </div>
         </div>
@@ -2483,6 +2508,7 @@
   function renderReplyMessage(job, reply, replyIndex, options = {}) {
     const defaultParams = options.defaultParams || {};
     const params = reply.params || job.params || defaultParams;
+    const progressInfo = imageProgressInfo(job, reply);
     const replyUserMessage = replyIndex > 0
       ? renderUserMessage(job, reply.prompt || job.prompt, reply.inputImages || null, reply.createdAt || reply.startedAt, params, replyIndex, options)
       : '';
@@ -2495,11 +2521,20 @@
       metaText(reply.model || job.model),
       metaText(reply.mapModel && options.formatSourcedModel ? `映射 ${options.formatSourcedModel(reply.mapModel)}` : ''),
       metaText(reply.durationMs ? `耗时 ${ImageCore.formatDuration(reply.durationMs)}` : ''),
+      metaText((reply.progress || job.progress || progressInfo.total > 1) ? progressSummaryText(progressInfo) : ''),
       ...ImageCore.imageUsageMeta(reply.usage || job.usage).map(metaText),
       metaText(ImageCore.formatDateTime(reply.durationMs ? (reply.startedAt || reply.createdAt || job.createdAt) + reply.durationMs : (reply.createdAt || job.createdAt))),
     ].filter(Boolean).join('');
 
-    const outputs = (reply.outputs || []).map((out, index) => renderOutput(job, reply, replyIndex, out, index, options)).join('');
+    const outputList = reply.outputs || [];
+    const outputs = outputList.map((out, index) => renderOutput(job, reply, replyIndex, out, index, options)).join('');
+    const resultsClass = `image-results${outputList.length > 1 ? ' image-results-gallery' : ''}`;
+    const inlineProgress = reply.status === 'generating' ? renderProgressBlock(job, options, { inline: true }) : '';
+    const jobActions = reply.status === 'generating' ? '' : `
+            <div class="image-job-actions">
+              <button class="btn-secondary image-action" data-action="edit-latest" data-job="${esc(job.id)}" data-reply="${replyIndex}" type="button">编辑</button>
+              <button class="btn-secondary image-action" data-action="retry" data-job="${esc(job.id)}" data-reply="${replyIndex}" type="button">重绘</button>
+            </div>`;
 
     return `
       ${replyUserMessage}
@@ -2508,12 +2543,10 @@
           <div class="image-chat-avatar image-ai-avatar" aria-label="AI"></div>
           <div class="image-chat-bubble image-chat-bubble-result">
             ${reply.error ? `<div class="image-error">${esc(reply.error)}</div>` : ''}
-            <div class="image-results">${outputs}</div>
+            <div class="${resultsClass}">${outputs}</div>
+            ${inlineProgress}
             <div class="image-msg-meta">${aiMetaParts}</div>
-            <div class="image-job-actions">
-              <button class="btn-secondary image-action" data-action="edit-latest" data-job="${esc(job.id)}" data-reply="${replyIndex}" type="button">编辑</button>
-              <button class="btn-secondary image-action" data-action="retry" data-job="${esc(job.id)}" data-reply="${replyIndex}" type="button">${reply.status === 'generating' ? '生成中' : '重绘'}</button>
-            </div>
+            ${jobActions}
           </div>
         </div>
       </div>
@@ -2547,21 +2580,9 @@
 
   function renderProgressMessage(job, options = {}) {
     if (job.status !== 'generating') return '';
-    const now = options.now || Date.now();
-    const waitedMs = now - (job.startedAt || job.createdAt);
-    const progress = `<div class="image-progress" data-job="${esc(job.id)}">
-      <div class="image-progress-indicator">
-        <div class="image-spinner"></div>
-      </div>
-      <div class="image-progress-body">
-        <div class="image-progress-title">正在生成图片</div>
-        <div class="image-progress-stats">
-          <span class="image-progress-elapsed">耗时 ${ImageCore.formatDuration(waitedMs)}</span>
-        </div>
-        <div class="image-progress-note">正在生成，请勿关闭页面</div>
-      </div>
-      <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${esc(job.id)}" type="button">取消</button>
-    </div>`;
+    const activeReply = ImageCore.currentImageActiveReply(job);
+    if ((activeReply?.outputs || []).length) return '';
+    const progress = renderProgressBlock(job, options);
 
     return `
       <div class="image-chat-msg ai">
@@ -2571,6 +2592,45 @@
         </div>
       </div>
     `;
+  }
+
+  function renderProgressBlock(job, options = {}, opts = {}) {
+    const now = options.now || Date.now();
+    const waitedMs = now - (job.startedAt || job.createdAt);
+    const progress = imageProgressInfo(job);
+    const count = progress.total;
+    return `<div class="image-progress${opts.inline ? ' image-progress-inline' : ''}" data-job="${esc(job.id)}">
+      <div class="image-progress-indicator">
+        <div class="image-spinner"></div>
+      </div>
+      <div class="image-progress-body">
+        <div class="image-progress-title">正在生成${count > 1 ? ` ${count} 张` : ''}图片</div>
+        <div class="image-progress-stats">
+          <span class="image-progress-elapsed">耗时 ${ImageCore.formatDuration(waitedMs)}</span>
+          <span>完成 ${progress.completed}/${progress.total}</span>
+          <span>成功 ${progress.success}</span>
+          ${progress.failed ? `<span class="image-progress-failed">失败 ${progress.failed}</span>` : ''}
+        </div>
+        <div class="image-progress-note">${count > 1 ? '多张图片并发生成中，请勿关闭页面' : '正在生成，请勿关闭页面'}</div>
+      </div>
+      <button class="btn-secondary image-action image-cancel-btn" data-action="cancel" data-job="${esc(job.id)}" type="button">取消</button>
+    </div>`;
+  }
+
+  function imageProgressInfo(job, reply = null) {
+    const activeReply = reply || ImageCore.currentImageActiveReply(job) || {};
+    const progress = activeReply.progress || job.progress || {};
+    const total = Math.max(1, Number(progress.total) || Number(activeReply.params?.count) || Number(job.params?.count) || 1);
+    const outputCount = (activeReply.outputs || []).length;
+    const success = Math.max(0, Number.isFinite(Number(progress.success)) ? Number(progress.success) : outputCount);
+    const failed = Math.max(0, Number(progress.failed) || 0);
+    const completed = Math.min(total, Math.max(success + failed, Number(progress.completed) || 0));
+    return { total, completed, success, failed };
+  }
+
+  function progressSummaryText(progress) {
+    const failed = progress.failed ? `，失败 ${progress.failed}` : '';
+    return `完成 ${progress.completed}/${progress.total}，成功 ${progress.success}${failed}`;
   }
 
   window.OwnChatImageRenderer = {
@@ -3490,6 +3550,7 @@
     clearStreamSession,
     getImageSession,
     normalizeImageSession,
+    parseImageSessionOutputs,
     clearImageSession,
     clearImageSessionForJob,
     writeImageSession,
@@ -3535,8 +3596,9 @@
 
   // ===== State =====
   const DEFAULT_IMAGE_MODELS = ['gpt-image-2', 'gpt-image-2-2026-04-21', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'dall-e-3', 'dall-e-2'];
-  const DEFAULT_IMAGE_PARAMS = { size: 'auto', quality: 'auto', outputFormat: 'png', background: 'auto' };
-  const MAX_IMAGE_REFS = 4;
+  const DEFAULT_IMAGE_PARAMS = { size: 'auto', quality: 'auto', outputFormat: 'png', background: 'auto', count: 1 };
+  const MAX_IMAGE_REFS = 16;
+  const MAX_IMAGE_COUNT = 10;
 
   const state = {
     appClientId: (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
@@ -3641,7 +3703,7 @@
       state.imageModelsCache,
       DEFAULT_IMAGE_MODELS,
     );
-    state.imageDefaults = sanitizeCurrentImageParams();
+    state.imageDefaults = sanitizeImageParams(state.imageDefaults);
     if (['image', 'draw', 'painting'].includes(summary.mode)) state.mode = 'image';
     if (['chat', 'dialog', 'conversation'].includes(summary.mode)) state.mode = 'chat';
     persist();
@@ -3876,6 +3938,7 @@
     imagePrompt: $('image-prompt'),
     imageSize: $('image-size'),
     imageQuality: $('image-quality'),
+    imageCount: $('image-count'),
     imageFormat: $('image-format'),
     imageBackground: $('image-background'),
     imageBackgroundHint: $('image-background-hint'),
@@ -4180,8 +4243,20 @@
     return state.imageMapModel ? imageMapEndpoint()?.model : state.imageModel;
   }
 
-  function sanitizeCurrentImageParams(params = state.imageDefaults) {
-    return ImageCore.sanitizeImageParamsForModel(effectiveImageRequestModel(), Object.assign({}, DEFAULT_IMAGE_PARAMS, params || {}));
+  function sanitizeImageParams(params = {}) {
+    const next = ImageCore.sanitizeImageParamsForModel(effectiveImageRequestModel(), Object.assign({}, DEFAULT_IMAGE_PARAMS, params || {}));
+    const count = Math.round(Number(next.count));
+    next.count = Number.isFinite(count) ? Math.min(MAX_IMAGE_COUNT, Math.max(1, count)) : 1;
+    return next;
+  }
+
+  function sanitizeCurrentImageParams(params = imageParamsForCurrentJob()) {
+    return sanitizeImageParams(params);
+  }
+
+  function imageParamsForCurrentJob() {
+    const job = currentImageJob();
+    return sanitizeImageParams(job?.params || DEFAULT_IMAGE_PARAMS);
   }
 
   function syncImageBackgroundSupport() {
@@ -5161,6 +5236,7 @@
       state.isImageHistoryLoading = false;
       if (state.mode === 'image') {
         updateSidebar();
+        syncImageParams();
         renderImageWorkspace();
         scrollImageWorkspaceToBottom(false);
       }
@@ -5169,25 +5245,36 @@
 
   // ===== Image Mode =====
   function syncImageParams() {
-    state.imageDefaults = sanitizeCurrentImageParams();
-    dom.imageSize.value = state.imageDefaults.size;
-    dom.imageQuality.value = state.imageDefaults.quality;
-    dom.imageFormat.value = state.imageDefaults.outputFormat;
-    dom.imageBackground.value = state.imageDefaults.background;
+    const params = imageParamsForCurrentJob();
+    dom.imageSize.value = params.size;
+    dom.imageQuality.value = params.quality;
+    dom.imageCount.value = String(params.count || 1);
+    dom.imageFormat.value = params.outputFormat;
+    dom.imageBackground.value = params.background;
     syncImageBackgroundSupport();
   }
 
   function saveImageParams() {
-    state.imageDefaults = sanitizeCurrentImageParams({
+    const params = sanitizeCurrentImageParams({
       size: dom.imageSize.value,
       quality: dom.imageQuality.value,
+      count: dom.imageCount.value,
       outputFormat: dom.imageFormat.value,
       background: dom.imageBackground.value,
     });
-    dom.imageFormat.value = state.imageDefaults.outputFormat;
-    dom.imageBackground.value = state.imageDefaults.background;
+    const job = currentImageJob();
+    if (job) {
+      job.params = Object.assign({}, job.params || {}, params);
+      imageDbPutJob(job);
+    } else {
+      state.imageDefaults = sanitizeImageParams(DEFAULT_IMAGE_PARAMS);
+    }
+    dom.imageCount.value = String(params.count || 1);
+    dom.imageFormat.value = params.outputFormat;
+    dom.imageBackground.value = params.background;
     syncImageBackgroundSupport();
     persist();
+    return params;
   }
 
   function currentImageJob() {
@@ -5662,6 +5749,8 @@
     const startedAt = Date.now();
     const refSource = refOverride !== undefined ? refOverride : state.imageRefs;
     const refs = imageReferencePayload(refSource);
+    const requestCount = Math.max(1, Math.min(MAX_IMAGE_COUNT, Number(params.count) || 1));
+    params.count = requestCount;
     const estimatedSeconds = estimateImageSeconds(params);
     const job = retryJob || {
       id: startedAt.toString(),
@@ -5753,14 +5842,29 @@
           timeoutMs: requestTimeoutMs,
         });
         swData.ownerId = state.appClientId;
-        swTarget.postMessage(swData);
 
         const handleImageSession = async session => {
           if (!session || (session.jobId && session.jobId !== job.id)) return false;
+          if (session.status === 'streaming') {
+            if (applyStreamingImageSession(job, activeReply, session)) {
+              persist();
+              imageDbPutJob(job);
+              updateSidebar();
+              renderImageWorkspace();
+              scrollImageWorkspaceToBottom(false);
+              updateImageGenerateBtn();
+            }
+            return false;
+          }
           if (session.status === 'complete') {
             completeImageJobFromSession(job, activeReply, session, startedAt);
+            applyImageProgressFromSession(job, activeReply, session);
             if (refs.length) { setImageReferences([]); renderImageRefPreview(); }
-            showToast(job.status === 'done' ? '图片已生成' : '生成失败');
+            const totalCount = Math.max(1, Number(session.totalCount) || Number(activeReply?.params?.count) || 1);
+            const outputCount = (activeReply.outputs || []).length;
+            showToast(job.status === 'done'
+              ? (outputCount < totalCount ? `已生成 ${outputCount}/${totalCount} 张，部分请求失败` : '图片已生成')
+              : '生成失败');
             finishImageJob();
             await clearImageSession();
             return true;
@@ -5798,6 +5902,7 @@
         const removeImageSessionMessage = () => {
           try { navigator.serviceWorker.removeEventListener('message', onImageSessionMessage); } catch { /* ignore */ }
         };
+        swTarget.postMessage(swData);
 
         // Poll IndexedDB for image result (every 500ms)
         state.imagePollTimer = setInterval(async () => {
@@ -5829,18 +5934,74 @@
         }, 500);
 
       } else {
-        // === Fallback: no SW, direct fetch ===
+        // === Fallback: no SW, direct fetch; multi-image mode intentionally fans out concurrent n=1 requests ===
         timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
-        const imageResult = state.imageMapModel
-          ? await ImageApi.requestMappedImage(imageMapEndpoint(), prompt, params, refs, controller.signal)
+        const requestSingleImage = () => state.imageMapModel
+          ? ImageApi.requestMappedImage(imageMapEndpoint(), prompt, params, refs, controller.signal)
           : refs.length
-            ? await ImageApi.requestImageEdit({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, refs, controller.signal)
-            : await ImageApi.requestOneImage({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, controller.signal);
-        const nextOutputs = ImageCore.imageResultOutputs(imageResult);
-        if (nextOutputs.length === 0) throw new Error('接口未返回可显示的图片数据');
-        setImageJobDone(job, activeReply, nextOutputs, startedAt, ImageCore.imageResultUsage(imageResult));
+            ? ImageApi.requestImageEdit({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, refs, controller.signal)
+            : ImageApi.requestOneImage({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, controller.signal);
+        const successes = [];
+        let directCompleted = 0;
+        let directFailed = 0;
+        const updateDirectProgress = () => {
+          const nextOutputs = successes.flatMap(ImageCore.imageResultOutputs);
+          const progress = {
+            total: requestCount,
+            completed: Math.min(requestCount, directCompleted),
+            success: nextOutputs.length,
+            failed: directFailed,
+          };
+          activeReply.progress = progress;
+          job.progress = progress;
+          if (nextOutputs.length) {
+            activeReply.outputs = nextOutputs;
+            activeReply.usage = ImageCore.combineImageUsages(successes.map(ImageCore.imageResultUsage));
+            job.outputs = nextOutputs;
+            job.usage = activeReply.usage;
+          }
+          persist();
+          imageDbPutJob(job);
+          updateSidebar();
+          renderImageWorkspace();
+          scrollImageWorkspaceToBottom(false);
+          updateImageGenerateBtn();
+        };
+        const settled = await Promise.allSettled(Array.from({ length: requestCount }, async () => {
+          try {
+            const result = await requestSingleImage();
+            if (!ImageCore.imageResultOutputs(result).length) throw new Error('接口未返回可显示的图片数据');
+            successes.push(result);
+            directCompleted += 1;
+            updateDirectProgress();
+            return result;
+          } catch (error) {
+            directCompleted += 1;
+            directFailed += 1;
+            updateDirectProgress();
+            throw error;
+          }
+        }));
+        if (controller.signal.aborted) {
+          const abortError = new Error('Aborted');
+          abortError.name = 'AbortError';
+          throw abortError;
+        }
+        const nextOutputs = successes.flatMap(ImageCore.imageResultOutputs);
+        if (nextOutputs.length === 0) {
+          const firstError = settled.find(item => item.status === 'rejected')?.reason;
+          throw firstError || new Error('接口未返回可显示的图片数据');
+        }
+        setImageJobDone(job, activeReply, nextOutputs, startedAt, ImageCore.combineImageUsages(successes.map(ImageCore.imageResultUsage)));
+        activeReply.progress = {
+          total: requestCount,
+          completed: requestCount,
+          success: nextOutputs.length,
+          failed: directFailed,
+        };
+        job.progress = activeReply.progress;
         if (refs.length) { setImageReferences([]); renderImageRefPreview(); }
-        showToast('图片已生成');
+        showToast(nextOutputs.length >= requestCount ? '图片已生成' : `已生成 ${nextOutputs.length}/${requestCount} 张，部分请求失败`);
         finishImageJob();
       }
     } catch (e) {
@@ -5895,6 +6056,7 @@
       dom.imagePrompt.value = '';
       setImageReferences([]);
       renderImageRefPreview();
+      syncImageParams();
       persist();
       updateSidebar();
       renderImageWorkspace();
@@ -6302,6 +6464,7 @@
       persist();
       await Promise.all(ids.map(id => imageDbDeleteJob(id)));
       updateSidebar();
+      syncImageParams();
       renderImageWorkspace();
       scrollImageWorkspaceToBottom(false);
       updateStorageStatsIfOpen();
@@ -6364,6 +6527,7 @@
         persist();
         await imageDbDeleteJob(id);
         updateSidebar();
+        syncImageParams();
         renderImageWorkspace();
         scrollImageWorkspaceToBottom(false);
         updateStorageStatsIfOpen();
@@ -6374,6 +6538,7 @@
         state.currentImageJobId = item.dataset.id;
         persist();
         updateSidebar();
+        syncImageParams();
         renderImageWorkspace();
         scrollImageWorkspaceToBottom(false);
         closeSidebarMobile();
@@ -6603,7 +6768,7 @@
       state.imageMapModel = mapModel || '';
       state.imagePromptModel = promptModel || '';
       state.imageModelsCache = mergeUnique([im], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
-      state.imageDefaults = sanitizeCurrentImageParams();
+      state.imageDefaults = sanitizeImageParams(state.imageDefaults);
     }
     persist();
     updateModelBadge();
@@ -6656,7 +6821,7 @@
     if (!opt) return;
     if (state.mode === 'image') {
       state.imageModel = opt.dataset.model;
-      state.imageDefaults = sanitizeCurrentImageParams();
+      state.imageDefaults = sanitizeImageParams(state.imageDefaults);
       persist([KEYS.imageModel]);
       syncImageParams();
     }
@@ -6889,18 +7054,18 @@
     renderImageRefPreview();
     updateImageGenerateBtn();
   });
-  [dom.imageSize, dom.imageQuality, dom.imageFormat, dom.imageBackground].forEach(el => {
+  [dom.imageSize, dom.imageQuality, dom.imageCount, dom.imageFormat, dom.imageBackground].forEach(el => {
     el.addEventListener('change', () => {
       saveImageParams();
       updateImageGenerateBtn();
     });
   });
   dom.imageGenerateBtn.addEventListener('click', () => {
-    saveImageParams();
+    const params = saveImageParams();
     const prompt = dom.imagePrompt.value.trim();
     if (!ensureModeConfigured('image')) return;
     if (!prompt) return;
-    generateImage(prompt, state.imageDefaults, currentImageJob());
+    generateImage(prompt, params, currentImageJob());
     dom.imagePrompt.value = '';
     updateImageGenerateBtn();
   });
@@ -6947,13 +7112,14 @@
     if (btn.dataset.action === 'reuse') {
       dom.imagePrompt.value = btn.dataset.prompt || job.prompt;
       state.currentImageJobId = job.id;
-      state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {}, {
+      job.params = sanitizeImageParams(Object.assign({}, DEFAULT_IMAGE_PARAMS, job.params || {}, {
         size: btn.dataset.size || job.params?.size || DEFAULT_IMAGE_PARAMS.size,
         quality: btn.dataset.quality || job.params?.quality || DEFAULT_IMAGE_PARAMS.quality,
+        count: btn.dataset.count || job.params?.count || DEFAULT_IMAGE_PARAMS.count,
         outputFormat: btn.dataset.format || job.params?.outputFormat || DEFAULT_IMAGE_PARAMS.outputFormat,
         background: btn.dataset.background || job.params?.background || DEFAULT_IMAGE_PARAMS.background,
-      });
-      state.imageDefaults = sanitizeCurrentImageParams();
+      }));
+      imageDbPutJob(job);
       syncImageParams();
       updateImageGenerateBtn();
       persist();
@@ -7462,6 +7628,7 @@
     if (!activeReply) return;
     if (session.status === 'complete') {
       completeImageJobFromSession(job, activeReply, session);
+      applyImageProgressFromSession(job, activeReply, session);
     } else if (session.status === 'stopped') {
       setImageJobFailed(job, activeReply, '请求已中断', 'cancelled');
     } else if (session.status === 'error') {
@@ -7469,6 +7636,36 @@
     } else if (session.status === 'timeout') {
       setImageJobFailed(job, activeReply, '生成超时');
     }
+  }
+
+  function applyImageProgressFromSession(job, activeReply, session) {
+    const total = Math.max(1, Number(session?.totalCount) || Number(activeReply?.params?.count) || Number(job?.params?.count) || 1);
+    const success = Math.max(0, Number(session?.successCount) || parseImageSessionOutputs(session).length || 0);
+    const failed = Math.max(0, Number(session?.failedCount) || 0);
+    const completed = Math.max(success + failed, Number(session?.completedCount) || 0);
+    const progress = {
+      total,
+      completed: Math.min(total, completed),
+      success,
+      failed,
+    };
+    activeReply.progress = progress;
+    job.progress = progress;
+    return progress;
+  }
+
+  function applyStreamingImageSession(job, activeReply, session) {
+    const nextOutputs = parseImageSessionOutputs(session);
+    const progress = applyImageProgressFromSession(job, activeReply, session);
+    const currentLength = Array.isArray(activeReply.outputs) ? activeReply.outputs.length : 0;
+    if (nextOutputs.length >= currentLength) activeReply.outputs = nextOutputs;
+    activeReply.usage = ImageCore.normalizeImageUsage(session?.usage);
+    activeReply.status = 'generating';
+    if (nextOutputs.length >= currentLength) job.outputs = nextOutputs;
+    job.usage = activeReply.usage;
+    job.status = 'generating';
+    job.error = null;
+    return nextOutputs.length > currentLength || progress.completed > 0;
   }
 
   // Recover image generation session from Service Worker
@@ -7536,7 +7733,10 @@
     if (session.status === 'streaming' || session.status === 'connecting') {
       job.status = 'generating';
       const activeReply = currentImageActiveReply(job);
-      if (activeReply) activeReply.status = 'generating';
+      if (activeReply) {
+        activeReply.status = 'generating';
+        applyStreamingImageSession(job, activeReply, session);
+      }
       const recoveredStartedAt = session.startedAt || activeReply?.startedAt || job.startedAt || job.createdAt || Date.now();
       const recoveredTimeoutMs = Math.max(
         Number(session.timeoutMs) || 0,
@@ -7572,6 +7772,13 @@
 
         const sStartedAt = s.startedAt || recoveredStartedAt;
         const sTimeoutMs = Math.max(recoveredTimeoutMs, Number(s.timeoutMs) || 0);
+        if (s.status === 'streaming') {
+          const latestReply = currentImageActiveReply(job);
+          if (latestReply && applyStreamingImageSession(job, latestReply, s)) {
+            persist(); imageDbPutJob(job);
+            updateSidebar(); renderImageWorkspace(); updateImageGenerateBtn();
+          }
+        }
         if (s.status === 'complete') {
           clearInterval(state.imagePollTimer);
           state.imagePollTimer = null;

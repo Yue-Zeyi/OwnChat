@@ -377,9 +377,10 @@ async function notifyClients(message) {
   } catch { /* ignore */ }
 }
 
-async function updateImageSession(session) {
-  await updateStreamData(session);
+async function updateImageSession(session, opts = {}) {
   await notifyClients({ type: 'image-session', session });
+  if (opts.persist === false) return;
+  await updateStreamData(session);
 }
 
 self.addEventListener('message', (event) => {
@@ -601,112 +602,159 @@ async function startImage(data) {
   }, 15000);
 
   try {
-    let resp;
-
-    if (requestType === 'generations') {
-      resp = await fetch(data.url, {
-        method: 'POST',
-        headers: data.headers,
-        body: OwnChatImageShared.sanitizeImageRequestBody(data.body),
-        signal: controller.signal,
-      });
-    } else if (requestType === 'responses') {
-      resp = await fetch(data.url, {
-        method: 'POST',
-        headers: data.headers,
-        body: OwnChatImageShared.sanitizeImageRequestBody(data.body),
-        signal: controller.signal,
-      });
-    } else if (requestType === 'edit') {
-      const form = new FormData();
-      const params = data.formParams;
-      form.append('model', params.model);
-      form.append('prompt', params.prompt);
-      const images = Array.isArray(params.images) && params.images.length
-        ? params.images
-        : (params.imageBase64 ? [{ base64: params.imageBase64, filename: params.imageFilename }] : []);
-      images.forEach(item => {
-        const imageBlob = OwnChatImageShared.dataUrlToBlob(item.base64);
-        form.append('image', imageBlob, item.filename || 'reference.png');
-      });
-      if (params.size && params.size !== 'auto') form.append('size', params.size);
-      if (params.quality && params.quality !== 'auto') form.append('quality', params.quality);
-      if (params.outputFormat && !/^dall-e/i.test(params.model)) form.append('output_format', params.outputFormat);
-      if (
-        params.background &&
-        params.background !== 'auto' &&
-        !(params.background === 'transparent' && OwnChatImageShared.imageModelDisallowsTransparentBackground(params.model || ''))
-      ) {
-        form.append('background', params.background);
+    const requestCount = Math.max(1, Math.min(10, Math.round(Number(data.count) || 1)));
+    const fetchOnce = async () => {
+      let resp;
+      if (requestType === 'generations' || requestType === 'responses') {
+        resp = await fetch(data.url, {
+          method: 'POST',
+          headers: data.headers,
+          body: OwnChatImageShared.sanitizeImageRequestBody(data.body),
+          signal: controller.signal,
+        });
+      } else if (requestType === 'edit') {
+        const form = new FormData();
+        const params = data.formParams;
+        form.append('model', params.model);
+        form.append('prompt', params.prompt);
+        form.append('n', '1');
+        const images = Array.isArray(params.images) && params.images.length
+          ? params.images
+          : (params.imageBase64 ? [{ base64: params.imageBase64, filename: params.imageFilename }] : []);
+        images.forEach(item => {
+          const imageBlob = OwnChatImageShared.dataUrlToBlob(item.base64);
+          form.append('image', imageBlob, item.filename || 'reference.png');
+        });
+        if (params.size && params.size !== 'auto') form.append('size', params.size);
+        if (params.quality && params.quality !== 'auto') form.append('quality', params.quality);
+        if (params.outputFormat && !/^dall-e/i.test(params.model)) form.append('output_format', params.outputFormat);
+        if (
+          params.background &&
+          params.background !== 'auto' &&
+          !(params.background === 'transparent' && OwnChatImageShared.imageModelDisallowsTransparentBackground(params.model || ''))
+        ) {
+          form.append('background', params.background);
+        }
+        resp = await fetch(data.url, {
+          method: 'POST',
+          headers: { 'Authorization': data.headers['Authorization'] },
+          body: form,
+          signal: controller.signal,
+        });
       }
+      if (!resp) throw new Error('No response received');
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => '');
+        throw new Error(OwnChatStream.httpErrorText(resp.status, errText));
+      }
+      return resp.json();
+    };
 
-      resp = await fetch(data.url, {
-        method: 'POST',
-        headers: { 'Authorization': data.headers['Authorization'] },
-        body: form,
-        signal: controller.signal,
-      });
-    }
-
-    if (!resp) {
-      await updateImageSession({
-        id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
-        status: 'error', updatedAt: Date.now(), error: 'No response received',
-      });
-      activeImageAbort = null;
-      activeImageOwnerId = '';
-      return;
-    }
-
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => '');
-      await updateImageSession({
-        id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
-        status: 'error', updatedAt: Date.now(), error: OwnChatStream.httpErrorText(resp.status, errText),
-      });
-      activeImageAbort = null;
-      activeImageOwnerId = '';
-      return;
-    }
-
-    const result = await resp.json();
-
-    // Parse outputs based on request type
-    let outputs;
-    const pushImageOutput = value => {
+    const outputFromValue = value => {
       if (!value || typeof value !== 'object') return;
       const b64 = value.b64_json || value.b64 || value.image_base64 || value.result || '';
       const url = value.url || value.image_url || '';
-      if (!b64 && !url) return;
-      outputs.push({
+      if (!b64 && !url) return null;
+      return {
         b64,
         url,
         revisedPrompt: value.revised_prompt || value.revisedPrompt || '',
         format: OwnChatImageShared.normalizeImageFormat(value.output_format || value.mime_type || data.outputFormat || 'png'),
         bytes: b64 ? Math.ceil(b64.length * 3 / 4) : 0,
         createdAt: Date.now(),
-      });
+      };
     };
-    if (requestType === 'generations' || requestType === 'edit') {
-      outputs = [];
-      (result.data || []).forEach(pushImageOutput);
-    } else if (requestType === 'responses') {
-      outputs = [];
-      const scan = value => {
+    const parseResultOutputs = result => {
+      const parsedOutputs = [];
+      const pushImageOutput = value => {
+        const output = outputFromValue(value);
+        if (output) parsedOutputs.push(output);
+      };
+      const scanResponse = value => {
         if (!value) return;
-        if (Array.isArray(value)) { value.forEach(scan); return; }
+        if (Array.isArray(value)) { value.forEach(scanResponse); return; }
         if (typeof value !== 'object') return;
         pushImageOutput(value);
-        Object.keys(value).forEach(k => scan(value[k]));
+        Object.keys(value).forEach(k => scanResponse(value[k]));
       };
-      scan(result.output || result);
-    }
+      if (requestType === 'generations' || requestType === 'edit') (result.data || []).forEach(pushImageOutput);
+      else if (requestType === 'responses') scanResponse(result.output || result);
+      return parsedOutputs;
+    };
+    const combineUsages = usages => usages.length ? usages.reduce((combined, item) => {
+      ['input', 'output', 'total'].forEach(key => {
+        if (Number.isFinite(item[key])) combined[key] = (combined[key] || 0) + item[key];
+      });
+      if (item.details) {
+        combined.details = combined.details || {};
+        ['inputImage', 'inputText', 'outputImage', 'outputText'].forEach(key => {
+          if (Number.isFinite(item.details[key])) combined.details[key] = (combined.details[key] || 0) + item.details[key];
+        });
+      }
+      return combined;
+    }, {}) : null;
 
+    const outputs = [];
+    const usages = [];
+    let completedCount = 0;
+    let successCount = 0;
+    let failedCount = 0;
+    const publishProgress = async () => {
+      await updateImageSession({
+        id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
+        status: 'streaming', updatedAt: Date.now(),
+        outputs: JSON.stringify(outputs),
+        usage: combineUsages(usages),
+        completedCount,
+        successCount,
+        failedCount,
+        totalCount: requestCount,
+      }, { persist: false });
+    };
+    const settled = await Promise.allSettled(Array.from({ length: requestCount }, async () => {
+      try {
+        const result = await fetchOnce();
+        const resultOutputs = parseResultOutputs(result);
+        if (!resultOutputs.length) throw new Error('接口未返回可显示的图片数据');
+        const usage = OwnChatImageShared.normalizeImageUsage(result.usage || result.response?.usage);
+        outputs.push(...resultOutputs);
+        successCount += resultOutputs.length;
+        if (usage) usages.push(usage);
+        completedCount += 1;
+        await publishProgress();
+        return result;
+      } catch (error) {
+        failedCount += 1;
+        completedCount += 1;
+        await publishProgress();
+        throw error;
+      }
+    }));
+    if (controller.signal.aborted) {
+      const abortError = new Error('Aborted');
+      abortError.name = 'AbortError';
+      throw abortError;
+    }
+    const failed = settled.filter(item => item.status === 'rejected');
+    if (!outputs.length) {
+      const firstError = failed[0]?.reason;
+      throw firstError || new Error('接口未返回可显示的图片数据');
+    }
+    if (!settled.some(item => item.status === 'fulfilled') && failed.length) {
+      throw failed[0].reason || new Error('No response received');
+    }
+    if (!outputs.length) throw new Error('接口未返回可显示的图片数据');
+
+    const usage = combineUsages(usages);
     await updateImageSession({
       id: IMAGE_KEY, jobId, requestType, startedAt, timeoutMs,
       status: 'complete', updatedAt: Date.now(),
-      outputs: JSON.stringify(outputs || []),
-      usage: OwnChatImageShared.normalizeImageUsage(result.usage || result.response?.usage),
+      outputs: JSON.stringify(outputs),
+      usage,
+      completedCount: requestCount,
+      successCount,
+      failedCount,
+      totalCount: requestCount,
     });
   } catch (e) {
     if (e?.name === 'AbortError') {
