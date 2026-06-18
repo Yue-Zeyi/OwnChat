@@ -11,7 +11,7 @@
 
   try {
     const mode = JSON.parse(localStorage.getItem('nc_mode'));
-    const bootMode = mode === 'image' ? 'image' : 'chat';
+    const bootMode = mode === 'image' ? mode : 'chat';
     document.documentElement.setAttribute('data-boot-mode', bootMode);
     if (bootMode === 'chat') {
       const conversations = JSON.parse(localStorage.getItem('nc_conversations')) || [];

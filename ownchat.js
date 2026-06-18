@@ -190,6 +190,15 @@
     return new Blob([bytes], { type: mime });
   }
 
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => reject(new Error('参考图读取失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
+
   const api = {
     normalizeImageFormat,
     normalizeImageModel,
@@ -200,6 +209,7 @@
     sanitizeImageRequestBody,
     normalizeImageUsage,
     dataUrlToBlob,
+    blobToDataUrl,
   };
 
   if (typeof self !== 'undefined') self.OwnChatImageShared = api;
@@ -357,6 +367,8 @@
     apiKey: 'nc_api_key',
     model: 'nc_model',
     modelsCache: 'nc_models_cache',
+    chatEndpoints: 'nc_chat_endpoints',
+    currentChatEndpointId: 'nc_current_chat_endpoint_id',
     conversations: 'nc_conversations',
     currentConvId: 'nc_current_conv_id',
     sidebarCollapsed: 'nc_sidebar_collapsed',
@@ -368,8 +380,11 @@
     imageMapModel: 'nc_image_map_model',
     imagePromptModel: 'nc_image_prompt_model',
     imageModelsCache: 'nc_image_models_cache',
+    imageEndpoints: 'nc_image_endpoints',
+    currentImageEndpointId: 'nc_current_image_endpoint_id',
     currentImageJobId: 'nc_current_image_job_id',
     imageDefaults: 'nc_image_defaults',
+    imageCanvasMode: 'nc_image_canvas_mode',
   };
 
   function save(key, value) {
@@ -1664,6 +1679,26 @@
     return Array.isArray(value) ? value.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()) : [];
   }
 
+  function endpointArray(value, fallback = {}) {
+    if (!Array.isArray(value)) return [];
+    return value.map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const model = stringValue(item.model);
+      const baseUrl = stringValue(item.baseUrl, item.base_url);
+      const apiKey = stringValue(item.apiKey, item.api_key);
+      const name = stringValue(item.name) || `接口 ${index + 1}`;
+      if (!baseUrl && !apiKey && !model && !arrayValue(item.models).length) return null;
+      return {
+        id: stringValue(item.id),
+        name,
+        baseUrl,
+        apiKey,
+        model,
+        models: mergeUnique(model ? [model] : [], arrayValue(item.models), fallback.models || []),
+      };
+    }).filter(Boolean);
+  }
+
   function mergeUnique(...lists) {
     return Array.from(new Set(lists.flat().filter(Boolean)));
   }
@@ -1677,13 +1712,19 @@
   function summary(cfg) {
     const chat = cfg.chat && typeof cfg.chat === 'object' ? cfg.chat : {};
     const image = cfg.image && typeof cfg.image === 'object' ? cfg.image : {};
+    const chatEndpoints = endpointArray(chat.endpoints || cfg.chatEndpoints || cfg.chat_endpoints);
+    const imageEndpoints = endpointArray(image.endpoints || cfg.imageEndpoints || cfg.image_endpoints);
     return {
       chatBaseUrl: stringValue(chat.baseUrl, chat.base_url, cfg.baseUrl, cfg.base_url),
       chatApiKey: stringValue(chat.apiKey, chat.api_key, cfg.apiKey, cfg.api_key),
       chatModel: stringValue(chat.model, cfg.model),
+      chatEndpoints,
+      currentChatEndpointId: stringValue(chat.currentEndpointId, chat.current_endpoint_id, cfg.currentChatEndpointId, cfg.current_chat_endpoint_id),
       imageBaseUrl: stringValue(image.baseUrl, image.base_url, cfg.imageBaseUrl, cfg.image_base_url),
       imageApiKey: stringValue(image.apiKey, image.api_key, cfg.imageApiKey, cfg.image_api_key),
       imageModel: stringValue(image.model, cfg.imageModel, cfg.image_model),
+      imageEndpoints,
+      currentImageEndpointId: stringValue(image.currentEndpointId, image.current_endpoint_id, cfg.currentImageEndpointId, cfg.current_image_endpoint_id),
       imageMapModel: stringValue(image.mapModel, image.map_model, cfg.imageMapModel, cfg.image_map_model),
       imagePromptModel: stringValue(image.promptModel, image.prompt_model, cfg.imagePromptModel, cfg.image_prompt_model),
       mode: stringValue(cfg.mode),
@@ -2207,6 +2248,10 @@
     return Shared.dataUrlToBlob(dataUrl);
   }
 
+  function blobToDataUrl(blob) {
+    return Shared.blobToDataUrl(blob);
+  }
+
   function filenameForBlob(name, blob) {
     const ext = blob.type.includes('jpeg') ? 'jpg' : blob.type.includes('webp') ? 'webp' : 'png';
     const base = (name || 'reference').replace(/\.[^.]+$/, '').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60);
@@ -2276,6 +2321,7 @@
     extractChatText,
     promptLanguageInstruction,
     dataUrlToBlob,
+    blobToDataUrl,
     filenameForBlob,
     createImageReply,
   };
@@ -2390,6 +2436,7 @@
     form.append('n', '1');
     ImageCore.imageReferenceList(refs).forEach(item => {
       const refBlob = ImageCore.dataUrlToBlob(item.base64);
+      if (!refBlob.size) return;
       form.append('image', refBlob, ImageCore.filenameForBlob(item.name, refBlob));
     });
     if (effectiveParams.size !== 'auto') form.append('size', effectiveParams.size);
@@ -2728,16 +2775,22 @@
     if (mounted) return;
     mounted = true;
 
-    dom.closeBtn?.addEventListener('click', close);
+    dom.closeBtn?.addEventListener('pointerdown', stopControlPointer);
+    dom.prevBtn?.addEventListener('pointerdown', stopControlPointer);
+    dom.nextBtn?.addEventListener('pointerdown', stopControlPointer);
+    dom.closeBtn?.addEventListener('click', activateClose);
     dom.backdrop?.addEventListener('click', close);
-    dom.prevBtn?.addEventListener('click', () => switchImage(-1));
-    dom.nextBtn?.addEventListener('click', () => switchImage(1));
+    dom.prevBtn?.addEventListener('click', (e) => activateSwitch(e, -1));
+    dom.nextBtn?.addEventListener('click', (e) => activateSwitch(e, 1));
+    dom.zoomOutBtn?.addEventListener('click', () => zoomBy(1 / 1.18));
+    dom.zoomInBtn?.addEventListener('click', () => zoomBy(1.18));
+    dom.zoomResetBtn?.addEventListener('click', resetTransform);
     dom.img?.addEventListener('wheel', zoom, { passive: false });
     dom.img?.addEventListener('pointerdown', startDrag);
     dom.viewer?.addEventListener('pointermove', moveDrag);
     dom.viewer?.addEventListener('pointerup', endDrag);
     dom.viewer?.addEventListener('pointercancel', endDrag);
-    dom.img?.addEventListener('dblclick', resetTransform);
+    dom.img?.addEventListener('dblclick', toggleZoom);
     dom.img?.addEventListener('touchstart', startTouch, { passive: false });
     dom.img?.addEventListener('touchmove', moveTouch, { passive: false });
     dom.img?.addEventListener('touchend', endTouch);
@@ -2745,6 +2798,34 @@
     dom.copyBtn?.addEventListener('click', () => callbacks.onCopy?.(current()));
     dom.downloadBtn?.addEventListener('click', () => callbacks.onDownload?.(current()));
     document.addEventListener('keydown', handleKeydown);
+  }
+
+  function activateClose(e) {
+    e?.preventDefault();
+    e?.stopPropagation();
+    close();
+  }
+
+  function activateSwitch(e, direction) {
+    e?.preventDefault();
+    e?.stopPropagation();
+    clearInteractionState();
+    switchImage(direction);
+  }
+
+  function stopControlPointer(e) {
+    e?.stopPropagation();
+  }
+
+  function clearInteractionState() {
+    if (dragging?.pointerId != null) {
+      try {
+        dom?.img?.releasePointerCapture?.(dragging.pointerId);
+      } catch {}
+    }
+    dragging = null;
+    touch = null;
+    dom?.viewer?.classList.remove('is-panning');
   }
 
   function openItems(items, itemIndex = 0) {
@@ -2765,11 +2846,11 @@
   }
 
   function close() {
+    clearInteractionState();
+    resetTransform();
     dom.viewer.classList.add('hidden');
     dom.img.src = '';
     viewer = null;
-    dragging = null;
-    touch = null;
     dom.counter.textContent = '';
     dom.counter.classList.add('hidden');
     dom.prevBtn.classList.add('hidden');
@@ -2813,6 +2894,7 @@
     if (!viewer || !Array.isArray(viewer.items) || viewer.items.length <= 1) return;
     const total = viewer.items.length;
     viewer.itemIndex = (viewer.itemIndex + direction + total) % total;
+    clearInteractionState();
     resetTransform();
     sync();
   }
@@ -2829,19 +2911,16 @@
 
   function resetTransform() {
     transform = { scale: 1, x: 0, y: 0 };
-    dragging = null;
+    clearInteractionState();
     applyTransform();
   }
 
-  function zoom(e) {
-    if (!isOpen()) return;
-    e.preventDefault();
-    const nextScale = clampScale(transform.scale * (e.deltaY < 0 ? 1.16 : 1 / 1.16));
+  function zoomTo(nextScale, origin = null) {
+    nextScale = clampScale(nextScale);
     if (Math.abs(nextScale - transform.scale) < 0.001) return;
-
     const rect = dom.img.getBoundingClientRect();
-    const cx = e.clientX - (rect.left + rect.width / 2);
-    const cy = e.clientY - (rect.top + rect.height / 2);
+    const cx = origin ? origin.x - (rect.left + rect.width / 2) : 0;
+    const cy = origin ? origin.y - (rect.top + rect.height / 2) : 0;
     const ratio = nextScale / transform.scale;
     transform = {
       scale: nextScale,
@@ -2851,9 +2930,26 @@
     applyTransform();
   }
 
+  function zoomBy(factor) {
+    if (!isOpen()) return;
+    zoomTo(transform.scale * factor);
+  }
+
+  function toggleZoom(e) {
+    if (!isOpen()) return;
+    if (transform.scale > 1.01) resetTransform();
+    else zoomTo(2, e ? { x: e.clientX, y: e.clientY } : null);
+  }
+
+  function zoom(e) {
+    if (!isOpen()) return;
+    e.preventDefault();
+    zoomTo(transform.scale * (e.deltaY < 0 ? 1.16 : 1 / 1.16), { x: e.clientX, y: e.clientY });
+  }
+
   function startDrag(e) {
     if (!isOpen()) return;
-    if (e.button !== 0 && e.button !== 1 && e.button !== 2) return;
+    if (e.button !== 0 || transform.scale <= 1.01) return;
     e.preventDefault();
     dragging = {
       pointerId: e.pointerId,
@@ -2931,6 +3027,15 @@
     } else if (e.key === 'ArrowRight') {
       e.preventDefault();
       switchImage(1);
+    } else if (e.key === '+' || e.key === '=') {
+      e.preventDefault();
+      zoomBy(1.18);
+    } else if (e.key === '-' || e.key === '_') {
+      e.preventDefault();
+      zoomBy(1 / 1.18);
+    } else if (e.key === '0') {
+      e.preventDefault();
+      resetTransform();
     }
   }
 
@@ -2942,6 +3047,7 @@
     current,
     switchImage,
     resetTransform,
+    zoomBy,
     isOpen,
   };
 })();
@@ -3205,9 +3311,9 @@
     </label>`;
   }
 
-  function renderSidebarItem({ id, title, active, bulkMode, selectedIds }) {
+  function renderSidebarItem({ id, title, active, bulkMode, selectedIds, type = '' }) {
     return `
-      <div class="conv-item ${active ? 'active' : ''} ${bulkMode ? 'bulk-mode' : ''}" data-id="${esc(id)}">
+      <div class="conv-item ${active ? 'active' : ''} ${bulkMode ? 'bulk-mode' : ''} ${type ? `type-${esc(type)}` : ''}" data-id="${esc(id)}" data-type="${esc(type)}">
         ${renderBulkCheckbox(id, title, bulkMode, selectedIds)}
         <span class="conv-item-title">${esc(title)}</span>
         <button class="conv-item-rename" type="button" title="重命名">${RENAME_ICON}</button>
@@ -3236,13 +3342,17 @@
       searchPlaceholder: '搜索绘画...',
       newButtonHtml: IMAGE_NEW_BUTTON_HTML,
       visibleIds,
-      listHtml: filtered.map(job => renderSidebarItem({
-        id: job.id,
-        title: imageJobTitle(job),
-        active: job.id === currentId,
-        bulkMode,
-        selectedIds,
-      })).join('') || '<div class="sidebar-empty">没有匹配的绘画</div>',
+      listHtml: filtered.map(job => {
+        const isCanvas = job?.kind === 'canvas';
+        return renderSidebarItem({
+          id: job.id,
+          title: isCanvas ? `无限画布 · ${imageJobTitle(job)}` : imageJobTitle(job),
+          active: job.id === currentId,
+          bulkMode,
+          selectedIds,
+          type: isCanvas ? 'canvas' : 'image',
+        });
+      }).join('') || '<div class="sidebar-empty">没有匹配的绘画</div>',
     };
   }
 
@@ -3667,27 +3777,92 @@
   const DEFAULT_IMAGE_PARAMS = { size: 'auto', quality: 'auto', outputFormat: 'png', background: 'auto', count: 1 };
   const MAX_IMAGE_REFS = 16;
   const MAX_IMAGE_COUNT = 10;
+  const MAX_CANVAS_PARALLEL = 3;
+
+  const initialMode = load(KEYS.mode);
+  const endpointIdPrefix = kind => `oc-${kind}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const endpointLabel = (kind, index) => kind === 'chat' ? `对话接口 ${index + 1}` : `绘画接口 ${index + 1}`;
+  const endpointModelDefaults = kind => kind === 'image' ? DEFAULT_IMAGE_MODELS : [];
+
+  function normalizeModelsList(models, fallback = []) {
+    return mergeUnique(Array.isArray(models) ? models : [], fallback);
+  }
+
+  function sanitizeEndpoint(raw, kind = 'chat', index = 0, fallback = {}) {
+    const baseUrl = typeof raw?.baseUrl === 'string' ? raw.baseUrl.trim() : (fallback.baseUrl || '');
+    const apiKey = typeof raw?.apiKey === 'string' ? raw.apiKey.trim() : (fallback.apiKey || '');
+    const model = typeof raw?.model === 'string' ? raw.model.trim() : (fallback.model || '');
+    const models = normalizeModelsList(raw?.models, fallback.models || endpointModelDefaults(kind));
+    const name = (typeof raw?.name === 'string' && raw.name.trim())
+      ? raw.name.trim()
+      : (fallback.name || endpointLabel(kind, index));
+    return {
+      id: (typeof raw?.id === 'string' && raw.id.trim()) ? raw.id.trim() : (fallback.id || endpointIdPrefix(kind)),
+      name: name.slice(0, 40),
+      baseUrl,
+      apiKey,
+      model,
+      models: mergeUnique(model ? [model] : [], models),
+    };
+  }
+
+  function migrateEndpoints(kind, savedEndpoints, legacy = {}) {
+    const fallbackModels = endpointModelDefaults(kind);
+    let endpoints = Array.isArray(savedEndpoints)
+      ? savedEndpoints.map((item, index) => sanitizeEndpoint(item, kind, index, { models: fallbackModels }))
+      : [];
+    endpoints = endpoints.filter((item, index, list) => item.id && list.findIndex(other => other.id === item.id) === index);
+    if (!endpoints.length) {
+      endpoints = [sanitizeEndpoint({}, kind, 0, {
+        id: 'default',
+        name: kind === 'chat' ? '默认对话接口' : '默认绘画接口',
+        baseUrl: legacy.baseUrl || '',
+        apiKey: legacy.apiKey || '',
+        model: legacy.model || '',
+        models: mergeUnique(legacy.model ? [legacy.model] : [], legacy.models || [], fallbackModels),
+      })];
+    } else if (legacy.model) {
+      const first = endpoints[0];
+      first.models = mergeUnique(first.model ? [first.model] : [], [legacy.model], first.models, legacy.models || [], fallbackModels);
+    }
+    return endpoints;
+  }
 
   const state = {
     appClientId: (window.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`),
-    mode: load(KEYS.mode) || 'chat',
-    baseUrl: load(KEYS.baseUrl) || '',
-    apiKey: load(KEYS.apiKey) || '',
-    model: load(KEYS.model) || '',
-    modelsCache: load(KEYS.modelsCache) || [],
+    mode: initialMode === 'canvas' ? 'image' : (initialMode || 'chat'),
+    chatEndpoints: migrateEndpoints('chat', load(KEYS.chatEndpoints), {
+      baseUrl: load(KEYS.baseUrl) || '',
+      apiKey: load(KEYS.apiKey) || '',
+      model: load(KEYS.model) || '',
+      models: load(KEYS.modelsCache) || [],
+    }),
+    currentChatEndpointId: load(KEYS.currentChatEndpointId) || 'default',
+    baseUrl: '',
+    apiKey: '',
+    model: '',
+    modelsCache: [],
     conversations: load(KEYS.conversations) || [],
     currentConvId: load(KEYS.currentConvId) || null,
     sidebarCollapsed: load(KEYS.sidebarCollapsed) || false,
     theme: load(KEYS.theme) || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
-    imageBaseUrl: load(KEYS.imageBaseUrl) || '',
-    imageApiKey: load(KEYS.imageApiKey) || '',
-    imageModel: load(KEYS.imageModel) || 'gpt-image-2',
+    imageEndpoints: migrateEndpoints('image', load(KEYS.imageEndpoints), {
+      baseUrl: load(KEYS.imageBaseUrl) || '',
+      apiKey: load(KEYS.imageApiKey) || '',
+      model: load(KEYS.imageModel) || 'gpt-image-2',
+      models: load(KEYS.imageModelsCache) || DEFAULT_IMAGE_MODELS,
+    }),
+    currentImageEndpointId: load(KEYS.currentImageEndpointId) || 'default',
+    imageBaseUrl: '',
+    imageApiKey: '',
+    imageModel: '',
     imageMapModel: load(KEYS.imageMapModel) || '',
     imagePromptModel: load(KEYS.imagePromptModel) || '',
-    imageModelsCache: load(KEYS.imageModelsCache) || DEFAULT_IMAGE_MODELS,
+    imageModelsCache: [],
     imageJobs: [],
     currentImageJobId: load(KEYS.currentImageJobId) || null,
     imageDefaults: Object.assign({}, DEFAULT_IMAGE_PARAMS, load(KEYS.imageDefaults) || {}),
+    imageCanvasMode: !!load(KEYS.imageCanvasMode),
     isStreaming: false,
     streamingConvId: null,
     chatAbortController: null,
@@ -3700,19 +3875,138 @@
     imageProgressTimer: null,
     imagePollTimer: null,
     imageWakeLock: null,
+    imageCanvasViewportSaveTimer: null,
     isImageHistoryLoading: false,
     isOptimizingImagePrompt: false,
     textareaResize: null,
     imageRefs: [],
+    imageCanvasPointer: null,
+    imageCanvasConnectFrom: null,
+    imageCanvasSelectedEdgeId: null,
+    imageCanvasPlannerOpen: false,
+    imageCanvasPlannerTopic: '',
+    imageCanvasPlannerTemplate: 'free',
+    imageCanvasPlannerComplexity: 'standard',
+    imageCanvasPlannerRefs: [],
     pendingFiles: [],
     sidebarSearch: '',
     sidebarBulkMode: false,
     sidebarSelectedIds: new Set(),
     sidebarVisibleIds: [],
     pendingImportConfig: null,
+    settingsSnapshot: null,
   };
 
+  function endpointList(kind) {
+    return kind === 'image' ? state.imageEndpoints : state.chatEndpoints;
+  }
+
+  function currentEndpointId(kind) {
+    return kind === 'image' ? state.currentImageEndpointId : state.currentChatEndpointId;
+  }
+
+  function setCurrentEndpointId(kind, id) {
+    if (kind === 'image') state.currentImageEndpointId = id;
+    else state.currentChatEndpointId = id;
+  }
+
+  function ensureEndpoint(kind = 'chat') {
+    const list = endpointList(kind);
+    if (!Array.isArray(list) || !list.length) {
+      const endpoint = sanitizeEndpoint({}, kind, 0, {
+        id: 'default',
+        name: kind === 'image' ? '默认绘画接口' : '默认对话接口',
+        model: kind === 'image' ? 'gpt-image-2' : '',
+        models: endpointModelDefaults(kind),
+      });
+      if (kind === 'image') state.imageEndpoints = [endpoint];
+      else state.chatEndpoints = [endpoint];
+    }
+    const nextList = endpointList(kind);
+    let endpoint = nextList.find(item => item.id === currentEndpointId(kind));
+    if (!endpoint) {
+      endpoint = nextList[0];
+      setCurrentEndpointId(kind, endpoint.id);
+    }
+    return endpoint;
+  }
+
+  function currentChatEndpoint() {
+    return ensureEndpoint('chat');
+  }
+
+  function currentImageEndpoint() {
+    return ensureEndpoint('image');
+  }
+
+  function syncLegacyFromEndpoints() {
+    const chat = currentChatEndpoint();
+    state.baseUrl = chat?.baseUrl || '';
+    state.apiKey = chat?.apiKey || '';
+    state.model = chat?.model || '';
+    state.modelsCache = mergeUnique(chat?.model ? [chat.model] : [], chat?.models || []);
+
+    const image = currentImageEndpoint();
+    state.imageBaseUrl = image?.baseUrl || '';
+    state.imageApiKey = image?.apiKey || '';
+    state.imageModel = image?.model || 'gpt-image-2';
+    state.imageModelsCache = mergeUnique(image?.model ? [image.model] : [], image?.models || [], DEFAULT_IMAGE_MODELS);
+  }
+
+  function updateEndpoint(kind, values = {}) {
+    const endpoint = ensureEndpoint(kind);
+    Object.assign(endpoint, values);
+    endpoint.name = (endpoint.name || endpointLabel(kind, endpointList(kind).indexOf(endpoint))).trim().slice(0, 40);
+    endpoint.models = mergeUnique(endpoint.model ? [endpoint.model] : [], endpoint.models || [], endpointModelDefaults(kind));
+    syncLegacyFromEndpoints();
+    return endpoint;
+  }
+
+  function createEndpoint(kind = 'chat') {
+    const list = endpointList(kind);
+    const endpoint = sanitizeEndpoint({}, kind, list.length, {
+      name: endpointLabel(kind, list.length),
+      model: kind === 'image' ? 'gpt-image-2' : '',
+      models: endpointModelDefaults(kind),
+    });
+    list.push(endpoint);
+    setCurrentEndpointId(kind, endpoint.id);
+    syncLegacyFromEndpoints();
+    return endpoint;
+  }
+
+  function deleteCurrentEndpoint(kind = 'chat') {
+    const list = endpointList(kind);
+    if (list.length <= 1) return false;
+    const id = currentEndpointId(kind);
+    const idx = Math.max(0, list.findIndex(item => item.id === id));
+    list.splice(idx, 1);
+    setCurrentEndpointId(kind, list[Math.max(0, idx - 1)]?.id || list[0].id);
+    syncLegacyFromEndpoints();
+    return true;
+  }
+
+  function selectEndpoint(kind, id) {
+    const list = endpointList(kind);
+    if (list.some(item => item.id === id)) {
+      setCurrentEndpointId(kind, id);
+      syncLegacyFromEndpoints();
+    }
+    return ensureEndpoint(kind);
+  }
+
+  function allChatModels() {
+    return mergeUnique(...state.chatEndpoints.map(endpoint => mergeUnique(endpoint.model ? [endpoint.model] : [], endpoint.models || [])));
+  }
+
+  function allImageModels() {
+    return mergeUnique(...state.imageEndpoints.map(endpoint => mergeUnique(endpoint.model ? [endpoint.model] : [], endpoint.models || [])), DEFAULT_IMAGE_MODELS);
+  }
+
+  syncLegacyFromEndpoints();
+
   function persist(keys) {
+    syncLegacyFromEndpoints();
     if (!keys) keys = Object.values(KEYS);
     let fileMap = [];
     if (keys.includes(KEYS.conversations)) {
@@ -3729,6 +4023,7 @@
   }
 
   async function persistDurable(keys) {
+    syncLegacyFromEndpoints();
     if (!keys) keys = Object.values(KEYS);
     let strippedConversations = null;
     let fileResult = { total: 0, failed: 0 };
@@ -3755,23 +4050,46 @@
 
   function applyImportedConfig(cfg) {
     const summary = ConfigImport.summary(cfg);
-    if (summary.chatBaseUrl) state.baseUrl = normalizeUrl(summary.chatBaseUrl);
-    if (summary.chatApiKey) state.apiKey = summary.chatApiKey;
-    if (summary.chatModel) state.model = summary.chatModel;
-    if (summary.imageBaseUrl) state.imageBaseUrl = normalizeUrl(summary.imageBaseUrl);
-    if (summary.imageApiKey) state.imageApiKey = summary.imageApiKey;
-    if (summary.imageModel) state.imageModel = summary.imageModel;
+    if (summary.chatEndpoints.length) {
+      state.chatEndpoints = migrateEndpoints('chat', summary.chatEndpoints, {
+        baseUrl: summary.chatBaseUrl,
+        apiKey: summary.chatApiKey,
+        model: summary.chatModel,
+        models: summary.chatModels,
+      });
+      state.currentChatEndpointId = summary.currentChatEndpointId || state.chatEndpoints[0].id;
+    } else if (summary.chatBaseUrl || summary.chatApiKey || summary.chatModel || summary.chatModels.length) {
+      updateEndpoint('chat', {
+        baseUrl: summary.chatBaseUrl ? normalizeUrl(summary.chatBaseUrl) : currentChatEndpoint().baseUrl,
+        apiKey: summary.chatApiKey || currentChatEndpoint().apiKey,
+        model: summary.chatModel || currentChatEndpoint().model,
+        models: mergeUnique(summary.chatModel ? [summary.chatModel] : [], summary.chatModels, currentChatEndpoint().models),
+      });
+    }
+    if (summary.imageEndpoints.length) {
+      state.imageEndpoints = migrateEndpoints('image', summary.imageEndpoints, {
+        baseUrl: summary.imageBaseUrl,
+        apiKey: summary.imageApiKey,
+        model: summary.imageModel,
+        models: summary.imageModels,
+      });
+      state.currentImageEndpointId = summary.currentImageEndpointId || state.imageEndpoints[0].id;
+    } else if (summary.imageBaseUrl || summary.imageApiKey || summary.imageModel || summary.imageModels.length) {
+      updateEndpoint('image', {
+        baseUrl: summary.imageBaseUrl ? normalizeUrl(summary.imageBaseUrl) : currentImageEndpoint().baseUrl,
+        apiKey: summary.imageApiKey || currentImageEndpoint().apiKey,
+        model: summary.imageModel || currentImageEndpoint().model,
+        models: mergeUnique(summary.imageModel ? [summary.imageModel] : [], summary.imageModels, currentImageEndpoint().models, DEFAULT_IMAGE_MODELS),
+      });
+    }
     if (summary.hasImageMapModel) state.imageMapModel = summary.imageMapModel;
     if (summary.hasImagePromptModel) state.imagePromptModel = summary.imagePromptModel;
     if (summary.imageDefaults) state.imageDefaults = Object.assign({}, DEFAULT_IMAGE_PARAMS, summary.imageDefaults);
-    state.modelsCache = mergeUnique([state.model], summary.chatModels, state.modelsCache);
-    if (summary.chatModel && currentConv() && !currentConv().model) currentConv().model = summary.chatModel;
-    state.imageModelsCache = mergeUnique(
-      [state.imageModel],
-      summary.imageModels,
-      state.imageModelsCache,
-      DEFAULT_IMAGE_MODELS,
-    );
+    syncLegacyFromEndpoints();
+    if (summary.chatModel && currentConv() && !currentConv().model) {
+      currentConv().model = summary.chatModel;
+      currentConv().endpointId = currentChatEndpoint().id;
+    }
     state.imageDefaults = sanitizeImageParams(state.imageDefaults);
     if (['image', 'draw', 'painting'].includes(summary.mode)) state.mode = 'image';
     if (['chat', 'dialog', 'conversation'].includes(summary.mode)) state.mode = 'chat';
@@ -3779,7 +4097,7 @@
     updateModelBadge();
     updateSendBtn();
     updateImageGenerateBtn();
-    switchMode(state.mode === 'image' ? 'image' : 'chat');
+    switchMode(isImageModeLike(state.mode) ? state.mode : 'chat');
   }
 
   function showConfigImportConfirm(cfg) {
@@ -3787,9 +4105,11 @@
     const summary = ConfigImport.summary(cfg);
     dom.configImportPreview.innerHTML = [
       ['模式', summary.mode || '不修改'],
+      ['对话接口数量', summary.chatEndpoints.length ? `${summary.chatEndpoints.length} 个` : '不修改'],
       ['对话 Base URL', summary.chatBaseUrl || '不修改'],
       ['对话 API Key', ConfigImport.maskKey(summary.chatApiKey)],
       ['对话模型', summary.chatModel || '不修改'],
+      ['绘画接口数量', summary.imageEndpoints.length ? `${summary.imageEndpoints.length} 个` : '不修改'],
       ['绘画 Base URL', summary.imageBaseUrl || '不修改'],
       ['绘画 API Key', ConfigImport.maskKey(summary.imageApiKey)],
       ['绘画模型', summary.imageModel || '不修改'],
@@ -3828,12 +4148,21 @@
     return state.conversations.find(c => c.id === state.currentConvId);
   }
 
+  function chatEndpointForConversation(conv = currentConv()) {
+    const endpointId = conv?.endpointId || state.currentChatEndpointId;
+    return state.chatEndpoints.find(endpoint => endpoint.id === endpointId) || currentChatEndpoint();
+  }
+
   function conversationModel(conv = currentConv()) {
-    return conv?.model || state.model || '';
+    return conv?.model || chatEndpointForConversation(conv)?.model || state.model || '';
   }
 
   function ensureConversationModel(conv = currentConv()) {
-    if (conv && !conv.model && state.model) conv.model = state.model;
+    const endpoint = chatEndpointForConversation(conv);
+    if (conv && (!conv.endpointId || !state.chatEndpoints.some(item => item.id === conv.endpointId))) {
+      conv.endpointId = endpoint?.id || state.currentChatEndpointId;
+    }
+    if (conv && !conv.model && endpoint?.model) conv.model = endpoint.model;
     return conversationModel(conv);
   }
 
@@ -3846,7 +4175,8 @@
   }
 
   function newConv() {
-    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), model: state.model, temperature: 0.7, topP: 1, maxTokens: null, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: true, includeContextDefault: true };
+    const endpoint = currentChatEndpoint();
+    const conv = { id: Date.now().toString(), title: '新对话', messages: [], createdAt: Date.now(), endpointId: endpoint.id, model: endpoint.model, temperature: 0.7, topP: 1, maxTokens: null, contextLimit: DEFAULT_CONTEXT_LIMIT, systemPrompt: '', showThinking: true, includeContextDefault: true };
     state.conversations.unshift(conv);
     state.currentConvId = conv.id;
     persist();
@@ -3854,22 +4184,33 @@
   }
 
   function effectiveImageBaseUrl() {
-    return (state.imageBaseUrl || state.baseUrl || '').trim();
+    return (currentImageEndpoint()?.baseUrl || currentChatEndpoint()?.baseUrl || '').trim();
   }
 
   function effectiveImageApiKey() {
-    return (state.imageApiKey || state.apiKey || '').trim();
+    return (currentImageEndpoint()?.apiKey || currentChatEndpoint()?.apiKey || '').trim();
   }
 
-  function configured() { return state.baseUrl && state.apiKey && (state.model || conversationModel()); }
+  function effectiveImageEndpoint() {
+    return {
+      baseUrl: effectiveImageBaseUrl(),
+      apiKey: effectiveImageApiKey(),
+      endpointId: currentImageEndpoint()?.id || '',
+    };
+  }
+
+  function configured() {
+    const endpoint = chatEndpointForConversation();
+    return endpoint?.baseUrl && endpoint.apiKey && (endpoint.model || conversationModel());
+  }
   function imageConfigured() { return effectiveImageBaseUrl() && effectiveImageApiKey() && state.imageModel; }
   function parseSourcedModelRef(value, fallback = 'image') {
     const raw = (value || '').trim();
     const match = raw.match(/^(chat|image):(.+)$/i);
     if (match) return { source: match[1].toLowerCase(), model: match[2].trim(), value: `${match[1].toLowerCase()}:${match[2].trim()}` };
 
-    const hasImageModel = state.imageModelsCache.includes(raw) || DEFAULT_IMAGE_MODELS.includes(raw);
-    const hasChatModel = state.modelsCache.includes(raw) || raw === state.model || raw === conversationModel();
+    const hasImageModel = allImageModels().includes(raw) || DEFAULT_IMAGE_MODELS.includes(raw);
+    const hasChatModel = allChatModels().includes(raw) || raw === state.model || raw === conversationModel();
     const source = hasChatModel && !hasImageModel ? 'chat' : fallback;
     return { source, model: raw, value: raw ? `${source}:${raw}` : '' };
   }
@@ -3891,9 +4232,14 @@
   function modelEndpoint(ref) {
     if (!ref?.model) return null;
     if (ref.source === 'chat') {
-      return { baseUrl: state.baseUrl, apiKey: state.apiKey, source: 'chat', model: ref.model };
+      const current = currentChatEndpoint();
+      const convEndpoint = chatEndpointForConversation();
+      const endpoint = [convEndpoint, current, ...state.chatEndpoints].find(item => item && (item.models?.includes(ref.model) || item.model === ref.model)) || current;
+      return { baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey, source: 'chat', model: ref.model, endpointId: endpoint.id };
     }
-    return { baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey(), source: 'image', model: ref.model };
+    const current = currentImageEndpoint();
+    const endpoint = [current, ...state.imageEndpoints].find(item => item && (item.models?.includes(ref.model) || item.model === ref.model)) || current;
+    return { baseUrl: endpoint.baseUrl || currentChatEndpoint()?.baseUrl || '', apiKey: endpoint.apiKey || currentChatEndpoint()?.apiKey || '', source: 'image', model: ref.model, endpointId: endpoint.id };
   }
 
   function imagePromptEndpoint() {
@@ -3998,6 +4344,7 @@
     welcome: $('welcome'),
     imageWorkspace: $('image-workspace'),
     imageEmpty: $('image-empty'),
+    imageCanvasWorkspace: $('image-canvas-workspace'),
     imageGallery: $('image-gallery'),
     convTokenSummary: $('conv-token-summary'),
     userInput: $('user-input'),
@@ -4017,6 +4364,7 @@
     imageSettingsBtn: $('image-settings-btn'),
     imageSettingsPanel: $('image-settings-panel'),
     imageOptimizeBtn: $('image-optimize-btn'),
+    imageCanvasToggleBtn: $('image-canvas-toggle-btn'),
     imageGenerateBtn: $('image-generate-btn'),
     // Settings modal
     settingsModal: $('settings-modal'),
@@ -4025,11 +4373,19 @@
     settingsImageTab: $('settings-image-tab'),
     settingsChatPanel: $('settings-chat-panel'),
     settingsImagePanel: $('settings-image-panel'),
+    cfgChatEndpointSelect: $('cfg-chat-endpoint-select'),
+    cfgChatEndpointName: $('cfg-chat-endpoint-name'),
+    cfgAddChatEndpoint: $('cfg-add-chat-endpoint'),
+    cfgDeleteChatEndpoint: $('cfg-delete-chat-endpoint'),
     cfgBaseUrl: $('cfg-base-url'),
     cfgApiKey: $('cfg-api-key'),
     cfgModelSelect: $('cfg-model-select'),
     cfgRefreshModels: $('cfg-refresh-models'),
     cfgModelManual: $('cfg-model-manual'),
+    cfgImageEndpointSelect: $('cfg-image-endpoint-select'),
+    cfgImageEndpointName: $('cfg-image-endpoint-name'),
+    cfgAddImageEndpoint: $('cfg-add-image-endpoint'),
+    cfgDeleteImageEndpoint: $('cfg-delete-image-endpoint'),
     cfgImageBaseUrl: $('cfg-image-base-url'),
     cfgImageApiKey: $('cfg-image-api-key'),
     cfgImageModelSelect: $('cfg-image-model-select'),
@@ -4045,6 +4401,9 @@
     imageViewerPrev: $('image-viewer-prev'),
     imageViewerNext: $('image-viewer-next'),
     imageViewerCounter: $('image-viewer-counter'),
+    imageViewerZoomOut: $('image-viewer-zoom-out'),
+    imageViewerZoomReset: $('image-viewer-zoom-reset'),
+    imageViewerZoomIn: $('image-viewer-zoom-in'),
     imageViewerCopy: $('image-viewer-copy'),
     imageViewerDownload: $('image-viewer-download'),
     cfgSave: $('cfg-save'),
@@ -4099,8 +4458,12 @@
   }
 
   // ===== Render Functions =====
+  function isImageModeLike(mode = state.mode) {
+    return mode === 'image';
+  }
+
   function updateModelBadge() {
-    dom.currentModel.textContent = state.mode === 'image'
+    dom.currentModel.textContent = isImageModeLike()
       ? (state.imageMapModel ? `映射 ${formatSourcedModel(state.imageMapModel)}` : (state.imageModel || '未配置'))
       : (conversationModel() || '未配置');
   }
@@ -4113,7 +4476,7 @@
     dom.modeChatBtn.setAttribute('aria-selected', mode === 'chat' ? 'true' : 'false');
     dom.modeImageBtn.setAttribute('aria-selected', mode === 'image' ? 'true' : 'false');
     dom.messages.setAttribute('aria-hidden', mode === 'chat' ? 'false' : 'true');
-    dom.imageWorkspace.setAttribute('aria-hidden', mode === 'image' ? 'false' : 'true');
+    dom.imageWorkspace.setAttribute('aria-hidden', isImageModeLike(mode) ? 'false' : 'true');
   }
 
   function toggleTheme() {
@@ -4124,6 +4487,10 @@
 
   function isMobile() {
     return window.innerWidth <= 768;
+  }
+
+  function canUseImageCanvas() {
+    return !isMobile();
   }
 
   function closeSidebarMobile() {
@@ -4150,7 +4517,7 @@
   }
 
   function updateSidebar() {
-    if (state.mode === 'image') {
+    if (isImageModeLike()) {
       const view = SidebarRenderer.buildImageView({
         jobs: state.imageJobs,
         search: state.sidebarSearch,
@@ -4213,16 +4580,28 @@
   }
 
   function updateImageGenerateBtn() {
-    dom.imageGenerateBtn.disabled = !dom.imagePrompt.value.trim() || state.isGeneratingImage;
+    const promptText = dom.imagePrompt.value.trim();
+    const canvas = state.imageCanvasMode ? currentImageCanvas() : null;
+    const canvasSelectionReady = !!canvas?.nodes?.length && selectedCanvasNodes(canvas).some(node => node.output && isRenderableImageOutput(node.output));
+    const canvasPlanReview = canvas?.planStatus === 'review';
+    dom.imageGenerateBtn.disabled = canvasPlanReview || ((!promptText && !canvasSelectionReady) || state.isGeneratingImage);
     const hasRefs = imageReferenceList().length > 0;
-    dom.imageGenerateBtn.title = hasRefs ? '编辑图片' : '生成图片';
-    dom.imageGenerateBtn.setAttribute('aria-label', hasRefs ? '编辑图片' : '生成图片');
-    dom.imageGenerateBtn.dataset.tooltip = hasRefs ? '编辑图片' : '生成图片';
+    const generateLabel = state.imageCanvasMode ? '生成画布节点' : hasRefs ? '编辑图片' : '生成图片';
+    dom.imageGenerateBtn.title = generateLabel;
+    dom.imageGenerateBtn.setAttribute('aria-label', generateLabel);
+    dom.imageGenerateBtn.dataset.tooltip = generateLabel;
     dom.imageOptimizeBtn.disabled = !dom.imagePrompt.value.trim() || state.isOptimizingImagePrompt || state.isGeneratingImage;
     dom.imageOptimizeBtn.title = state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词';
     dom.imageOptimizeBtn.setAttribute('aria-label', state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词');
     dom.imageOptimizeBtn.dataset.tooltip = state.isOptimizingImagePrompt ? '正在优化提示词' : '优化提示词';
     dom.imageOptimizeBtn.classList.toggle('active', state.isOptimizingImagePrompt);
+    dom.imageCanvasToggleBtn?.classList.toggle('active', state.imageCanvasMode);
+    if (dom.imageCanvasToggleBtn) {
+      const canvasAllowed = canUseImageCanvas();
+      dom.imageCanvasToggleBtn.disabled = !canvasAllowed;
+      dom.imageCanvasToggleBtn.title = canvasAllowed ? '无限画布' : '移动端暂不支持无限画布';
+      dom.imageCanvasToggleBtn.dataset.tooltip = dom.imageCanvasToggleBtn.title;
+    }
   }
 
   function currentConversationTokenTotals() {
@@ -4292,7 +4671,7 @@
       if (opts.toast !== false) showToast('请先完成对话配置');
       return false;
     }
-    if (mode === 'image' && !imageConfigured()) {
+    if (isImageModeLike(mode) && !imageConfigured()) {
       showSettings('image');
       if (opts.toast !== false) showToast('请先完成绘画配置');
       return false;
@@ -4374,7 +4753,7 @@
   }
 
   function moveModelDropdown() {
-    const target = state.mode === 'image' ? dom.imageModelSlot : dom.chatModelSlot;
+    const target = isImageModeLike() ? dom.imageModelSlot : dom.chatModelSlot;
     if (target && dom.modelDropdown.parentElement !== target) target.appendChild(dom.modelDropdown);
   }
 
@@ -4385,9 +4764,13 @@
   }
 
   function switchMode(mode) {
+    if (mode === 'canvas') mode = 'image';
     pauseActivePolls();
     if (state.mode !== mode) resetSidebarBulkMode();
     state.mode = mode;
+    const imageLike = isImageModeLike(mode);
+    if (!imageLike || !canUseImageCanvas()) state.imageCanvasMode = false;
+    if (!state.imageCanvasMode) document.body.classList.remove('image-canvas-open');
     dom.modeChatBtn.parentElement.classList.toggle('is-image', mode === 'image');
     dom.modeChatBtn.classList.toggle('active', mode === 'chat');
     dom.modeImageBtn.classList.toggle('active', mode === 'image');
@@ -4396,8 +4779,9 @@
     dom.welcome.classList.toggle('hidden', mode !== 'chat' || !!currentConv()?.messages.length);
     dom.inputArea.classList.toggle('hidden', mode !== 'chat');
     updateConversationTokenSummary();
-    dom.imageWorkspace.classList.toggle('hidden', mode !== 'image');
-    dom.imageInputArea.classList.toggle('hidden', mode !== 'image');
+    dom.imageWorkspace.classList.toggle('hidden', !imageLike);
+    dom.imageWorkspace.classList.toggle('canvas-mode', imageLike && state.imageCanvasMode);
+    dom.imageInputArea.classList.toggle('hidden', mode !== 'image' || state.imageCanvasMode);
     moveModelDropdown();
     closeModelDropdown();
     updateModelBadge();
@@ -4413,9 +4797,9 @@
         startImageProgressTimer();
         requestAnimationFrame(updateImageProgressElapsed);
       }
-      scrollImageWorkspaceToBottom(false);
+      if (mode === 'image' && !state.imageCanvasMode) scrollImageWorkspaceToBottom(false);
       updateImageGenerateBtn();
-      dom.imagePrompt.focus();
+      if (mode === 'image' && !state.imageCanvasMode) dom.imagePrompt.focus();
       recoverImageFromSession();
     }
     document.documentElement.removeAttribute('data-boot-mode');
@@ -4465,9 +4849,56 @@
     UiUtils.downloadJson(filename, data);
   }
 
-  function appConfigSnapshot(includeSecrets = false) {
+  function settingsStateSnapshot() {
     return {
-      version: 1,
+      chatEndpoints: JSON.parse(JSON.stringify(state.chatEndpoints || [])),
+      currentChatEndpointId: state.currentChatEndpointId,
+      imageEndpoints: JSON.parse(JSON.stringify(state.imageEndpoints || [])),
+      currentImageEndpointId: state.currentImageEndpointId,
+      imageMapModel: state.imageMapModel,
+      imagePromptModel: state.imagePromptModel,
+    };
+  }
+
+  function restoreSettingsSnapshot() {
+    if (!state.settingsSnapshot) return;
+    state.chatEndpoints = JSON.parse(JSON.stringify(state.settingsSnapshot.chatEndpoints || []));
+    state.currentChatEndpointId = state.settingsSnapshot.currentChatEndpointId;
+    state.imageEndpoints = JSON.parse(JSON.stringify(state.settingsSnapshot.imageEndpoints || []));
+    state.currentImageEndpointId = state.settingsSnapshot.currentImageEndpointId;
+    state.imageMapModel = state.settingsSnapshot.imageMapModel || '';
+    state.imagePromptModel = state.settingsSnapshot.imagePromptModel || '';
+    state.settingsSnapshot = null;
+    syncLegacyFromEndpoints();
+    persist([
+      KEYS.chatEndpoints,
+      KEYS.currentChatEndpointId,
+      KEYS.baseUrl,
+      KEYS.apiKey,
+      KEYS.model,
+      KEYS.modelsCache,
+      KEYS.imageEndpoints,
+      KEYS.currentImageEndpointId,
+      KEYS.imageBaseUrl,
+      KEYS.imageApiKey,
+      KEYS.imageModel,
+      KEYS.imageModelsCache,
+      KEYS.imageMapModel,
+      KEYS.imagePromptModel,
+    ]);
+  }
+
+  function appConfigSnapshot(includeSecrets = false) {
+    const exportEndpoints = endpoints => endpoints.map(endpoint => ({
+      id: endpoint.id,
+      name: endpoint.name,
+      baseUrl: endpoint.baseUrl,
+      apiKey: includeSecrets ? endpoint.apiKey : '',
+      model: endpoint.model,
+      models: endpoint.models || [],
+    }));
+    return {
+      version: 2,
       exportedAt: new Date().toISOString(),
       mode: state.mode,
       chat: {
@@ -4475,6 +4906,8 @@
         apiKey: includeSecrets ? state.apiKey : '',
         model: state.model,
         models: state.modelsCache,
+        currentEndpointId: state.currentChatEndpointId,
+        endpoints: exportEndpoints(state.chatEndpoints),
       },
       image: {
         baseUrl: state.imageBaseUrl,
@@ -4483,6 +4916,8 @@
         mapModel: state.imageMapModel,
         promptModel: state.imagePromptModel,
         models: state.imageModelsCache,
+        currentEndpointId: state.currentImageEndpointId,
+        endpoints: exportEndpoints(state.imageEndpoints),
         defaults: state.imageDefaults,
       },
     };
@@ -4585,10 +5020,10 @@
 
   // ===== Model Dropdown =====
   function renderModelDropdown() {
-    const models = state.mode === 'image'
+    const models = isImageModeLike()
       ? mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS)
-      : mergeUnique([conversationModel()], state.modelsCache);
-    const current = state.mode === 'image' ? state.imageModel : conversationModel();
+      : mergeUnique([conversationModel()], chatEndpointForConversation()?.models || [], state.modelsCache);
+    const current = isImageModeLike() ? state.imageModel : conversationModel();
     dom.modelDropdownList.innerHTML = `
       <div class="model-dropdown-header">选择模型</div>
       <div class="model-dropdown-scroll">
@@ -4622,9 +5057,15 @@
     }
   }
 
+  function endpointModels(kind = 'chat') {
+    const endpoint = kind === 'image' ? currentImageEndpoint() : currentChatEndpoint();
+    return mergeUnique(endpoint?.model ? [endpoint.model] : [], endpoint?.models || [], kind === 'image' ? DEFAULT_IMAGE_MODELS : []);
+  }
+
   function populateSelectFromCache(selectEl, opts = {}) {
-    const models = opts.image ? state.imageModelsCache : state.modelsCache;
-    const current = opts.image ? state.imageModel : state.model;
+    const endpoint = opts.image ? currentImageEndpoint() : currentChatEndpoint();
+    const models = endpointModels(opts.image ? 'image' : 'chat');
+    const current = endpoint?.model || '';
     selectEl.innerHTML = '';
     if (models.length === 0) {
       selectEl.innerHTML = '<option value="">-- 点击刷新按钮获取模型 --</option>';
@@ -4639,17 +5080,84 @@
     });
   }
 
+  function renderEndpointSelect(kind = 'chat') {
+    const isImage = kind === 'image';
+    const list = endpointList(kind);
+    const selectEl = isImage ? dom.cfgImageEndpointSelect : dom.cfgChatEndpointSelect;
+    const nameEl = isImage ? dom.cfgImageEndpointName : dom.cfgChatEndpointName;
+    const deleteBtn = isImage ? dom.cfgDeleteImageEndpoint : dom.cfgDeleteChatEndpoint;
+    const current = ensureEndpoint(kind);
+    selectEl.innerHTML = list.map((endpoint, index) => {
+      const label = endpoint.name || endpointLabel(kind, index);
+      const model = endpoint.model ? ` · ${endpoint.model}` : '';
+      return `<option value="${esc(endpoint.id)}">${esc(label + model)}</option>`;
+    }).join('');
+    selectEl.value = current.id;
+    nameEl.value = current.name || '';
+    deleteBtn.disabled = list.length <= 1;
+  }
+
+  function refreshEndpointForm(kind = 'chat') {
+    const isImage = kind === 'image';
+    const endpoint = ensureEndpoint(kind);
+    renderEndpointSelect(kind);
+    if (isImage) {
+      dom.cfgImageBaseUrl.value = endpoint.baseUrl || '';
+      dom.cfgImageApiKey.value = endpoint.apiKey || '';
+      populateSelectFromCache(dom.cfgImageModelSelect, { image: true });
+      dom.cfgImageModelSelect.value = endpoint.model || '';
+      dom.cfgImageModelManual.value = '';
+      dom.cfgImageModelManual.placeholder = endpoint.model
+        ? `手动填写模型，当前 ${endpoint.model}`
+        : '手动填写适配 OpenAI Image 协议的模型';
+      return;
+    }
+    dom.cfgBaseUrl.value = endpoint.baseUrl || '';
+    dom.cfgApiKey.value = endpoint.apiKey || '';
+    populateSelectFromCache(dom.cfgModelSelect);
+    dom.cfgModelSelect.value = endpoint.model || '';
+    dom.cfgModelManual.value = '';
+    dom.cfgModelManual.placeholder = `手动填写模型，当前 ${endpoint.model || '未配置'}`;
+  }
+
+  function captureEndpointForm(kind = 'chat', opts = {}) {
+    const isImage = kind === 'image';
+    const name = (isImage ? dom.cfgImageEndpointName.value : dom.cfgChatEndpointName.value).trim();
+    const baseUrl = (isImage ? dom.cfgImageBaseUrl.value : dom.cfgBaseUrl.value).trim();
+    const apiKey = (isImage ? dom.cfgImageApiKey.value : dom.cfgApiKey.value).trim();
+    const modelManual = (isImage ? dom.cfgImageModelManual.value : dom.cfgModelManual.value).trim();
+    const modelSelect = isImage ? dom.cfgImageModelSelect.value : dom.cfgModelSelect.value;
+    const model = modelManual || modelSelect;
+    const previous = ensureEndpoint(kind);
+    const models = mergeUnique(model ? [model] : [], previous.models || [], endpointModelDefaults(kind));
+    const normalizedBaseUrl = opts.normalize === false ? baseUrl : (baseUrl ? normalizeUrl(baseUrl) : '');
+    const fallbackChat = currentChatEndpoint();
+    const hasBaseUrl = isImage && opts.allowFallback ? !!(normalizedBaseUrl || fallbackChat?.baseUrl) : !!normalizedBaseUrl;
+    const hasApiKey = isImage && opts.allowFallback ? !!(apiKey || fallbackChat?.apiKey) : !!apiKey;
+    if (opts.requireComplete && (!hasBaseUrl || !hasApiKey || !model)) {
+      throw new Error(isImage ? '绘画配置需要同时填写 Base URL、API Key 和模型' : '对话配置需要同时填写 Base URL、API Key 和模型');
+    }
+    updateEndpoint(kind, {
+      name: name || previous.name || endpointLabel(kind, endpointList(kind).indexOf(previous)),
+      baseUrl: normalizedBaseUrl,
+      apiKey,
+      model,
+      models,
+    });
+    return ensureEndpoint(kind);
+  }
+
   function populateImageMapModelSelect() {
     const current = parseMapModelRef(state.imageMapModel);
     dom.cfgImageMapModelSelect.innerHTML = '<option value="">关闭映射，使用绘画模型</option>';
-    mergeUnique([conversationModel(), state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
+    mergeUnique([conversationModel(), state.model], allChatModels(), current.source === 'chat' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `chat:${m}`;
       opt.textContent = `${m} · 对话`;
       if (opt.value === current.value) opt.selected = true;
       dom.cfgImageMapModelSelect.appendChild(opt);
     });
-    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS, current.source === 'image' ? [current.model] : []).forEach(m => {
+    mergeUnique([state.imageModel], allImageModels(), DEFAULT_IMAGE_MODELS, current.source === 'image' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `image:${m}`;
       opt.textContent = `${m} · 绘画`;
@@ -4661,14 +5169,14 @@
   function populateImagePromptModelSelect() {
     const current = parsePromptModelRef(state.imagePromptModel);
     dom.cfgImagePromptModelSelect.innerHTML = '<option value="">关闭提示词优化</option>';
-    mergeUnique([conversationModel(), state.model], state.modelsCache, current.source === 'chat' ? [current.model] : []).forEach(m => {
+    mergeUnique([conversationModel(), state.model], allChatModels(), current.source === 'chat' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `chat:${m}`;
       opt.textContent = `${m} · 对话`;
       if (opt.value === current.value) opt.selected = true;
       dom.cfgImagePromptModelSelect.appendChild(opt);
     });
-    mergeUnique([state.imageModel], state.imageModelsCache, DEFAULT_IMAGE_MODELS, current.source === 'image' ? [current.model] : []).forEach(m => {
+    mergeUnique([state.imageModel], allImageModels(), DEFAULT_IMAGE_MODELS, current.source === 'image' ? [current.model] : []).forEach(m => {
       const opt = document.createElement('option');
       opt.value = `image:${m}`;
       opt.textContent = `${m} · 绘画`;
@@ -4678,19 +5186,23 @@
   }
 
   async function refreshModelsForSelect(baseUrl, apiKey, selectEl, refreshBtn, opts = {}) {
-    if (!baseUrl || !apiKey) {
+    const effectiveBaseUrl = opts.image ? (baseUrl || currentChatEndpoint()?.baseUrl || '') : baseUrl;
+    const effectiveApiKey = opts.image ? (apiKey || currentChatEndpoint()?.apiKey || '') : apiKey;
+    if (!effectiveBaseUrl || !effectiveApiKey) {
       alert('请先填写 Base URL 和 API Key');
       return;
     }
     refreshBtn.disabled = true;
     selectEl.innerHTML = '<option value="">加载中...</option>';
     try {
-      const models = await fetchModels(baseUrl, apiKey);
-      if (opts.image) state.imageModelsCache = mergeUnique(DEFAULT_IMAGE_MODELS, models);
-      else state.modelsCache = models;
+      const models = await fetchModels(effectiveBaseUrl, effectiveApiKey);
+      const kind = opts.image ? 'image' : 'chat';
+      const endpoint = ensureEndpoint(kind);
+      endpoint.models = mergeUnique(endpoint.model ? [endpoint.model] : [], opts.image ? DEFAULT_IMAGE_MODELS : [], models);
+      syncLegacyFromEndpoints();
       persist();
       populateSelectFromCache(selectEl, opts);
-      selectEl.value = (opts.image ? state.imageModel : state.model) || models[0] || '';
+      selectEl.value = endpoint.model || models[0] || '';
     } catch (e) {
       selectEl.innerHTML = '<option value="">-- 获取失败 --</option>';
       alert(`获取模型列表失败: ${e.message}${e.diagnostics ? `\n\n${e.diagnostics}` : ''}`);
@@ -4708,6 +5220,7 @@
     if (!ensureModeConfigured('chat')) return;
     const conv = currentConv();
     if (!conv) return;
+    const chatEndpoint = chatEndpointForConversation(conv);
     const chatModel = ensureConversationModel(conv);
     if (!chatModel) {
       showSettings('chat');
@@ -4798,7 +5311,7 @@
 
     // Build request params for the Service Worker to make the ONLY API call
     const reqBody = buildChatRequestBody(conv, chatModel, apiMessages);
-    const streamUrl = requestUrl(state.baseUrl, '/chat/completions');
+    const streamUrl = requestUrl(chatEndpoint.baseUrl, '/chat/completions');
     const swAvailable = navigator.serviceWorker?.controller;
 
     if (swAvailable) {
@@ -4807,7 +5320,7 @@
         type: 'start-stream',
         ownerId: state.appClientId,
         url: streamUrl,
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${chatEndpoint.apiKey}` },
         body: JSON.stringify(reqBody),
         convId: conv.id,
         model: chatModel,
@@ -4947,7 +5460,7 @@
       try {
         let resp = await apiFetch(streamUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${chatEndpoint.apiKey}` },
           body: JSON.stringify(reqBody),
           signal: controller.signal,
         });
@@ -4958,7 +5471,7 @@
             const fallbackBody = OwnChatStream.removeStreamOptions(reqBody);
             resp = await apiFetch(streamUrl, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${state.apiKey}` },
+              headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${chatEndpoint.apiKey}` },
               body: JSON.stringify(fallbackBody),
               signal: controller.signal,
             });
@@ -5176,20 +5689,10 @@
 
   // ===== Settings Modal =====
   function showSettings(tab = state.mode) {
-    dom.cfgBaseUrl.value = state.baseUrl;
-    dom.cfgApiKey.value = state.apiKey;
-    populateSelectFromCache(dom.cfgModelSelect);
-    dom.cfgModelSelect.value = state.model;
-    dom.cfgModelManual.value = '';
-    dom.cfgModelManual.placeholder = `手动填写模型，当前 ${state.model || '未配置'}`;
-    dom.cfgImageBaseUrl.value = effectiveImageBaseUrl();
-    dom.cfgImageApiKey.value = effectiveImageApiKey();
-    populateSelectFromCache(dom.cfgImageModelSelect, { image: true });
-    dom.cfgImageModelSelect.value = state.imageModel;
-    dom.cfgImageModelManual.value = '';
-    dom.cfgImageModelManual.placeholder = state.imageModel
-      ? `手动填写模型，当前 ${state.imageModel}`
-      : '手动填写适配 OpenAI Image 协议的模型';
+    if (!state.settingsSnapshot) state.settingsSnapshot = settingsStateSnapshot();
+    syncLegacyFromEndpoints();
+    refreshEndpointForm('chat');
+    refreshEndpointForm('image');
     populateImageMapModelSelect();
     dom.cfgImageMapModelSelect.value = parseMapModelRef(state.imageMapModel).value;
     dom.cfgImageMapModelManual.value = '';
@@ -5206,6 +5709,12 @@
   }
 
   function hideSettings() {
+    restoreSettingsSnapshot();
+    hideModal(dom.settingsModal);
+  }
+
+  function closeSettingsAfterSave() {
+    state.settingsSnapshot = null;
     hideModal(dom.settingsModal);
   }
 
@@ -5252,12 +5761,29 @@
 
   async function loadImageHistory() {
     state.isImageHistoryLoading = true;
-    if (state.mode === 'image') updateSidebar();
+    if (isImageModeLike()) updateSidebar();
     try {
       const imageSession = await getImageSession();
       state.imageJobs = await imageDbGetAllJobs();
       const changedJobs = [];
       state.imageJobs.forEach(job => {
+        if (isImageCanvasJob(job)) {
+          normalizeCanvasJob(job);
+          let changedCanvas = false;
+          job.nodes.forEach(node => {
+            if (node.status === 'generating') {
+              node.status = 'error';
+              node.error = '上次节点生成因页面刷新或关闭而中断，请重新生成分支。';
+              changedCanvas = true;
+            }
+          });
+          if (job.status === 'generating') {
+            job.status = 'done';
+            changedCanvas = true;
+          }
+          if (changedCanvas) changedJobs.push(job);
+          return;
+        }
         if (job.status === 'generating') {
           const sessionMatches = imageSession?.jobId === job.id;
           const sessionStatus = sessionMatches ? imageSession.status : '';
@@ -5305,9 +5831,11 @@
         state.currentImageJobId = state.imageJobs[0]?.id || null;
         persist();
       }
+      const currentImageJob = state.imageJobs.find(j => j.id === state.currentImageJobId);
+      state.imageCanvasMode = canUseImageCanvas() && state.imageCanvasMode && isImageCanvasJob(currentImageJob);
     } finally {
       state.isImageHistoryLoading = false;
-      if (state.mode === 'image') {
+      if (isImageModeLike()) {
         updateSidebar();
         syncImageParams();
         renderImageWorkspace();
@@ -5340,7 +5868,7 @@
       job.params = Object.assign({}, job.params || {}, params);
       imageDbPutJob(job);
     } else {
-      state.imageDefaults = sanitizeImageParams(DEFAULT_IMAGE_PARAMS);
+      state.imageDefaults = Object.assign({}, params);
     }
     dom.imageCount.value = String(params.count || 1);
     dom.imageFormat.value = params.outputFormat;
@@ -5352,6 +5880,2621 @@
 
   function currentImageJob() {
     return state.imageJobs.find(j => j.id === state.currentImageJobId);
+  }
+
+  function isImageCanvasJob(job) {
+    return job?.kind === 'canvas';
+  }
+
+  function currentImageCanvas() {
+    const job = currentImageJob();
+    return isImageCanvasJob(job) ? job : null;
+  }
+
+  function imageCanvasId(prefix = 'canvas') {
+    return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  }
+
+  function normalizeCanvasJob(job) {
+    if (!isImageCanvasJob(job)) return null;
+    if (!Array.isArray(job.nodes)) job.nodes = [];
+    if (!Array.isArray(job.edges)) job.edges = [];
+    const nodeIds = new Set(job.nodes.map(node => node.id));
+    const edgeIds = new Set();
+    job.edges = job.edges.filter(edge => nodeIds.has(edge.from) && nodeIds.has(edge.to) && edge.from !== edge.to);
+    job.edges.forEach(edge => {
+      if (!edge.id || edgeIds.has(edge.id)) edge.id = imageCanvasId('edge');
+      edgeIds.add(edge.id);
+    });
+    if (state.imageCanvasSelectedEdgeId && !job.edges.some(edge => edge.id === state.imageCanvasSelectedEdgeId)) {
+      state.imageCanvasSelectedEdgeId = null;
+    }
+    job.nodes.forEach(node => {
+      const edgeSourceIds = job.edges
+        .filter(edge => edge.to === node.id)
+        .map(edge => edge.from);
+      node.sourceNodeIds = [...new Set([...(node.sourceNodeIds || []), ...edgeSourceIds].filter(id => nodeIds.has(id) && id !== node.id))];
+      if (node.parentNodeId && !nodeIds.has(node.parentNodeId)) node.parentNodeId = node.sourceNodeIds[0] || null;
+    });
+    if (!Array.isArray(job.selectedNodeIds)) job.selectedNodeIds = [];
+    if (!Array.isArray(job.history)) job.history = [];
+    if (!Array.isArray(job.future)) job.future = [];
+    job.viewport = Object.assign({ x: 320, y: 80, zoom: 1 }, job.viewport || {});
+    job.params = sanitizeImageParams(job.params || DEFAULT_IMAGE_PARAMS);
+    return job;
+  }
+
+  function createImageCanvasJob(prompt, params) {
+    const now = Date.now();
+    return normalizeCanvasJob({
+      id: now.toString(),
+      kind: 'canvas',
+      title: prompt.trim().slice(0, 30) + (prompt.trim().length > 30 ? '...' : ''),
+      prompt: prompt.trim(),
+      model: state.imageModel,
+      mapModel: state.imageMapModel,
+      createdAt: now,
+      updatedAt: now,
+      params: Object.assign({}, params),
+      nodes: [],
+      edges: [],
+      selectedNodeIds: [],
+      history: [],
+      future: [],
+      viewport: { x: 320, y: 80, zoom: 1 },
+      status: 'done',
+    });
+  }
+
+  function imageCanvasSnapshot(canvas = currentImageCanvas()) {
+    if (!canvas) return null;
+    return {
+      nodes: JSON.parse(JSON.stringify(canvas.nodes || [])),
+      edges: JSON.parse(JSON.stringify(canvas.edges || [])),
+      selectedNodeIds: [...(canvas.selectedNodeIds || [])],
+      viewport: Object.assign({}, canvas.viewport || {}),
+      planStatus: canvas.planStatus || '',
+      plan: canvas.plan ? JSON.parse(JSON.stringify(canvas.plan)) : null,
+      planProgress: canvas.planProgress ? JSON.parse(JSON.stringify(canvas.planProgress)) : null,
+      prompt: canvas.prompt || '',
+      title: canvas.title || '',
+    };
+  }
+
+  function persistedImageCanvas(canvas) {
+    if (!canvas) return canvas;
+    const copy = Object.assign({}, canvas);
+    copy.nodes = canvas.nodes || [];
+    copy.edges = canvas.edges || [];
+    copy.selectedNodeIds = canvas.selectedNodeIds || [];
+    copy.history = [];
+    copy.future = [];
+    return copy;
+  }
+
+  function applyImageCanvasSnapshot(canvas, snapshot) {
+    if (!canvas || !snapshot) return;
+    canvas.nodes = JSON.parse(JSON.stringify(snapshot.nodes || []));
+    canvas.edges = JSON.parse(JSON.stringify(snapshot.edges || []));
+    canvas.selectedNodeIds = [...(snapshot.selectedNodeIds || [])];
+    canvas.viewport = Object.assign({ x: 320, y: 80, zoom: 1 }, snapshot.viewport || {});
+    canvas.planStatus = snapshot.planStatus || 'done';
+    canvas.plan = snapshot.plan ? JSON.parse(JSON.stringify(snapshot.plan)) : null;
+    canvas.planProgress = snapshot.planProgress ? JSON.parse(JSON.stringify(snapshot.planProgress)) : null;
+    canvas.prompt = snapshot.prompt || canvas.prompt || '';
+    canvas.title = snapshot.title || canvas.title || '无限画布';
+    if (canvas.planStatus === 'review' && !(canvas.nodes || []).some(node => node.status === 'review') && !canvas.plan?.tasks?.length) canvas.planStatus = 'done';
+  }
+
+  function pushImageCanvasHistory(canvas = currentImageCanvas()) {
+    normalizeCanvasJob(canvas);
+    if (!canvas) return;
+    const snapshot = imageCanvasSnapshot(canvas);
+    const last = canvas.history[canvas.history.length - 1];
+    if (last && JSON.stringify(last) === JSON.stringify(snapshot)) return;
+    canvas.history.push(snapshot);
+    if (canvas.history.length > 40) canvas.history.shift();
+    canvas.future = [];
+  }
+
+  function undoImageCanvas(canvas = currentImageCanvas()) {
+    normalizeCanvasJob(canvas);
+    if (!canvas?.history?.length) return;
+    canvas.future.push(imageCanvasSnapshot(canvas));
+    applyImageCanvasSnapshot(canvas, canvas.history.pop());
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+  }
+
+  function redoImageCanvas(canvas = currentImageCanvas()) {
+    normalizeCanvasJob(canvas);
+    if (!canvas?.future?.length) return;
+    canvas.history.push(imageCanvasSnapshot(canvas));
+    applyImageCanvasSnapshot(canvas, canvas.future.pop());
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+  }
+
+  function exportImageCanvas(canvas = currentImageCanvas()) {
+    if (!canvas) return;
+    const name = `${(canvas.title || 'image-canvas').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 48) || 'image-canvas'}.json`;
+    downloadJson(name, {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      kind: 'image-canvas',
+      canvas: imageCanvasSnapshot(canvas),
+      params: canvas.params || DEFAULT_IMAGE_PARAMS,
+      model: canvas.model || state.imageModel,
+      mapModel: canvas.mapModel || state.imageMapModel,
+    });
+  }
+
+  async function importImageCanvasFile(file) {
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      const snapshot = payload?.canvas || payload;
+      if (!snapshot || !Array.isArray(snapshot.nodes) || !Array.isArray(snapshot.edges)) throw new Error('文件不是有效画布 JSON');
+      const params = sanitizeCurrentImageParams(Object.assign({}, saveImageParams(), payload.params || {}));
+      const canvas = createImageCanvasJob(snapshot.title || snapshot.prompt || file.name.replace(/\.json$/i, '') || '导入画布', params);
+      applyImageCanvasSnapshot(canvas, snapshot);
+      canvas.params = params;
+      canvas.model = payload.model || state.imageModel;
+      canvas.mapModel = payload.mapModel || state.imageMapModel;
+      canvas.history = [];
+      canvas.future = [];
+      state.imageJobs.unshift(canvas);
+      state.currentImageJobId = canvas.id;
+      state.imageCanvasMode = true;
+      imageDbPutJob(persistedImageCanvas(canvas));
+      persist([KEYS.currentImageJobId, KEYS.imageCanvasMode]);
+      updateSidebar();
+      renderImageWorkspace();
+      showToast('画布已导入');
+    } catch (error) {
+      showToast(String(error?.message || error || '导入画布失败'));
+    }
+  }
+
+  function selectedCanvasNodes(canvas = currentImageCanvas()) {
+    normalizeCanvasJob(canvas);
+    const selected = new Set(canvas?.selectedNodeIds || []);
+    return (canvas?.nodes || []).filter(node => selected.has(node.id));
+  }
+
+  function canvasNodeImageSource(node, params = DEFAULT_IMAGE_PARAMS) {
+    if (!node?.output || !isRenderableImageOutput(node.output)) return '';
+    return dataUrlForImage(node.output, node.params?.outputFormat || params.outputFormat || 'png');
+  }
+
+  async function canvasNodeImageSourceForRequest(node, params = DEFAULT_IMAGE_PARAMS, signal = null) {
+    if (!node?.output || !isRenderableImageOutput(node.output)) return '';
+    if (node.output.b64) return canvasNodeImageSource(node, params);
+    if (!node.output.url) return '';
+    const resp = await apiFetch(node.output.url, { signal });
+    if (!resp.ok) throw new Error(`参考图下载失败：HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    if (!blob.size) throw new Error('参考图下载结果为空，无法用于合并');
+    node.output.b64 = String(await ImageCore.blobToDataUrl(blob)).split(',')[1] || '';
+    node.output.format = normalizeImageFormat(blob.type || node.output.format || params.outputFormat || 'png');
+    node.output.bytes = blob.size;
+    node.output.urlCachedAt = Date.now();
+    node.output.urlCachedDirty = true;
+    return canvasNodeImageSource(node, params);
+  }
+
+  function canvasNodeRefs(nodes) {
+    return (nodes || [])
+      .filter(node => node?.output && isRenderableImageOutput(node.output))
+      .map(node => ({
+        name: `${node.title || 'canvas-node'}.png`,
+        type: `image/${node.output.format || node.params?.outputFormat || 'png'}`,
+        base64: canvasNodeImageSource(node, node.params || DEFAULT_IMAGE_PARAMS),
+      }));
+  }
+
+  async function canvasNodeRefsForRequest(nodes, signal = null) {
+    const refs = [];
+    for (const node of nodes || []) {
+      if (!node?.output || !isRenderableImageOutput(node.output)) continue;
+      const base64 = await canvasNodeImageSourceForRequest(node, node.params || DEFAULT_IMAGE_PARAMS, signal);
+      if (!base64 || !/^data:image\/[^;]+;base64,/i.test(base64) || !base64.split(',')[1]) continue;
+      refs.push({
+        name: `${node.title || 'canvas-node'}.png`,
+        type: `image/${node.output.format || node.params?.outputFormat || 'png'}`,
+        base64,
+      });
+    }
+    return refs;
+  }
+
+  function imageCanvasNodeInputRefs(node) {
+    return imageReferencePayload(node?.inputImages || node?.referenceImages || []);
+  }
+
+  function imageCanvasReferenceSourceNodes(canvas, node) {
+    const ids = new Set(node?.sourceNodeIds || []);
+    return (canvas?.nodes || []).filter(item => ids.has(item.id) && item.operation === 'reference' && item.output && isRenderableImageOutput(item.output));
+  }
+
+  function imageCanvasGeneratedSourceNodes(canvas, node) {
+    const ids = new Set(node?.sourceNodeIds || []);
+    return (canvas?.nodes || []).filter(item => ids.has(item.id) && item.operation !== 'reference' && item.output && isRenderableImageOutput(item.output));
+  }
+
+  async function imageCanvasRequestRefs(sourceNodes, inputRefs, signal = null) {
+    const refs = [
+      ...imageReferencePayload(inputRefs || []),
+      ...await canvasNodeRefsForRequest(sourceNodes, signal),
+    ].filter(ref => ref?.base64 && /^data:image\/[^;]+;base64,/i.test(ref.base64) && ref.base64.split(',')[1]);
+    return refs.slice(0, MAX_IMAGE_REFS);
+  }
+
+  function saveImageCanvas(canvas, opts = {}) {
+    if (!canvas) return;
+    canvas.updatedAt = Date.now();
+    imageDbPutJob(persistedImageCanvas(canvas));
+    persist([KEYS.currentImageJobId, KEYS.imageCanvasMode]);
+    if (opts.sidebar !== false) updateSidebar();
+  }
+
+  function imageCanvasOperationLabel(operation) {
+    return ({
+      plan: '规划',
+      root: '主题',
+      branch: '分支',
+      optimize: '优化',
+      merge: '合并',
+      variant: '变化',
+      reference: '参考',
+    })[operation] || '节点';
+  }
+
+  function meaningfulImageCanvasTopic(canvas) {
+    const generic = new Set(['无限画布', '参考图画布']);
+    const prompt = String(canvas?.prompt || '').trim();
+    if (prompt && !generic.has(prompt)) return prompt;
+    const title = String(canvas?.title || '').trim();
+    if (title && !generic.has(title)) return title;
+    return '';
+  }
+
+  function renderImageCanvasPlannerModal(canvas) {
+    if (!state.imageCanvasPlannerOpen) return '';
+    const topic = state.imageCanvasPlannerTopic || meaningfulImageCanvasTopic(canvas);
+    const refs = imageReferencePayload(state.imageCanvasPlannerRefs || [], 10);
+    const refText = refs.length ? `已选择 ${refs.length} 张参考图` : '未选择文件';
+    const template = state.imageCanvasPlannerTemplate || 'free';
+    const complexity = state.imageCanvasPlannerComplexity || 'standard';
+    const templateMeta = {
+      free: ['自由拆解', '不套固定结构，由 AI 按主题和参考图自行规划节点。'],
+      story: ['故事分镜', '按镜头、场景和情绪变化拆成连续视觉节点。'],
+      product: ['产品视觉', '围绕主视觉、场景、材质、细节和商业用途规划节点。'],
+      character: ['角色设定', '围绕角色外观、表情、动作、服饰和场景规划节点。'],
+    }[template] || ['自由拆解', '不套固定结构，由 AI 按主题和参考图自行规划节点。'];
+    return `
+      <div class="image-canvas-planner-overlay" role="presentation">
+        <div class="image-canvas-planner-backdrop image-canvas-action" data-action="canvas-close-planner"></div>
+        <section class="image-canvas-planner-modal" role="dialog" aria-modal="true" aria-label="AI Planner" tabindex="-1">
+          <div class="image-canvas-planner-head">
+            <div>
+              <span>AI PLANNER</span>
+              <h2>主题拆解</h2>
+            </div>
+            <button class="image-canvas-planner-close image-canvas-action" data-action="canvas-close-planner" type="button" title="关闭" data-tooltip="关闭">
+              <svg viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="image-canvas-planner-field">
+            <div class="image-canvas-planner-label">
+              <label for="image-canvas-planner-topic">创作主题</label>
+              <button class="image-canvas-planner-chip image-canvas-action" data-action="canvas-optimize-planner-topic" type="button" title="AI 优化主题" data-tooltip="AI 优化主题">
+                <svg viewBox="0 0 24 24"><path d="M12 3l1.4 4.2L18 9l-4.6 1.8L12 15l-1.4-4.2L6 9l4.6-1.8Z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8Z"/></svg>
+                AI 优化
+              </button>
+            </div>
+            <textarea id="image-canvas-planner-topic" class="image-canvas-planner-topic" maxlength="800" placeholder="例如：让女孩抱着小猫，樱花街道，温柔光影，二次元风格">${esc(topic)}</textarea>
+          </div>
+          <div class="image-canvas-planner-grid">
+            <label class="image-canvas-planner-select">
+              <span>拆解模板</span>
+              <select class="image-canvas-planner-template">
+                <option value="free" ${template === 'free' ? 'selected' : ''}>自由拆解</option>
+                <option value="story" ${template === 'story' ? 'selected' : ''}>故事分镜</option>
+                <option value="product" ${template === 'product' ? 'selected' : ''}>产品视觉</option>
+                <option value="character" ${template === 'character' ? 'selected' : ''}>角色设定</option>
+              </select>
+            </label>
+            <label class="image-canvas-planner-select">
+              <span>复杂度</span>
+              <select class="image-canvas-planner-complexity">
+                <option value="standard" ${complexity === 'standard' ? 'selected' : ''}>标准</option>
+                <option value="simple" ${complexity === 'simple' ? 'selected' : ''}>简单</option>
+                <option value="advanced" ${complexity === 'advanced' ? 'selected' : ''}>复杂</option>
+              </select>
+            </label>
+            <label class="image-canvas-planner-ref">
+              <span>参考图，可多选</span>
+              <div class="image-canvas-planner-file">
+                <button class="image-canvas-planner-file-btn image-canvas-action" data-action="canvas-pick-planner-refs" type="button" title="上传参考图" data-tooltip="上传参考图">选择文件</button>
+                <span>${esc(refText)}</span>
+              </div>
+              <small>最多参考 10 张，支持 PNG / JPG / WebP。</small>
+            </label>
+          </div>
+          ${refs.length ? `<div class="image-canvas-planner-ref-list">
+            ${refs.map((ref, index) => `
+              <div class="image-canvas-planner-ref-card">
+                <img src="${esc(ref.base64)}" alt="${esc(ref.name || '参考图')}" draggable="false">
+                <button class="image-canvas-action" data-action="canvas-remove-planner-ref" data-ref="${index}" type="button" title="移除参考图" data-tooltip="移除参考图"><svg viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="M6 6l12 12"/></svg></button>
+              </div>
+            `).join('')}
+          </div>` : ''}
+          <div class="image-canvas-planner-note">
+            <strong>${esc(templateMeta[0])}</strong>
+            <p>${esc(templateMeta[1])}</p>
+          </div>
+          <div class="image-canvas-planner-footer">
+            <button class="image-canvas-planner-secondary image-canvas-action" data-action="canvas-close-planner" type="button" title="取消拆解" data-tooltip="取消拆解">取消</button>
+            <button class="image-canvas-planner-primary image-canvas-action" data-action="canvas-submit-planner" type="button" title="生成草稿节点" data-tooltip="生成草稿节点" ${state.isGeneratingImage ? 'disabled' : ''}>生成草稿节点</button>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  function renderImageCanvasEdges(canvas) {
+    const nodesById = new Map((canvas.nodes || []).map(node => [node.id, node]));
+    const selectedIds = new Set(canvas.selectedNodeIds || []);
+    const selectedEdgeId = state.imageCanvasSelectedEdgeId || '';
+    const edges = (canvas.edges || []).map((edge, index) => {
+      const from = nodesById.get(edge.from);
+      const to = nodesById.get(edge.to);
+      if (!from || !to) return '';
+      const fromRect = imageCanvasNodeRect(from);
+      const toRect = imageCanvasNodeRect(to);
+      const x1 = fromRect.x + fromRect.w;
+      const y1 = fromRect.y + fromRect.h / 2;
+      const x2 = toRect.x;
+      const y2 = toRect.y + toRect.h / 2;
+      const mid = Math.max(60, Math.abs(x2 - x1) * .45);
+      const d = `M ${x1 + 5000} ${y1 + 5000} C ${x1 + mid + 5000} ${y1 + 5000}, ${x2 - mid + 5000} ${y2 + 5000}, ${x2 + 5000} ${y2 + 5000}`;
+      const edgeType = edge.type === 'dependency' && from.output && isRenderableImageOutput(from.output) ? 'reference' : (edge.type || 'branch');
+      const selected = edge.id && edge.id === selectedEdgeId;
+      const related = selected || selectedIds.has(edge.from) || selectedIds.has(edge.to);
+      const edgePathId = `image-canvas-edge-${index}`;
+      const label = edgeType === 'merge' ? '合并' : edgeType === 'dependency' ? '依赖' : edgeType === 'reference' ? '参考' : '分支';
+      return `
+        <g class="image-canvas-edge-group ${related ? 'related' : ''} ${selected ? 'selected' : ''}">
+          <path class="image-canvas-edge-hit image-canvas-action" data-action="canvas-select-edge" data-edge="${esc(edge.id || '')}" d="${esc(d)}"></path>
+          <path id="${edgePathId}" class="image-canvas-edge ${esc(edgeType)} ${related ? 'related' : ''} ${selected ? 'selected' : ''}" d="${esc(d)}" marker-end="url(#image-canvas-arrow)"></path>
+          <text class="image-canvas-edge-label"><textPath href="#${edgePathId}" startOffset="50%">${esc(label)}</textPath></text>
+        </g>
+      `;
+    }).join('');
+    return `
+      <defs>
+        <marker id="image-canvas-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+          <path d="M0,0 L8,4 L0,8 Z" class="image-canvas-edge-arrow"></path>
+        </marker>
+      </defs>
+      ${edges}
+    `;
+  }
+
+  function renderImageCanvasNode(canvas, node) {
+    const selected = (canvas.selectedNodeIds || []).includes(node.id);
+    const connectActive = state.imageCanvasConnectFrom === node.id;
+    const connectTarget = !!state.imageCanvasConnectFrom && state.imageCanvasConnectFrom !== node.id;
+    const img = canvasNodeImageSource(node, canvas.params);
+    const status = node.status === 'generating' ? 'generating' : node.error ? 'error' : 'done';
+    const statusLabel = node.status === 'review' ? '待确认' : node.status === 'queued' ? '排队中' : node.status === 'generating' ? '生成中' : formatDateTime(node.createdAt || canvas.createdAt);
+    const nodeStateClass = node.error ? 'error' : node.status === 'generating' ? 'generating' : node.status === 'review' ? 'review' : 'done';
+    const nodeStateLabel = node.operation === 'reference' ? '参考图' : node.error ? '失败' : node.status === 'generating' ? '生成中' : node.status === 'review' ? '待确认' : '已完成';
+    const refSourceCount = imageCanvasReferenceSourceNodes(canvas, node).length;
+    const generatedSourceCount = imageCanvasGeneratedSourceNodes(canvas, node).length;
+    const inputRefCount = imageCanvasNodeInputRefs(node).length;
+    const referenceTotal = refSourceCount + inputRefCount;
+    const hasOutput = node.output && isRenderableImageOutput(node.output);
+    const media = img
+      ? `<img src="${esc(img)}" alt="${esc(node.title || node.prompt || '画布节点')}" draggable="false">`
+      : `<div class="image-canvas-node-placeholder">${node.status === 'generating' ? '<div class="image-spinner"></div>' : `<span>${node.status === 'review' ? '任务节点' : '等待生成'}</span>`}</div>`;
+    const errorBlock = node.error ? `<div class="image-canvas-node-error">${esc(node.error)}</div>` : '';
+    const reviewFields = node.status === 'review' ? `
+          <textarea class="image-canvas-node-prompt-input" data-node="${esc(node.id)}" aria-label="节点提示词">${esc(node.prompt || '')}</textarea>
+        ` : `
+          <div class="image-canvas-node-prompt">${esc(node.prompt || '')}</div>
+        `;
+    const executeButton = node.status === 'review'
+      ? `<button class="image-canvas-node-btn primary image-canvas-action" data-action="canvas-run-node" data-node="${esc(node.id)}" type="button" title="执行" data-tooltip="执行"><svg viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></svg></button>`
+      : '';
+    const nodeActions = `
+          <div class="image-canvas-node-actions">
+            <button class="image-canvas-node-btn ${connectActive ? 'primary' : ''} image-canvas-action" data-action="canvas-connect-node" data-node="${esc(node.id)}" type="button" title="${connectActive ? '取消连线' : '连线'}" data-tooltip="${connectActive ? '取消连线' : '连线'}"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/></svg></button>
+            ${hasOutput ? `<button class="image-canvas-node-btn image-canvas-action" data-action="canvas-download-node" data-node="${esc(node.id)}" type="button" title="下载" data-tooltip="下载"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>` : ''}
+            ${hasOutput ? `<button class="image-canvas-node-btn image-canvas-action" data-action="canvas-optimize-node" data-node="${esc(node.id)}" type="button" title="优化" data-tooltip="优化"><svg viewBox="0 0 24 24"><path d="M12 3l1.4 4.2L18 9l-4.6 1.8L12 15l-1.4-4.2L6 9l4.6-1.8Z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8Z"/></svg></button>` : ''}
+            <button class="image-canvas-node-btn image-canvas-action" data-action="canvas-branch-node" data-node="${esc(node.id)}" type="button" title="分支" data-tooltip="分支" ${hasOutput ? '' : 'disabled'}><svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M9 6h3a6 6 0 0 1 6 6v3"/><path d="M9 6h9"/></svg></button>
+            <button class="image-canvas-node-btn image-canvas-action" data-action="canvas-duplicate-node" data-node="${esc(node.id)}" type="button" title="复制节点" data-tooltip="复制节点"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V6a2 2 0 0 1 2-2h10"/></svg></button>
+            <button class="image-canvas-node-btn danger image-canvas-action" data-action="canvas-delete-node" data-node="${esc(node.id)}" type="button" title="删除" data-tooltip="删除"><svg viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 18h10l1-18"/><path d="M10 11v7"/><path d="M14 11v7"/></svg></button>
+          </div>
+        `;
+    return `
+      <div class="image-canvas-node operation-${esc(node.operation || 'branch')} ${selected ? 'selected' : ''} ${connectActive ? 'connecting' : ''} ${connectTarget ? 'connect-target' : ''} ${status}" data-node="${esc(node.id)}" style="left:${Number(node.x) || 0}px;top:${Number(node.y) || 0}px">
+        <div class="image-canvas-node-head">
+          <div class="image-canvas-node-title-wrap">
+            ${node.status === 'review'
+              ? `<input class="image-canvas-node-title-input" data-node="${esc(node.id)}" value="${esc(node.title || '')}" maxlength="40" aria-label="节点标题">`
+              : `<div class="image-canvas-node-title">${esc(node.title || imageCanvasOperationLabel(node.operation))}</div>`}
+            <span class="image-canvas-node-status ${esc(nodeStateClass)}">${esc(nodeStateLabel)}</span>
+          </div>
+          <div class="image-canvas-node-head-actions">
+            ${executeButton}
+            <button class="image-canvas-node-btn image-canvas-action" data-action="canvas-focus-node" data-node="${esc(node.id)}" type="button" title="定位" data-tooltip="定位"><svg viewBox="0 0 24 24"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M2 12h4"/><path d="M18 12h4"/><circle cx="12" cy="12" r="4"/></svg></button>
+            ${hasOutput ? `<button class="image-canvas-node-btn image-canvas-action" data-action="canvas-view-node" data-node="${esc(node.id)}" type="button" title="查看" data-tooltip="查看"><svg viewBox="0 0 24 24"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg></button>` : ''}
+            ${node.error ? `<button class="image-canvas-node-btn image-canvas-action" data-action="canvas-retry-node" data-node="${esc(node.id)}" type="button" title="重试" data-tooltip="重试"><svg viewBox="0 0 24 24"><path d="M21 2v6h-6"/><path d="M20 11a8 8 0 1 1-2.3-5.7L21 8"/></svg></button>` : ''}
+          </div>
+        </div>
+        ${media}
+        <div class="image-canvas-node-body">
+          ${reviewFields}
+          ${errorBlock}
+          <div class="image-canvas-node-meta">
+            <span>${esc(imageCanvasOperationLabel(node.operation))}</span>
+            <span>${referenceTotal ? `参考图 ${referenceTotal}` : generatedSourceCount ? `上游 ${generatedSourceCount}` : esc(statusLabel)}</span>
+          </div>
+          ${nodeActions}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderImageCanvasSide(canvas) {
+    const selected = selectedCanvasNodes(canvas);
+    const selectedGenerated = selected.filter(node => node.output && isRenderableImageOutput(node.output));
+    const first = selected[0] || null;
+    const failedNodes = (canvas.nodes || []).filter(node => node.error || node.status === 'error');
+    if (canvas.planStatus === 'review' && canvas.plan) {
+      const tasks = Array.isArray(canvas.plan.tasks) ? canvas.plan.tasks : [];
+      return `
+        <h3>确认任务拆解</h3>
+        <p>文本模型已拆分任务。可以修改任务名和提示词，确认后再开始调用生图模型。</p>
+        <div class="image-canvas-side-section image-canvas-task-list">
+          ${tasks.map((task, index) => `
+            <div class="image-canvas-task" data-task="${index}">
+              <div class="image-canvas-task-tools">
+                <span class="image-canvas-task-index">任务 ${index + 1}</span>
+                <button class="btn-secondary image-canvas-action" data-action="canvas-remove-task" data-task="${index}" type="button" title="删除这个拆解任务" data-tooltip="删除这个拆解任务">删除</button>
+              </div>
+              <input class="image-canvas-task-title" data-task="${index}" value="${esc(task.title || '')}" maxlength="40" aria-label="任务名称">
+              <textarea class="image-canvas-task-prompt" data-task="${index}" aria-label="生图提示词">${esc(task.prompt || '')}</textarea>
+            </div>
+          `).join('')}
+        </div>
+        <div class="image-canvas-side-section image-canvas-side-actions">
+          <button class="btn-secondary image-canvas-action" data-action="canvas-add-task" type="button" title="手动添加一个拆解任务" data-tooltip="手动添加一个拆解任务">添加任务</button>
+          <button class="btn-primary image-canvas-action" data-action="canvas-run-plan" type="button" title="确认拆解并开始并行生成" data-tooltip="确认拆解并开始并行生成" ${tasks.length ? '' : 'disabled'}>开始执行</button>
+        </div>
+      `;
+    }
+    if (!canvas.nodes.length) {
+      return `
+        <h3>无限画布</h3>
+        <p>输入主题后点击生成，会创建第一个图片节点。之后可以选中节点继续分支、优化或合并。</p>
+        <div class="image-canvas-side-section">
+          <button class="btn-secondary image-canvas-action" data-action="canvas-new" type="button" title="创建一个新的空白画布" data-tooltip="创建一个新的空白画布">新画布</button>
+        </div>
+      `;
+    }
+    return `
+      <h3>${selected.length ? `已选 ${selected.length} 个节点` : '未选择节点'}</h3>
+      <p>${first ? esc(first.prompt || first.title || '') : '点击画布节点后，可以基于它继续生成分支。按住 Shift 或 Command 可多选节点用于合并。'}</p>
+      ${first?.error ? `<div class="image-canvas-side-section"><div class="image-canvas-error-detail">${esc(first.error)}</div></div>` : ''}
+      <div class="image-canvas-side-section image-canvas-side-actions">
+        <button class="btn-secondary image-canvas-action" data-action="canvas-branch" type="button" title="基于选中节点创建分支任务" data-tooltip="基于选中节点创建分支任务" ${selected.length === 1 ? '' : 'disabled'}>生成分支</button>
+        <button class="btn-secondary image-canvas-action" data-action="canvas-optimize" type="button" title="基于选中节点创建优化任务" data-tooltip="基于选中节点创建优化任务" ${selected.length === 1 ? '' : 'disabled'}>优化节点</button>
+        <button class="btn-secondary image-canvas-action" data-action="canvas-retry-selected" type="button" title="重试选中的失败节点" data-tooltip="重试选中的失败节点" ${selected.length === 1 && first?.error ? '' : 'disabled'}>重试失败</button>
+        <button class="btn-primary image-canvas-action" data-action="canvas-merge" type="button" title="将多个已生成节点融合成新图" data-tooltip="将多个已生成节点融合成新图" ${selectedGenerated.length >= 2 ? '' : 'disabled'}>合并选择</button>
+      </div>
+      ${failedNodes.length ? `<div class="image-canvas-side-section"><button class="btn-secondary image-canvas-action" data-action="canvas-retry-failed" type="button" title="并行重试全部失败节点" data-tooltip="并行重试全部失败节点">重试全部失败 ${failedNodes.length}</button></div>` : ''}
+      <div class="image-canvas-side-section">
+        <div class="image-canvas-selection-list">
+          ${selected.map(node => `<div class="image-canvas-selection-item">${esc(node.title || node.prompt || node.id)}</div>`).join('') || '<div class="image-canvas-selection-item">暂无选中节点</div>'}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderImageCanvasWorkspace() {
+    const canvas = normalizeCanvasJob(currentImageCanvas());
+    const viewport = canvas?.viewport || { x: 320, y: 80, zoom: 1 };
+    const nodeCount = canvas?.nodes?.length || 0;
+    const empty = !canvas || !nodeCount;
+    const failedCount = (canvas?.nodes || []).filter(node => node.status === 'error' || node.error).length;
+    const statusText = canvas?.planStatus === 'planning'
+      ? '正在拆分任务'
+      : canvas?.planStatus === 'review'
+        ? `待确认 · ${canvas.plan?.tasks?.length || 0} 个任务`
+        : canvas?.planStatus === 'generating'
+          ? `正在生成任务节点 · ${canvas.planProgress?.completed || 0}/${canvas.planProgress?.total || canvas.plan?.tasks?.length || 0} · 并发 ${canvas.planProgress?.maxParallel || MAX_CANVAS_PARALLEL}`
+          : `${nodeCount} 个节点${failedCount ? ` · 失败 ${failedCount}` : ''} · 缩放 ${Math.round((viewport.zoom || 1) * 100)}%`;
+    const emptyTitle = canvas?.planStatus === 'planning'
+      ? '文本模型正在拆分任务'
+      : canvas?.planStatus === 'review'
+        ? '请确认任务拆解'
+        : '从一个主题开始';
+    const emptyText = canvas?.planStatus === 'planning'
+      ? '主题会先被规划成多个生图任务，完成后会等待人工确认。'
+      : canvas?.planStatus === 'review'
+        ? '直接在节点里微调任务名称和生图提示词，确认后再开始执行。'
+        : '点击顶部智能拆解开始规划。Shift 拖动画布可框选，滚轮缩放，拖动空白区域平移。';
+    const doneCount = (canvas?.nodes || []).filter(node => node.output && isRenderableImageOutput(node.output)).length;
+    const generatingCount = (canvas?.nodes || []).filter(node => node.status === 'generating').length;
+    const queuedCount = (canvas?.nodes || []).filter(node => node.status === 'queued').length;
+    const reviewCount = (canvas?.nodes || []).filter(node => node.status === 'review').length;
+    const selected = selectedCanvasNodes(canvas);
+    const selectedGenerated = selected.filter(node => node.output && isRenderableImageOutput(node.output));
+    const title = canvas?.title || canvas?.prompt || '无限画布';
+    const selectedText = selected.length ? `已选 ${selected.length}` : '未选择节点';
+    const firstSelected = selected[0] || null;
+    const failedSelected = selected.find(node => node.error || node.status === 'error');
+    const canUndo = !!canvas?.history?.length;
+    const canRedo = !!canvas?.future?.length;
+    const opStats = (canvas?.nodes || []).reduce((acc, node) => {
+      const key = imageCanvasOperationLabel(node.operation);
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    const failedPreview = (canvas?.nodes || []).find(node => node.error)?.error || '';
+    const connectFromNode = state.imageCanvasConnectFrom
+      ? (canvas?.nodes || []).find(node => node.id === state.imageCanvasConnectFrom)
+      : null;
+    const selectedEdge = state.imageCanvasSelectedEdgeId
+      ? (canvas?.edges || []).find(edge => edge.id === state.imageCanvasSelectedEdgeId)
+      : null;
+    const canvasStatusText = connectFromNode
+      ? `连线中 · ${connectFromNode.title || connectFromNode.prompt || '起点'} → 点击目标节点`
+      : selectedEdge
+        ? '已选中参考线 · 可断开这条线'
+      : statusText;
+    return `
+      <div class="image-canvas-shell image-canvas-fullscreen" role="application" aria-label="无限画布工作台">
+        <header class="image-canvas-topbar">
+          <div class="image-canvas-top-left">
+            <div class="image-canvas-brandmark">
+              <strong>${esc(title)}</strong>
+              <span>${nodeCount} 节点</span>
+            </div>
+          </div>
+          <div class="image-canvas-top-center">
+            <button class="image-canvas-pill-btn image-canvas-action" data-action="canvas-plan-topic" type="button" title="智能拆解" data-tooltip="智能拆解" ${state.isGeneratingImage ? 'disabled' : ''}>
+              <svg viewBox="0 0 24 24"><path d="M12 3l1.4 4.2L18 9l-4.6 1.8L12 15l-1.4-4.2L6 9l4.6-1.8Z"/><path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8Z"/></svg>
+              智能拆解
+            </button>
+            <button class="image-canvas-pill-btn primary image-canvas-action" data-action="canvas-run-review" type="button" title="执行画布" data-tooltip="执行画布" ${reviewCount ? '' : 'disabled'}>
+              <svg viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></svg>
+              执行画布
+            </button>
+            <button class="image-canvas-pill-btn image-canvas-action" data-action="canvas-fit" type="button" title="适配视图" data-tooltip="适配视图" ${nodeCount ? '' : 'disabled'}>
+              <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+              适配视图
+            </button>
+          </div>
+          <div class="image-canvas-top-actions">
+            <button class="image-canvas-return-btn image-canvas-action" data-action="canvas-exit" type="button" title="返回绘画模式" data-tooltip="返回绘画模式">
+              <svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/><path d="M9 12h12"/></svg>
+              返回生成
+            </button>
+            ${state.isGeneratingImage ? `<button class="image-canvas-icon-btn danger image-canvas-action" data-action="canvas-stop" type="button" title="中断生成" data-tooltip="中断生成"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>` : ''}
+            <button class="image-canvas-icon-btn image-canvas-action" data-action="canvas-new" type="button" title="新画布" data-tooltip="新画布"><svg viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg></button>
+            <button class="image-canvas-icon-btn image-canvas-action" data-action="canvas-undo" type="button" title="撤销" data-tooltip="撤销" ${canUndo ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-1"/></svg></button>
+            <button class="image-canvas-icon-btn image-canvas-action" data-action="canvas-redo" type="button" title="重做" data-tooltip="重做" ${canRedo ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h1"/></svg></button>
+            <button class="image-canvas-icon-btn image-canvas-action" data-action="canvas-export" type="button" title="导出画布" data-tooltip="导出画布"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
+            <button class="image-canvas-icon-btn image-canvas-action" data-action="canvas-import" type="button" title="导入画布" data-tooltip="导入画布"><svg viewBox="0 0 24 24"><path d="M12 21V9"/><path d="m7 14 5-5 5 5"/><path d="M5 3h14"/></svg></button>
+          </div>
+        </header>
+
+        <div class="image-canvas-stage ${state.imageCanvasPointer ? 'is-dragging' : ''}" data-role="canvas-stage">
+          <div class="image-canvas-plane" style="transform: translate(${Number(viewport.x) || 0}px, ${Number(viewport.y) || 0}px) scale(${Number(viewport.zoom) || 1})">
+            <svg class="image-canvas-edges" aria-hidden="true">${canvas ? renderImageCanvasEdges(canvas) : ''}</svg>
+            ${canvas ? canvas.nodes.map(node => renderImageCanvasNode(canvas, node)).join('') : ''}
+          </div>
+          ${empty ? `<div class="image-canvas-empty-state"><div class="image-canvas-empty-panel"><h2>${esc(emptyTitle)}</h2><p>${esc(emptyText)}</p></div></div>` : ''}
+        </div>
+
+        <aside class="image-canvas-inspector-panel">
+          <section class="image-canvas-panel-card compact">
+            <div class="image-canvas-panel-title"><strong>${esc(selectedText)}</strong><span>${nodeCount} 节点</span></div>
+            <div class="image-canvas-stat-grid">
+              <div><strong>${doneCount}</strong><span>完成</span></div>
+              <div><strong>${reviewCount}</strong><span>待确认</span></div>
+              <div><strong>${failedCount}</strong><span>失败</span></div>
+            </div>
+            <div class="image-canvas-op-list">
+              ${Object.entries(opStats).map(([label, count]) => `<span>${esc(label)} ${count}</span>`).join('') || '<span>暂无节点</span>'}
+            </div>
+            ${failedPreview ? `<div class="image-canvas-error-detail compact">${esc(failedPreview)}</div>` : ''}
+          </section>
+          <section class="image-canvas-panel-card">
+            <div class="image-canvas-panel-title"><strong>${esc(firstSelected?.title || '节点详情')}</strong><span>${esc(firstSelected ? imageCanvasOperationLabel(firstSelected.operation) : '未选择')}</span></div>
+            <p>${esc(firstSelected?.prompt || '选择节点后，可在节点头部直接查看、优化、分支、重试或删除。按 Shift/Command 点击可多选，Shift 拖动画布可框选。')}</p>
+            ${failedSelected?.error ? `<div class="image-canvas-error-detail">${esc(failedSelected.error)}</div>` : ''}
+            <div class="image-canvas-panel-actions">
+              <button class="btn-secondary image-canvas-action" data-action="canvas-branch" type="button" title="基于选中节点创建分支任务" data-tooltip="基于选中节点创建分支任务" ${selected.length === 1 && selectedGenerated.length === 1 ? '' : 'disabled'}>分支</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-optimize" type="button" title="基于选中节点创建优化任务" data-tooltip="基于选中节点创建优化任务" ${selected.length === 1 && selectedGenerated.length === 1 ? '' : 'disabled'}>优化</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-retry-selected" type="button" title="重试选中的失败节点" data-tooltip="重试选中的失败节点" ${failedSelected ? '' : 'disabled'}>重试</button>
+              <button class="btn-primary image-canvas-action" data-action="canvas-merge" type="button" title="将多个已生成节点融合成新图" data-tooltip="将多个已生成节点融合成新图" ${selectedGenerated.length >= 2 ? '' : 'disabled'}>合并</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-focus-selected" type="button" title="把选中节点移动到视图中心" data-tooltip="把选中节点移动到视图中心" ${firstSelected ? '' : 'disabled'}>定位</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-clear-selection" type="button" title="取消当前选中节点" data-tooltip="取消当前选中节点" ${selected.length ? '' : 'disabled'}>取消选择</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-copy-prompt" type="button" title="复制选中节点提示词" data-tooltip="复制选中节点提示词" ${firstSelected ? '' : 'disabled'}>复制提示</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-duplicate-selected" type="button" title="复制选中节点到旁边" data-tooltip="复制选中节点到旁边" ${selected.length ? '' : 'disabled'}>复制节点</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-download-selected" type="button" title="下载选中节点图片" data-tooltip="下载选中节点图片" ${selectedGenerated.length ? '' : 'disabled'}>下载</button>
+              <button class="btn-secondary image-canvas-action" data-action="canvas-variant-selected" type="button" title="为选中节点创建变体任务" data-tooltip="为选中节点创建变体任务" ${selectedGenerated.length ? '' : 'disabled'}>生成变体</button>
+            </div>
+          </section>
+        </aside>
+
+        <div class="image-canvas-commandbar">
+          <div class="image-canvas-command-actions">
+            <span>${esc(canvasStatusText)}</span>
+            <button class="image-canvas-tool-btn image-canvas-action" data-action="canvas-add-ref" type="button" title="添加参考图" data-tooltip="添加参考图"><svg viewBox="0 0 24 24"><path d="M15 8h.01"/><path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z"/><path d="m4 15 4-4a2 2 0 0 1 3 0l5 5"/><path d="m14 14 1-1a2 2 0 0 1 3 0l2 2"/></svg></button>
+            <button class="image-canvas-tool-btn image-canvas-action" data-action="canvas-run-review" type="button" title="执行待确认" data-tooltip="执行待确认" ${reviewCount ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M5 3l14 9-14 9V3z"/></svg>${reviewCount ? `<span>${reviewCount}</span>` : ''}</button>
+            <button class="image-canvas-tool-btn image-canvas-action" data-action="canvas-auto-layout" type="button" title="整理节点" data-tooltip="整理节点" ${nodeCount ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M4 7h6"/><path d="M14 7h6"/><path d="M4 17h6"/><path d="M14 17h6"/><path d="M10 7h4"/><path d="M10 17h4"/></svg></button>
+            <button class="image-canvas-tool-btn image-canvas-action" data-action="canvas-disconnect-edge" type="button" title="断开选中参考线" data-tooltip="断开选中参考线" ${selectedEdge ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M17 7 7 17"/><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2A5 5 0 0 0 12 20.1l1.1-1.1"/></svg></button>
+            <button class="image-canvas-tool-btn image-canvas-action" data-action="canvas-merge" type="button" title="合并选择" data-tooltip="合并选择" ${selectedGenerated.length >= 2 ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M7 7h4a4 4 0 0 1 4 4v6"/><path d="M7 17h4a4 4 0 0 0 4-4V7"/></svg></button>
+            <button class="image-canvas-tool-btn image-canvas-action" data-action="canvas-variant-selected" type="button" title="生成变体" data-tooltip="生成变体" ${selectedGenerated.length ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M12 3l1.4 4.2L18 9l-4.6 1.8L12 15l-1.4-4.2L6 9l4.6-1.8Z"/></svg></button>
+          </div>
+        </div>
+        ${renderImageCanvasPlannerModal(canvas)}
+      </div>
+    `;
+  }
+
+  function setImageCanvasMode(enabled) {
+    const nextEnabled = !!enabled && canUseImageCanvas();
+    if (nextEnabled && !isImageCanvasJob(currentImageJob())) {
+      const topic = dom.imagePrompt?.value?.trim() || '无限画布';
+      const canvas = createImageCanvasJob(topic, sanitizeCurrentImageParams(saveImageParams()));
+      state.imageJobs.unshift(canvas);
+      state.currentImageJobId = canvas.id;
+      imageDbPutJob(canvas);
+      updateSidebar();
+    }
+    state.imageCanvasMode = nextEnabled;
+    persist([KEYS.currentImageJobId, KEYS.imageCanvasMode]);
+    if (dom.imageCanvasToggleBtn) dom.imageCanvasToggleBtn.classList.toggle('active', state.imageCanvasMode);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+  }
+
+  function canvasViewport(canvas = currentImageCanvas()) {
+    normalizeCanvasJob(canvas);
+    return canvas?.viewport || { x: 320, y: 80, zoom: 1 };
+  }
+
+  function setCanvasViewport(next, opts = {}) {
+    const canvas = currentImageCanvas();
+    if (!canvas) return;
+    const current = canvasViewport(canvas);
+    canvas.viewport = {
+      x: Number.isFinite(Number(next.x)) ? Number(next.x) : current.x,
+      y: Number.isFinite(Number(next.y)) ? Number(next.y) : current.y,
+      zoom: Math.min(2.4, Math.max(.28, Number.isFinite(Number(next.zoom)) ? Number(next.zoom) : current.zoom)),
+    };
+    if (opts.render !== false) renderImageWorkspace();
+    if (opts.persist !== false) saveImageCanvas(canvas, { sidebar: false });
+  }
+
+  function focusImageCanvasNode(node, zoom = null) {
+    const canvas = currentImageCanvas();
+    const stage = dom.imageCanvasWorkspace?.querySelector('.image-canvas-stage');
+    if (!canvas || !node || !stage) return;
+    const rect = stage.getBoundingClientRect();
+    const nextZoom = zoom || canvas.viewport?.zoom || 1;
+    setCanvasViewport({
+      x: rect.width / 2 - ((Number(node.x) || 0) + 118) * nextZoom,
+      y: rect.height / 2 - ((Number(node.y) || 0) + 165) * nextZoom,
+      zoom: nextZoom,
+    });
+  }
+
+  function scheduleImageCanvasViewportSave(canvas = currentImageCanvas()) {
+    if (!canvas) return;
+    clearTimeout(state.imageCanvasViewportSaveTimer);
+    state.imageCanvasViewportSaveTimer = setTimeout(() => {
+      state.imageCanvasViewportSaveTimer = null;
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+    }, 180);
+  }
+
+  function fitImageCanvas() {
+    const canvas = currentImageCanvas();
+    if (!canvas?.nodes?.length) return;
+    const stage = dom.imageCanvasWorkspace?.querySelector('.image-canvas-stage');
+    if (!stage) return;
+    const minX = Math.min(...canvas.nodes.map(node => Number(node.x) || 0));
+    const minY = Math.min(...canvas.nodes.map(node => Number(node.y) || 0));
+    const maxX = Math.max(...canvas.nodes.map(node => {
+      const rect = imageCanvasNodeRect(node);
+      return rect.x + rect.w;
+    }));
+    const maxY = Math.max(...canvas.nodes.map(node => {
+      const rect = imageCanvasNodeRect(node);
+      return rect.y + rect.h;
+    }));
+    const width = Math.max(1, maxX - minX);
+    const height = Math.max(1, maxY - minY);
+    const zoom = Math.min(1.2, Math.max(.32, Math.min((stage.clientWidth - 80) / width, (stage.clientHeight - 80) / height)));
+    setCanvasViewport({ x: 40 - minX * zoom, y: 40 - minY * zoom, zoom });
+  }
+
+  function autoLayoutImageCanvas(canvas = currentImageCanvas()) {
+    if (!canvas?.nodes?.length) return;
+    normalizeCanvasJob(canvas);
+    pushImageCanvasHistory(canvas);
+    const nodesById = new Map(canvas.nodes.map(node => [node.id, node]));
+    const incoming = new Map(canvas.nodes.map(node => [node.id, []]));
+    (canvas.edges || []).forEach(edge => {
+      if (nodesById.has(edge.from) && nodesById.has(edge.to)) incoming.get(edge.to)?.push(edge.from);
+    });
+    const depthById = new Map();
+    const resolveDepth = (nodeId, stack = new Set()) => {
+      if (depthById.has(nodeId)) return depthById.get(nodeId);
+      if (stack.has(nodeId)) return 0;
+      stack.add(nodeId);
+      const parents = incoming.get(nodeId) || [];
+      const depth = parents.length ? Math.max(...parents.map(parentId => resolveDepth(parentId, stack) + 1)) : 0;
+      stack.delete(nodeId);
+      depthById.set(nodeId, depth);
+      return depth;
+    };
+    canvas.nodes.forEach(node => resolveDepth(node.id));
+    const columns = new Map();
+    canvas.nodes.forEach(node => {
+      const depth = depthById.get(node.id) || 0;
+      if (!columns.has(depth)) columns.set(depth, []);
+      columns.get(depth).push(node);
+    });
+    [...columns.entries()].sort((a, b) => a[0] - b[0]).forEach(([depth, column]) => {
+      column
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+        .forEach((node, index) => {
+          node.x = depth * 320;
+          node.y = index * 310;
+        });
+    });
+    saveImageCanvas(canvas, { sidebar: false });
+    renderImageWorkspace();
+    requestAnimationFrame(fitImageCanvas);
+  }
+
+  function nextCanvasNodePosition(canvas, sources = []) {
+    if (!canvas.nodes.length || !sources.length) return { x: 0, y: 0 };
+    const maxX = Math.max(...sources.map(node => Number(node.x) || 0));
+    const avgY = sources.reduce((sum, node) => sum + (Number(node.y) || 0), 0) / sources.length;
+    const siblingCount = canvas.edges.filter(edge => sources.some(node => edge.from === node.id)).length;
+    return { x: maxX + 320, y: Math.round(avgY + (siblingCount % 4) * 42) };
+  }
+
+  function addImageCanvasNode(canvas, { prompt, params, operation, sources = [], inputImages = [] }) {
+    const position = nextCanvasNodePosition(canvas, sources);
+    const node = {
+      id: imageCanvasId('node'),
+      title: `${imageCanvasOperationLabel(operation)} · ${prompt.trim().slice(0, 18)}${prompt.trim().length > 18 ? '...' : ''}`,
+      prompt: prompt.trim(),
+      x: position.x,
+      y: position.y,
+      params: Object.assign({}, params),
+      operation,
+      parentNodeId: sources[0]?.id || null,
+      sourceNodeIds: sources.map(node => node.id),
+      inputImages: imageReferencePayload(inputImages),
+      model: state.imageModel,
+      mapModel: state.imageMapModel,
+      status: 'generating',
+      createdAt: Date.now(),
+      output: null,
+      error: '',
+    };
+    canvas.nodes.push(node);
+    sources.forEach(source => {
+      canvas.edges.push({ id: imageCanvasId('edge'), from: source.id, to: node.id, type: operation === 'merge' ? 'merge' : 'branch' });
+    });
+    state.imageCanvasSelectedEdgeId = null;
+    canvas.selectedNodeIds = [node.id];
+    return node;
+  }
+
+  function addImageCanvasReviewNode(canvas, { prompt, params, operation = 'branch', sources = [], inputImages = [], title = '' }) {
+    if (!canvas) return null;
+    normalizeCanvasJob(canvas);
+    pushImageCanvasHistory(canvas);
+    const finalPrompt = String(prompt || defaultCanvasPrompt(operation, sources) || '').trim();
+    const position = nextCanvasNodePosition(canvas, sources);
+    const node = {
+      id: imageCanvasId('node'),
+      title: String(title || `${imageCanvasOperationLabel(operation)} · ${finalPrompt.slice(0, 18)}${finalPrompt.length > 18 ? '...' : ''}`).trim(),
+      prompt: finalPrompt,
+      x: position.x,
+      y: position.y,
+      params: Object.assign({}, params),
+      operation,
+      parentNodeId: sources[0]?.id || null,
+      sourceNodeIds: sources.map(source => source.id),
+      inputImages: imageReferencePayload(inputImages),
+      model: state.imageModel,
+      mapModel: state.imageMapModel,
+      status: 'review',
+      createdAt: Date.now(),
+      output: null,
+      error: '',
+    };
+    canvas.nodes.push(node);
+    sources.forEach(source => {
+      canvas.edges.push({ id: imageCanvasId('edge'), from: source.id, to: node.id, type: operation === 'merge' ? 'merge' : 'branch' });
+    });
+    state.imageCanvasSelectedEdgeId = null;
+    canvas.selectedNodeIds = [node.id];
+    canvas.planStatus = 'review';
+    canvas.status = 'done';
+    return node;
+  }
+
+  function duplicateImageCanvasNodes(canvas, nodes) {
+    if (!canvas || !nodes?.length) return [];
+    pushImageCanvasHistory(canvas);
+    normalizeCanvasJob(canvas);
+    const clones = nodes.map((source, index) => {
+      const clone = JSON.parse(JSON.stringify(source));
+      clone.id = imageCanvasId('node');
+      clone.title = `${source.title || imageCanvasOperationLabel(source.operation)} 副本`;
+      clone.x = (Number(source.x) || 0) + 34 + index * 18;
+      clone.y = (Number(source.y) || 0) + 34 + index * 18;
+      clone.parentNodeId = null;
+      clone.sourceNodeIds = [];
+      clone.createdAt = Date.now();
+      clone.error = '';
+      if (clone.status === 'generating' || clone.status === 'queued') clone.status = clone.output ? 'done' : 'review';
+      return clone;
+    });
+    canvas.nodes.push(...clones);
+    canvas.selectedNodeIds = clones.map(node => node.id);
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+    return clones;
+  }
+
+  function downloadImageCanvasNode(canvas, node) {
+    if (!canvas || !node?.output || !isRenderableImageOutput(node.output)) {
+      showToast('这个节点还没有可下载的图片');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = canvasNodeImageSource(node, canvas.params);
+    a.download = `${(node.title || canvas.title || 'canvas-node').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 60) || 'canvas-node'}.${node.output.format || node.params?.outputFormat || canvas.params?.outputFormat || 'png'}`;
+    if (node.output.url && !node.output.b64) {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    }
+    a.click();
+  }
+
+  function addImageCanvasVariantNodes(canvas, sources) {
+    if (!canvas || !sources?.length) return;
+    sources.forEach((source, index) => {
+      const node = addImageCanvasReviewNode(canvas, {
+        prompt: `基于「${source.title || source.prompt || '当前节点'}」生成一个新的变体：保持主体识别度，改变构图、光影、色彩或细节方向。`,
+        params: saveImageParams(),
+        operation: 'variant',
+        sources: [source],
+        title: `变体 · ${(source.title || '节点').slice(0, 16)}${index ? ` ${index + 1}` : ''}`,
+      });
+      if (node) node.y = (Number(source.y) || 0) + index * 42;
+    });
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+  }
+
+  function nextCanvasReferencePosition(canvas) {
+    normalizeCanvasJob(canvas);
+    const index = canvas?.nodes?.length || 0;
+    if (!index) return { x: 0, y: 0 };
+    const minX = Math.min(...canvas.nodes.map(node => Number(node.x) || 0));
+    const minY = Math.min(...canvas.nodes.map(node => Number(node.y) || 0));
+    return {
+      x: minX + (index % 3) * 260,
+      y: minY + Math.floor(index / 3) * 320,
+    };
+  }
+
+  function createImageCanvasReferenceNode(canvas, ref, opts = {}) {
+    if (!canvas || !ref?.base64) return null;
+    const params = sanitizeCurrentImageParams(Object.assign({}, opts.params || saveImageParams(), { count: 1 }));
+    const format = normalizeImageFormat(ref.type || ref.base64.match(/^data:image\/([^;]+)/i)?.[1] || params.outputFormat || 'png') || 'png';
+    const b64 = String(ref.base64).split(',')[1] || '';
+    if (!b64) return null;
+    const position = opts.position || nextCanvasReferencePosition(canvas);
+    return {
+      id: imageCanvasId('node'),
+      title: ref.name || `参考图 ${opts.referenceIndex != null ? opts.referenceIndex + 1 : ''}`.trim() || '参考图',
+      prompt: `参考图：${ref.name || '未命名图片'}`,
+      x: position.x,
+      y: position.y,
+      params: Object.assign({}, params),
+      operation: 'reference',
+      parentNodeId: null,
+      sourceNodeIds: [],
+      inputImages: [],
+      referenceIndex: opts.referenceIndex ?? null,
+      model: state.imageModel,
+      mapModel: state.imageMapModel,
+      status: 'done',
+      createdAt: Date.now(),
+      output: {
+        b64,
+        url: '',
+        revisedPrompt: '',
+        format,
+        bytes: imageByteSize({ b64 }),
+        createdAt: Date.now(),
+      },
+      error: '',
+    };
+  }
+
+  function addImageCanvasReferenceNode(ref) {
+    if (!ref?.base64) return null;
+    const params = sanitizeCurrentImageParams(Object.assign({}, saveImageParams(), { count: 1 }));
+    let canvas = currentImageCanvas();
+    if (!canvas) {
+      canvas = createImageCanvasJob('参考图画布', params);
+      state.imageJobs.unshift(canvas);
+      state.currentImageJobId = canvas.id;
+    }
+    normalizeCanvasJob(canvas);
+    const node = createImageCanvasReferenceNode(canvas, ref, { params });
+    if (!node) return null;
+    canvas.nodes.push(node);
+    state.imageCanvasSelectedEdgeId = null;
+    canvas.selectedNodeIds = [node.id];
+    canvas.status = 'done';
+    canvas.planStatus = canvas.nodes.some(item => item.status === 'review') ? 'review' : 'done';
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+    return node;
+  }
+
+  async function requestImageCanvasOutput(prompt, params, sourceNodes, signal, inputRefs = []) {
+    const refs = await imageCanvasRequestRefs(sourceNodes, inputRefs, signal);
+    if ((sourceNodes || []).some(node => node?.output?.urlCachedDirty)) {
+      (sourceNodes || []).forEach(node => { if (node?.output) delete node.output.urlCachedDirty; });
+      saveImageCanvas(currentImageCanvas(), { sidebar: false });
+    }
+    if (state.imageMapModel) {
+      return ImageApi.requestMappedImage(imageMapEndpoint(), prompt, params, refs, signal);
+    }
+    return refs.length
+      ? ImageApi.requestImageEdit(effectiveImageEndpoint(), state.imageModel, prompt, params, refs, signal)
+      : ImageApi.requestOneImage(effectiveImageEndpoint(), state.imageModel, prompt, params, signal);
+  }
+
+  async function requestAndApplyCanvasNode(canvas, node, params, signal) {
+    node.status = 'generating';
+    node.error = '';
+    node.output = null;
+    node.params = Object.assign({}, params);
+    node.model = state.imageModel;
+    node.mapModel = state.imageMapModel;
+    const result = await requestImageCanvasOutput(node.prompt || canvas.prompt || '', params, imageCanvasNodeSources(canvas, node), signal, imageCanvasNodeInputRefs(node));
+    const output = ImageCore.imageResultOutputs(result).find(isRenderableImageOutput);
+    if (!output) throw new Error('接口未返回可显示的图片数据');
+    node.output = output;
+    node.status = 'done';
+    node.usage = ImageCore.imageResultUsage(result);
+    node.error = '';
+    (canvas.edges || []).forEach(edge => {
+      if (edge.from === node.id && edge.type === 'dependency') edge.type = 'reference';
+    });
+    return node;
+  }
+
+  function defaultCanvasPrompt(operation, sources) {
+    if (operation === 'merge') return '融合所选节点：保留最好的主体、背景、构图、色彩和细节，生成一张统一完整的新图。';
+    if (operation === 'optimize') return '基于当前节点继续优化：保留主体和构图，提升细节、质感、光影和整体完成度。';
+    if (sources?.length) return '基于当前节点生成一个新的创作分支，保持主题一致但给出明显的新变化。';
+    return '';
+  }
+
+  function imageCanvasPlannerEndpoint() {
+    const promptEndpoint = imagePromptEndpoint();
+    if (promptEndpoint?.baseUrl && promptEndpoint.apiKey && promptEndpoint.model && state.imagePromptModel) return promptEndpoint;
+    const chatModel = conversationModel();
+    const endpoint = chatEndpointForConversation();
+    if (endpoint?.baseUrl && endpoint.apiKey && chatModel) {
+      return { baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey, model: chatModel, source: 'chat', endpointId: endpoint.id };
+    }
+    return null;
+  }
+
+  function extractJsonObject(text) {
+    const raw = String(text || '').trim().replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim();
+    try { return JSON.parse(raw); } catch { /* fall through */ }
+    const start = raw.indexOf('{');
+    const end = raw.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try { return JSON.parse(raw.slice(start, end + 1)); } catch { /* fall through */ }
+    }
+    return null;
+  }
+
+  function localImageCanvasPlan(theme) {
+    const base = theme.trim();
+    return {
+      title: base.slice(0, 30) || '无限画布',
+      tasks: [
+        { title: '整体基准', operation: 'root', prompt: `${base}。完整主体，清晰构图，统一风格，高质量成图。`, referenceIndexes: [] },
+        { title: '构图分支', operation: 'branch', prompt: `${base}。探索一个更有张力的构图版本，主体关系明确，画面层次丰富。`, referenceIndexes: [] },
+        { title: '氛围分支', operation: 'branch', prompt: `${base}。强化色彩、光影和情绪氛围，保持主题一致。`, referenceIndexes: [] },
+        { title: '细节分支', operation: 'branch', prompt: `${base}。强化材质、细节、边缘质量和视觉完成度。`, referenceIndexes: [] },
+      ],
+    };
+  }
+
+  function normalizePlannerReferenceIndexes(value, refCount) {
+    if (!refCount) return [];
+    const raw = Array.isArray(value) ? value : [];
+    return [...new Set(raw
+      .map(item => Number.parseInt(item, 10))
+      .filter(index => Number.isInteger(index) && index >= 0 && index < refCount))];
+  }
+
+  function normalizeImageCanvasPlan(plan, theme, refCount = 0) {
+    const fallback = localImageCanvasPlan(theme);
+    const rawTasks = Array.isArray(plan?.tasks) ? plan.tasks : [];
+    const tasks = rawTasks.map((task, index) => ({
+      title: String(task?.title || fallback.tasks[index]?.title || `任务 ${index + 1}`).trim().slice(0, 24),
+      operation: ['root', 'branch', 'optimize', 'variant'].includes(task?.operation) ? task.operation : (index ? 'branch' : 'root'),
+      prompt: String(task?.prompt || '').trim(),
+      referenceIndexes: normalizePlannerReferenceIndexes(task?.referenceIndexes, refCount),
+    })).filter(task => task.prompt).slice(0, 6);
+    const finalTasks = tasks.length ? tasks : fallback.tasks.map(task => Object.assign({}, task));
+    if (refCount && finalTasks.length && !finalTasks.some(task => task.referenceIndexes?.length)) {
+      const allIndexes = Array.from({ length: refCount }, (_, index) => index);
+      finalTasks.forEach(task => { task.referenceIndexes = [...allIndexes]; });
+    }
+    return {
+      title: String(plan?.title || fallback.title || '无限画布').trim().slice(0, 40),
+      tasks: finalTasks,
+    };
+  }
+
+  function imageCanvasPlannerUserContent(theme, refs = []) {
+    const cleanRefs = imageReferencePayload(refs || [], 10);
+    const text = [
+      `主题：${theme}`,
+      cleanRefs.length ? `参考图：${cleanRefs.map((ref, index) => `${index}:${ref.name || `参考图${index + 1}`}`).join('，')}` : '',
+    ].filter(Boolean).join('\n');
+    if (!cleanRefs.length) return text;
+    return [
+      { type: 'text', text },
+      ...cleanRefs.map(ref => ({
+        type: 'image_url',
+        image_url: { url: ref.base64 },
+      })),
+    ];
+  }
+
+  async function requestImageCanvasPlan(theme, signal, fallbackTheme = theme, plannerRefs = []) {
+    const refs = imageReferencePayload(Array.isArray(plannerRefs) ? plannerRefs : [], 10);
+    const refCount = refs.length || (Number.isFinite(plannerRefs) ? Number(plannerRefs) : 0);
+    const endpoint = imageCanvasPlannerEndpoint();
+    if (!endpoint) return normalizeImageCanvasPlan(localImageCanvasPlan(fallbackTheme), fallbackTheme, refCount);
+    const url = requestUrl(endpoint.baseUrl, '/chat/completions');
+    const referenceInstruction = refCount
+      ? `用户上传了 ${refCount} 张参考图，索引从 0 到 ${refCount - 1}。你必须为每个任务输出 referenceIndexes 数组，表示该任务应连接哪些参考图。请按主题和任务目标智能分配参考图；如果某个任务需要整体保持参考一致，可包含多个索引。`
+      : '用户没有上传参考图，referenceIndexes 输出空数组。';
+    const resp = await apiFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${endpoint.apiKey}` },
+      body: JSON.stringify({
+        model: endpoint.model,
+        temperature: 0.35,
+        messages: [
+          {
+            role: 'system',
+            content: `你是图像创作工作流规划器。按用户指定模板和复杂度，把用户主题拆成可直接交给图像生成模型的任务。${referenceInstruction}只输出 JSON，不要 Markdown。JSON 格式：{"title":"画布标题","tasks":[{"title":"任务名","operation":"root|branch|optimize|variant","prompt":"完整中文生图提示词","referenceIndexes":[0]}]}。每个 prompt 必须可独立生成图片，并保持同一主题但探索不同方向。`,
+          },
+          { role: 'user', content: imageCanvasPlannerUserContent(theme, refs) },
+        ],
+      }),
+      signal,
+    });
+    if (!resp.ok) return normalizeImageCanvasPlan(localImageCanvasPlan(fallbackTheme), fallbackTheme, refCount);
+    const text = ImageCore.extractChatText(await resp.json());
+    return normalizeImageCanvasPlan(extractJsonObject(text), fallbackTheme, refCount);
+  }
+
+  function imageCanvasPlannerInstruction(template, complexity, refCount = 0) {
+    const templateText = {
+      free: '自由拆解：不套固定结构，按主题规划互相有差异的草稿节点。',
+      story: '故事分镜：按镜头、场景、情绪推进拆解，节点之间需要有连续感。',
+      product: '产品视觉：按主视觉、使用场景、材质细节、卖点氛围和商业海报方向拆解。',
+      character: '角色设定：按角色外观、表情动作、服饰道具、场景氛围和细节特写拆解。',
+    }[template] || '自由拆解：不套固定结构，按主题规划互相有差异的草稿节点。';
+    const countText = complexity === 'simple'
+      ? '拆成 3 到 4 个节点。'
+      : complexity === 'advanced'
+        ? '拆成 6 到 8 个节点。'
+        : '拆成 4 到 6 个节点。';
+    const refText = refCount ? `用户附带了 ${refCount} 张参考图，规划时需要保留参考图中的主体、风格或关键视觉特征。` : '';
+    return `${templateText}${countText}${refText}`;
+  }
+
+  function imageCanvasPlannerTheme(topic, template, complexity, refCount = 0) {
+    return `${topic.trim()}\n\n规划要求：${imageCanvasPlannerInstruction(template, complexity, refCount)}`;
+  }
+
+  function openImageCanvasPlanner(canvas = currentImageCanvas()) {
+    state.imageCanvasPlannerOpen = true;
+    state.imageCanvasPlannerTopic = state.imageCanvasPlannerTopic || meaningfulImageCanvasTopic(canvas);
+    state.imageCanvasPlannerTemplate = state.imageCanvasPlannerTemplate || 'free';
+    state.imageCanvasPlannerComplexity = state.imageCanvasPlannerComplexity || 'standard';
+    renderImageWorkspace();
+    requestAnimationFrame(() => {
+      dom.imageCanvasWorkspace?.querySelector('.image-canvas-planner-topic')?.focus();
+    });
+  }
+
+  function closeImageCanvasPlanner(clearDraft = false) {
+    state.imageCanvasPlannerOpen = false;
+    if (clearDraft) {
+      state.imageCanvasPlannerTopic = '';
+      state.imageCanvasPlannerRefs = [];
+      state.imageCanvasPlannerTemplate = 'free';
+      state.imageCanvasPlannerComplexity = 'standard';
+    }
+    renderImageWorkspace();
+  }
+
+  async function addImageCanvasPlannerRefFiles(files) {
+    const current = imageReferencePayload(state.imageCanvasPlannerRefs || [], 10);
+    const slots = Math.max(0, 10 - current.length);
+    const picked = Array.from(files || []).filter(file => file?.type?.startsWith('image/')).slice(0, slots);
+    if (!picked.length) {
+      showToast(current.length >= 10 ? '最多参考 10 张图片' : '请选择图片文件');
+      return;
+    }
+    try {
+      const refs = await Promise.all(picked.map(async (file, index) => ({
+        name: file.name || pastedImageName(file, index),
+        type: file.type || 'image/png',
+        base64: await ImageCore.blobToDataUrl(file),
+      })));
+      state.imageCanvasPlannerRefs = [...current, ...refs].slice(0, 10);
+      renderImageWorkspace();
+    } catch (error) {
+      showToast(String(error?.message || error || '参考图读取失败'));
+    }
+  }
+
+  function syncImageCanvasPlannerDraft() {
+    const root = dom.imageCanvasWorkspace?.querySelector('.image-canvas-planner-modal');
+    if (!root) return;
+    state.imageCanvasPlannerTopic = root.querySelector('.image-canvas-planner-topic')?.value.trim() || '';
+    state.imageCanvasPlannerTemplate = root.querySelector('.image-canvas-planner-template')?.value || 'free';
+    state.imageCanvasPlannerComplexity = root.querySelector('.image-canvas-planner-complexity')?.value || 'standard';
+  }
+
+  async function optimizeImageCanvasPlannerTopic() {
+    const textarea = dom.imageCanvasWorkspace?.querySelector('.image-canvas-planner-topic');
+    const prompt = textarea?.value.trim() || '';
+    if (!prompt) {
+      textarea?.focus();
+      showToast('请输入主题后再优化');
+      return;
+    }
+    if (!imagePromptOptimizerConfigured()) {
+      showSettings('image');
+      showToast('请先配置提示词优化模型');
+      return;
+    }
+    const endpoint = imagePromptEndpoint();
+    try {
+      showToast('正在优化主题...');
+      const optimized = await ImageApi.optimizePrompt({ baseUrl: endpoint.baseUrl, apiKey: endpoint.apiKey, model: endpoint.model }, prompt);
+      if (!optimized) throw new Error('接口未返回优化后的主题');
+      textarea.value = optimized;
+      state.imageCanvasPlannerTopic = optimized;
+      showToast('主题已优化');
+    } catch (error) {
+      showToast(String(error?.message || error || '优化失败'));
+    }
+  }
+
+  function submitImageCanvasPlanner(canvas = currentImageCanvas()) {
+    syncImageCanvasPlannerDraft();
+    const topic = state.imageCanvasPlannerTopic.trim();
+    const textarea = dom.imageCanvasWorkspace?.querySelector('.image-canvas-planner-topic');
+    if (!topic) {
+      textarea?.focus();
+      showToast('请输入主题后再生成草稿节点');
+      return;
+    }
+    const template = state.imageCanvasPlannerTemplate || 'free';
+    const complexity = state.imageCanvasPlannerComplexity || 'standard';
+    const refs = imageReferencePayload(state.imageCanvasPlannerRefs || [], 10);
+    const sources = selectedCanvasNodes(canvas).filter(item => item.output && isRenderableImageOutput(item.output));
+    state.imageCanvasPlannerOpen = false;
+    state.imageCanvasPlannerRefs = [];
+    dom.imagePrompt.value = topic;
+    generateImageCanvasPlan(imageCanvasPlannerTheme(topic, template, complexity, refs.length), saveImageParams(), {
+      sources,
+      inputImages: refs,
+      displayTheme: topic,
+    });
+  }
+
+  async function generateImageCanvasPlan(theme, params, opts = {}) {
+    if (state.isGeneratingImage) return;
+    params = sanitizeCurrentImageParams(Object.assign({}, params || {}, { count: 1 }));
+    const sourceNodes = (opts.sources || []).filter(node => node?.output && isRenderableImageOutput(node.output));
+    const controller = new AbortController();
+    let canvas = currentImageCanvas();
+    if (!canvas) {
+      canvas = createImageCanvasJob(theme, params);
+      state.imageJobs.unshift(canvas);
+    }
+    normalizeCanvasJob(canvas);
+    const displayTheme = String(opts.displayTheme || theme || '').trim();
+    const inputImages = imageReferencePayload(opts.inputImages !== undefined ? opts.inputImages : state.imageRefs);
+    canvas.prompt = displayTheme || theme;
+    canvas.title = (displayTheme || theme).trim().slice(0, 30) + ((displayTheme || theme).trim().length > 30 ? '...' : '');
+    canvas.inputImages = inputImages;
+    canvas.status = 'generating';
+    canvas.planStatus = 'planning';
+    state.currentImageJobId = canvas.id;
+    state.isGeneratingImage = true;
+    state.imageAbortController = controller;
+    requestImageWakeLock();
+    updateImageGenerateBtn();
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateSidebar();
+
+    try {
+      const plan = normalizeImageCanvasPlan(
+        await requestImageCanvasPlan(theme, controller.signal, displayTheme || theme, inputImages),
+        displayTheme || theme,
+        inputImages.length
+      );
+      canvas.title = plan.title;
+      canvas.plan = plan;
+      const preservedNodes = (canvas.nodes || []).filter(node => node.output && isRenderableImageOutput(node.output));
+      const sourceIds = new Set(sourceNodes.map(node => node.id));
+      const anchorNodes = sourceNodes.length ? preservedNodes.filter(node => sourceIds.has(node.id)) : [];
+      canvas.nodes = preservedNodes;
+      canvas.edges = (canvas.edges || []).filter(edge =>
+        preservedNodes.some(node => node.id === edge.from) && preservedNodes.some(node => node.id === edge.to)
+      );
+      const referenceNodes = inputImages.map((ref, index) => createImageCanvasReferenceNode(canvas, ref, {
+        params,
+        referenceIndex: index,
+        position: {
+          x: -320,
+          y: index * 330,
+        },
+      })).filter(Boolean);
+      canvas.nodes.push(...referenceNodes);
+      const baseX = anchorNodes.length
+        ? Math.max(...anchorNodes.map(node => Number(node.x) || 0)) + 320
+        : referenceNodes.length ? 0 : 0;
+      const baseY = anchorNodes.length
+        ? Math.round(anchorNodes.reduce((sum, node) => sum + (Number(node.y) || 0), 0) / anchorNodes.length)
+        : 0;
+      const taskNodes = plan.tasks.map((task, index) => {
+        const taskRefIndexes = normalizePlannerReferenceIndexes(task.referenceIndexes, referenceNodes.length);
+        const taskReferenceNodes = taskRefIndexes.map(refIndex => referenceNodes[refIndex]).filter(Boolean);
+        const sourceIdsForNode = [
+          ...anchorNodes.map(source => source.id),
+          ...taskReferenceNodes.map(source => source.id),
+        ];
+        const node = {
+          id: imageCanvasId('node'),
+          title: task.title,
+          prompt: task.prompt,
+          x: baseX + (index % 3) * 280,
+          y: baseY + Math.floor(index / 3) * 330,
+          params: Object.assign({}, params),
+          operation: task.operation || (index ? 'branch' : 'root'),
+          sourceNodeIds: sourceIdsForNode,
+          inputImages: [],
+          model: state.imageModel,
+          mapModel: state.imageMapModel,
+          status: 'review',
+          createdAt: Date.now(),
+          output: null,
+          error: '',
+        };
+        canvas.nodes.push(node);
+        anchorNodes.forEach(source => canvas.edges.push({ id: imageCanvasId('edge'), from: source.id, to: node.id, type: 'branch' }));
+        taskReferenceNodes.forEach(source => canvas.edges.push({ id: imageCanvasId('edge'), from: source.id, to: node.id, type: 'reference' }));
+        return node;
+      });
+      state.imageCanvasSelectedEdgeId = null;
+      canvas.selectedNodeIds = canvas.nodes[0] ? [canvas.nodes[0].id] : [];
+      if (taskNodes[0]) canvas.selectedNodeIds = [taskNodes[0].id];
+      canvas.status = 'done';
+      canvas.planStatus = 'review';
+      if (canvas.inputImages?.length) { setImageReferences([]); renderImageRefPreview(); }
+      showToast('任务已拆分，请确认后开始执行');
+    } catch (error) {
+      canvas.status = 'done';
+      canvas.planStatus = 'error';
+      showToast(error?.name === 'AbortError' ? '生成已中断' : String(error?.message || error || '画布规划失败'));
+    } finally {
+      state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      releaseImageWakeLock();
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateSidebar();
+      updateImageGenerateBtn();
+    }
+  }
+
+  async function runImageCanvasPlan(canvas = currentImageCanvas()) {
+    if (!canvas?.plan?.tasks?.length || state.isGeneratingImage) return;
+    normalizeCanvasJob(canvas);
+    const params = sanitizeCurrentImageParams(Object.assign({}, canvas.params || DEFAULT_IMAGE_PARAMS, { count: 1 }));
+    const planInputImages = imageReferencePayload(canvas.inputImages || []);
+    const tasks = normalizeImageCanvasPlan(canvas.plan, canvas.prompt || canvas.title || '', planInputImages.length).tasks;
+    const controller = new AbortController();
+    canvas.nodes = [];
+    canvas.edges = [];
+    canvas.selectedNodeIds = [];
+    canvas.status = 'generating';
+    canvas.planStatus = 'generating';
+    state.isGeneratingImage = true;
+    state.imageAbortController = controller;
+    requestImageWakeLock();
+    updateImageGenerateBtn();
+
+    const planNode = {
+      id: imageCanvasId('node'),
+      title: '主题规划',
+      prompt: canvas.prompt || canvas.title || '',
+      x: 0,
+      y: 80,
+      params: Object.assign({}, params),
+      operation: 'plan',
+      status: 'done',
+      createdAt: Date.now(),
+      output: null,
+      error: '',
+    };
+    canvas.nodes.push(planNode);
+    canvas.selectedNodeIds = [planNode.id];
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+
+    try {
+      const referenceNodes = planInputImages.map((ref, index) => createImageCanvasReferenceNode(canvas, ref, {
+        params,
+        referenceIndex: index,
+        position: {
+          x: 0,
+          y: 80 + index * 330,
+        },
+      })).filter(Boolean);
+      if (referenceNodes.length) {
+        canvas.nodes.push(...referenceNodes);
+        planNode.x = -320;
+        planNode.y = 80 + referenceNodes.length * 330;
+      }
+      const taskNodes = tasks.map((task, index) => {
+        const taskRefIndexes = normalizePlannerReferenceIndexes(task.referenceIndexes, referenceNodes.length);
+        const taskReferenceNodes = taskRefIndexes.map(refIndex => referenceNodes[refIndex]).filter(Boolean);
+        const sourceIdsForNode = [
+          planNode.id,
+          ...taskReferenceNodes.map(source => source.id),
+        ];
+        const node = {
+          id: imageCanvasId('node'),
+          title: task.title,
+          prompt: task.prompt,
+          x: 320,
+          y: index * 270,
+          params: Object.assign({}, params),
+          operation: task.operation || (index ? 'branch' : 'root'),
+          parentNodeId: planNode.id,
+          sourceNodeIds: sourceIdsForNode,
+          inputImages: [],
+          model: state.imageModel,
+          mapModel: state.imageMapModel,
+          status: 'queued',
+          createdAt: Date.now(),
+          output: null,
+          error: '',
+        };
+        canvas.nodes.push(node);
+        canvas.edges.push({ id: imageCanvasId('edge'), from: planNode.id, to: node.id, type: 'branch' });
+        taskReferenceNodes.forEach(source => canvas.edges.push({ id: imageCanvasId('edge'), from: source.id, to: node.id, type: 'reference' }));
+        return node;
+      });
+      state.imageCanvasSelectedEdgeId = null;
+      const maxParallel = Math.min(MAX_CANVAS_PARALLEL, Math.max(1, taskNodes.length));
+      let nextIndex = 0;
+      let completed = 0;
+      let success = 0;
+      let failed = 0;
+      canvas.planProgress = { total: taskNodes.length, completed, success, failed, maxParallel };
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+
+      const updateProgress = () => {
+        canvas.planProgress = { total: taskNodes.length, completed, success, failed, maxParallel };
+        saveImageCanvas(canvas, { sidebar: false });
+        renderImageWorkspace();
+      };
+      const worker = async () => {
+        while (nextIndex < taskNodes.length && !controller.signal.aborted) {
+          const node = taskNodes[nextIndex++];
+          canvas.selectedNodeIds = [node.id];
+          node.status = 'generating';
+          updateProgress();
+          try {
+            await requestAndApplyCanvasNode(canvas, node, params, controller.signal);
+            success += 1;
+          } catch (error) {
+            node.status = 'error';
+            node.error = error?.name === 'AbortError' ? '请求已中断' : String(error?.message || error || '生成失败');
+            failed += 1;
+            if (error?.name === 'AbortError') throw error;
+          } finally {
+            completed += 1;
+            updateProgress();
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: maxParallel }, () => worker()));
+      canvas.status = 'done';
+      canvas.planStatus = 'done';
+      canvas.planProgress = { total: taskNodes.length, completed, success, failed, maxParallel };
+      const failedCount = canvas.nodes.filter(node => node.status === 'error' || node.error).length;
+      showToast(failedCount ? `任务执行完成，失败 ${failedCount} 个，可点击节点重试` : '画布任务已执行');
+    } catch (error) {
+      canvas.status = 'done';
+      canvas.planStatus = error?.name === 'AbortError' ? 'review' : 'error';
+      showToast(error?.name === 'AbortError' ? '生成已中断' : String(error?.message || error || '任务执行失败'));
+    } finally {
+      state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      releaseImageWakeLock();
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateSidebar();
+      updateImageGenerateBtn();
+    }
+  }
+
+  function imageCanvasNodeSources(canvas, node) {
+    return [
+      ...imageCanvasReferenceSourceNodes(canvas, node),
+      ...imageCanvasGeneratedSourceNodes(canvas, node),
+    ];
+  }
+
+  function imageCanvasNodeNeedsGeneration(node) {
+    return !!(node && node.prompt && !node.output && node.status !== 'generating' && node.operation !== 'plan');
+  }
+
+  function imageCanvasSourceNodes(canvas, node) {
+    const ids = new Set(node?.sourceNodeIds || []);
+    return (canvas?.nodes || []).filter(item => ids.has(item.id));
+  }
+
+  function imageCanvasHasPath(canvas, fromId, toId, seen = new Set()) {
+    if (!canvas || !fromId || !toId) return false;
+    if (fromId === toId) return true;
+    if (seen.has(fromId)) return false;
+    seen.add(fromId);
+    return (canvas.edges || [])
+      .filter(edge => edge.from === fromId)
+      .some(edge => imageCanvasHasPath(canvas, edge.to, toId, seen));
+  }
+
+  function collectImageCanvasRunnableWithDependencies(canvas, nodes) {
+    normalizeCanvasJob(canvas);
+    const requested = new Set((nodes || []).filter(Boolean).map(node => node.id));
+    const runnable = new Map();
+    const visit = (node) => {
+      if (!node || runnable.has(node.id)) return;
+      imageCanvasSourceNodes(canvas, node).forEach(source => {
+        if (imageCanvasNodeNeedsGeneration(source)) visit(source);
+      });
+      if (requested.has(node.id) || imageCanvasNodeNeedsGeneration(node)) {
+        if (imageCanvasNodeNeedsGeneration(node)) runnable.set(node.id, node);
+      }
+    };
+    (nodes || []).forEach(visit);
+    return [...runnable.values()];
+  }
+
+  function imageCanvasReadyToRun(canvas, node, runnableIds) {
+    const generatedSources = imageCanvasSourceNodes(canvas, node).filter(source => runnableIds.has(source.id));
+    return generatedSources.every(source => source.output && isRenderableImageOutput(source.output));
+  }
+
+  function waitImageCanvasDependencyTick() {
+    return new Promise(resolve => setTimeout(resolve, 80));
+  }
+
+  function canvasEdgeExists(canvas, fromId, toId) {
+    return (canvas?.edges || []).some(edge => edge.from === fromId && edge.to === toId);
+  }
+
+  function connectImageCanvasNodes(canvas, fromId, toId) {
+    normalizeCanvasJob(canvas);
+    if (!canvas || !fromId || !toId) return false;
+    if (fromId === toId) {
+      state.imageCanvasConnectFrom = null;
+      showToast('不能连接到同一个节点');
+      renderImageWorkspace();
+      return false;
+    }
+    const from = canvas.nodes.find(node => node.id === fromId);
+    const to = canvas.nodes.find(node => node.id === toId);
+    if (!from || !to) return false;
+    if (canvasEdgeExists(canvas, fromId, toId)) {
+      state.imageCanvasConnectFrom = null;
+      showToast('这两个节点已经有参考连线');
+      renderImageWorkspace();
+      return false;
+    }
+    if (imageCanvasHasPath(canvas, toId, fromId)) {
+      state.imageCanvasConnectFrom = null;
+      showToast('不能形成循环连线');
+      renderImageWorkspace();
+      return false;
+    }
+    pushImageCanvasHistory(canvas);
+    const edgeId = imageCanvasId('edge');
+    const edgeType = from.output && isRenderableImageOutput(from.output) ? 'reference' : 'dependency';
+    canvas.edges.push({ id: edgeId, from: fromId, to: toId, type: edgeType });
+    const sourceIds = new Set(to.sourceNodeIds || []);
+    sourceIds.add(fromId);
+    to.sourceNodeIds = [...sourceIds];
+    if (!to.parentNodeId) to.parentNodeId = fromId;
+    canvas.selectedNodeIds = [toId];
+    state.imageCanvasConnectFrom = null;
+    state.imageCanvasSelectedEdgeId = null;
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+    showToast(edgeType === 'dependency' ? '依赖连线已建立' : '参考连线已建立');
+    return true;
+  }
+
+  function selectImageCanvasEdge(canvas, edgeId) {
+    normalizeCanvasJob(canvas);
+    if (!canvas || !edgeId || !(canvas.edges || []).some(edge => edge.id === edgeId)) return;
+    state.imageCanvasSelectedEdgeId = edgeId;
+    state.imageCanvasConnectFrom = null;
+    canvas.selectedNodeIds = [];
+    saveImageCanvas(canvas, { sidebar: false });
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+  }
+
+  function disconnectImageCanvasEdge(canvas, edgeId = state.imageCanvasSelectedEdgeId) {
+    normalizeCanvasJob(canvas);
+    if (!canvas || !edgeId) return;
+    const edge = (canvas.edges || []).find(item => item.id === edgeId);
+    if (!edge) return;
+    pushImageCanvasHistory(canvas);
+    canvas.edges = (canvas.edges || []).filter(item => item.id !== edgeId);
+    const toNode = (canvas.nodes || []).find(node => node.id === edge.to);
+    if (toNode) {
+      toNode.sourceNodeIds = (toNode.sourceNodeIds || []).filter(id => id !== edge.from);
+      if (toNode.parentNodeId === edge.from) toNode.parentNodeId = toNode.sourceNodeIds[0] || null;
+    }
+    state.imageCanvasSelectedEdgeId = null;
+    state.imageCanvasConnectFrom = null;
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+    showToast('参考线已断开');
+  }
+
+  async function retryImageCanvasNode(canvas, node) {
+    if (!canvas || !node || state.isGeneratingImage) return;
+    normalizeCanvasJob(canvas);
+    const params = sanitizeCurrentImageParams(Object.assign({}, canvas.params || node.params || DEFAULT_IMAGE_PARAMS, { count: 1 }));
+    const controller = new AbortController();
+    state.isGeneratingImage = true;
+    state.imageAbortController = controller;
+    requestImageWakeLock();
+    node.status = 'generating';
+    node.error = '';
+    node.output = null;
+    node.params = Object.assign({}, params);
+    node.model = state.imageModel;
+    node.mapModel = state.imageMapModel;
+    saveImageCanvas(canvas, { sidebar: false });
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+
+    try {
+      const result = await requestImageCanvasOutput(node.prompt || canvas.prompt || '', params, imageCanvasNodeSources(canvas, node), controller.signal, imageCanvasNodeInputRefs(node));
+      const output = ImageCore.imageResultOutputs(result).find(isRenderableImageOutput);
+      if (!output) throw new Error('接口未返回可显示的图片数据');
+      node.output = output;
+      node.status = 'done';
+      node.usage = ImageCore.imageResultUsage(result);
+      showToast('节点已重试成功');
+    } catch (error) {
+      node.status = 'error';
+      node.error = error?.name === 'AbortError' ? '请求已中断' : String(error?.message || error || '生成失败');
+      showToast(node.error);
+    } finally {
+      state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      releaseImageWakeLock();
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateSidebar();
+      updateImageGenerateBtn();
+    }
+  }
+
+  async function runImageCanvasNodes(canvas = currentImageCanvas(), nodes = []) {
+    if (!canvas || state.isGeneratingImage) return;
+    const runnable = collectImageCanvasRunnableWithDependencies(canvas, nodes);
+    if (!runnable.length) return;
+    normalizeCanvasJob(canvas);
+    const params = sanitizeCurrentImageParams(Object.assign({}, canvas.params || DEFAULT_IMAGE_PARAMS, { count: 1 }));
+    const controller = new AbortController();
+    const maxParallel = Math.min(MAX_CANVAS_PARALLEL, runnable.length);
+    const runnableIds = new Set(runnable.map(node => node.id));
+    const pending = new Set(runnable.map(node => node.id));
+    const running = new Set();
+    let completed = 0;
+    let success = 0;
+    let failed = 0;
+    state.isGeneratingImage = true;
+    state.imageAbortController = controller;
+    requestImageWakeLock();
+    canvas.planStatus = 'generating';
+    canvas.planProgress = { total: runnable.length, completed, success, failed, maxParallel };
+    saveImageCanvas(canvas, { sidebar: false });
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+
+    const updateProgress = () => {
+      canvas.planProgress = { total: runnable.length, completed, success, failed, maxParallel };
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+    };
+    const runNode = async (node) => {
+      running.add(node.id);
+      pending.delete(node.id);
+      canvas.selectedNodeIds = [node.id];
+      node.status = 'generating';
+      node.error = '';
+      updateProgress();
+      try {
+        await requestAndApplyCanvasNode(canvas, node, params, controller.signal);
+        success += 1;
+      } catch (error) {
+        node.status = 'error';
+        node.error = error?.name === 'AbortError' ? '请求已中断' : String(error?.message || error || '生成失败');
+        failed += 1;
+        if (error?.name === 'AbortError') throw error;
+      } finally {
+        completed += 1;
+        running.delete(node.id);
+        updateProgress();
+      }
+    };
+    const worker = async () => {
+      while (pending.size && !controller.signal.aborted) {
+        const node = runnable.find(item => pending.has(item.id) && imageCanvasReadyToRun(canvas, item, runnableIds));
+        if (!node) {
+          if (running.size) {
+            await waitImageCanvasDependencyTick();
+            continue;
+          }
+          const blocked = runnable.find(item => pending.has(item.id));
+          if (blocked) {
+            blocked.status = 'error';
+            blocked.error = '上游依赖节点未生成成功，无法继续执行';
+            pending.delete(blocked.id);
+            failed += 1;
+            completed += 1;
+            updateProgress();
+            continue;
+          }
+          return;
+        }
+        await runNode(node);
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: maxParallel }, () => worker()));
+      showToast(failed ? `执行完成，失败 ${failed} 个` : '节点已执行');
+    } catch (error) {
+      showToast(error?.name === 'AbortError' ? '执行已中断' : String(error?.message || error || '执行失败'));
+    } finally {
+      canvas.planStatus = 'done';
+      state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      releaseImageWakeLock();
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateSidebar();
+      updateImageGenerateBtn();
+    }
+  }
+  async function retryFailedImageCanvasNodes(canvas = currentImageCanvas()) {
+    if (!canvas || state.isGeneratingImage) return;
+    const failed = (canvas.nodes || []).filter(node => node.error || node.status === 'error');
+    if (!failed.length) return;
+    normalizeCanvasJob(canvas);
+    const params = sanitizeCurrentImageParams(Object.assign({}, canvas.params || DEFAULT_IMAGE_PARAMS, { count: 1 }));
+    const controller = new AbortController();
+    const maxParallel = Math.min(MAX_CANVAS_PARALLEL, failed.length);
+    let nextIndex = 0;
+    let completed = 0;
+    let success = 0;
+    let failedCount = 0;
+    state.isGeneratingImage = true;
+    state.imageAbortController = controller;
+    requestImageWakeLock();
+    canvas.planStatus = 'generating';
+    canvas.planProgress = { total: failed.length, completed, success, failed: failedCount, maxParallel };
+    saveImageCanvas(canvas, { sidebar: false });
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+
+    const updateProgress = () => {
+      canvas.planProgress = { total: failed.length, completed, success, failed: failedCount, maxParallel };
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+    };
+    const worker = async () => {
+      while (nextIndex < failed.length && !controller.signal.aborted) {
+        const node = failed[nextIndex++];
+        canvas.selectedNodeIds = [node.id];
+        node.status = 'generating';
+        node.error = '';
+        updateProgress();
+        try {
+          await requestAndApplyCanvasNode(canvas, node, params, controller.signal);
+          success += 1;
+        } catch (error) {
+          node.status = 'error';
+          node.error = error?.name === 'AbortError' ? '请求已中断' : String(error?.message || error || '生成失败');
+          failedCount += 1;
+          if (error?.name === 'AbortError') throw error;
+        } finally {
+          completed += 1;
+          updateProgress();
+        }
+      }
+    };
+    try {
+      await Promise.all(Array.from({ length: maxParallel }, () => worker()));
+      showToast(failedCount ? `重试完成，仍失败 ${failedCount} 个` : '失败节点已全部重试成功');
+    } catch (error) {
+      showToast(error?.name === 'AbortError' ? '重试已中断' : String(error?.message || error || '重试失败'));
+    } finally {
+      canvas.planStatus = 'done';
+      state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      releaseImageWakeLock();
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateSidebar();
+      updateImageGenerateBtn();
+    }
+  }
+
+  async function generateImageCanvasNode(prompt, params, opts = {}) {
+    if (!ensureModeConfigured('image')) return;
+    if (!imageMapConfigured()) {
+      showSettings('image');
+      showToast('请完善映射模型对应的接口配置');
+      return;
+    }
+    if (state.isGeneratingImage) return;
+    params = sanitizeCurrentImageParams(Object.assign({}, params || {}, { count: 1 }));
+    const operation = opts.operation || 'branch';
+    const existingCanvas = currentImageCanvas();
+    const selected = selectedCanvasNodes(existingCanvas).filter(node => node.output && isRenderableImageOutput(node.output));
+    const sources = opts.sources !== undefined ? opts.sources : (operation === 'root' ? [] : selected);
+    const inputImages = imageReferencePayload(opts.inputImages !== undefined ? opts.inputImages : state.imageRefs);
+    const finalPrompt = (prompt || defaultCanvasPrompt(operation, sources)).trim();
+    if (!finalPrompt) return;
+    if (operation === 'root') {
+      await generateImageCanvasPlan(finalPrompt, params, { sources });
+      return;
+    }
+    if (operation === 'merge' && sources.length < 2) {
+      showToast('请至少选择两个已生成节点再合并');
+      return;
+    }
+    if (operation !== 'root' && !sources.length && existingCanvas?.nodes?.length) {
+      showToast('请先选择一个已生成节点');
+      return;
+    }
+
+    let canvas = existingCanvas;
+    if (!canvas) {
+      canvas = createImageCanvasJob(finalPrompt, params);
+      state.imageJobs.unshift(canvas);
+      state.currentImageJobId = canvas.id;
+    }
+    normalizeCanvasJob(canvas);
+    if (!canvas.nodes.length) canvas.prompt = finalPrompt;
+    canvas.params = Object.assign({}, params);
+    canvas.model = state.imageModel;
+    canvas.mapModel = state.imageMapModel;
+    canvas.status = 'generating';
+    const node = addImageCanvasNode(canvas, {
+      prompt: finalPrompt,
+      params,
+      operation: canvas.nodes.length ? operation : 'root',
+      sources,
+      inputImages,
+    });
+
+    state.isGeneratingImage = true;
+    const controller = new AbortController();
+    state.imageAbortController = controller;
+    requestImageWakeLock();
+    updateImageGenerateBtn();
+    saveImageCanvas(canvas);
+    renderImageWorkspace();
+    updateSidebar();
+
+    try {
+      const result = await requestImageCanvasOutput(finalPrompt, params, sources, controller.signal, inputImages);
+      const output = ImageCore.imageResultOutputs(result).find(isRenderableImageOutput);
+      if (!output) throw new Error('接口未返回可显示的图片数据');
+      node.output = output;
+      node.status = 'done';
+      node.error = '';
+      node.usage = ImageCore.imageResultUsage(result);
+      canvas.status = 'done';
+      canvas.updatedAt = Date.now();
+      if (!canvas.title || canvas.title === '无限画布') canvas.title = finalPrompt.slice(0, 30);
+      if (inputImages.length) { setImageReferences([]); renderImageRefPreview(); }
+      showToast(operation === 'merge' ? '节点已合并' : '画布节点已生成');
+    } catch (error) {
+      node.status = 'error';
+      node.error = error?.name === 'AbortError' ? '请求已中断' : String(error?.message || error || '生成失败');
+      canvas.status = canvas.nodes.some(item => item.status === 'generating') ? 'generating' : 'done';
+      showToast(node.error);
+    } finally {
+      state.isGeneratingImage = false;
+      state.imageAbortController = null;
+      releaseImageWakeLock();
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateSidebar();
+      updateImageGenerateBtn();
+    }
+  }
+
+  function openImageCanvasNodeViewer(canvas, node) {
+    if (!node?.output || !isRenderableImageOutput(node.output)) {
+      showToast('这个节点还没有可查看的图片');
+      return;
+    }
+    const items = (canvas.nodes || [])
+      .filter(item => item.output && isRenderableImageOutput(item.output))
+      .map(item => ({
+        jobId: canvas.id,
+        nodeId: item.id,
+        index: 0,
+        src: canvasNodeImageSource(item, canvas.params),
+        out: item.output,
+      }));
+    const index = Math.max(0, items.findIndex(item => item.nodeId === node.id));
+    ImageViewer.openItems(items, index);
+  }
+
+  function selectImageCanvasNode(canvas, nodeId, additive = false) {
+    if (!canvas || !nodeId) return;
+    normalizeCanvasJob(canvas);
+    state.imageCanvasSelectedEdgeId = null;
+    if (additive) {
+      const set = new Set(canvas.selectedNodeIds || []);
+      if (set.has(nodeId)) set.delete(nodeId);
+      else set.add(nodeId);
+      canvas.selectedNodeIds = [...set];
+    } else {
+      canvas.selectedNodeIds = [nodeId];
+    }
+    saveImageCanvas(canvas, { sidebar: false });
+    renderImageWorkspace();
+    updateImageGenerateBtn();
+  }
+
+  function setImageCanvasNodeSelection(canvas, nodeId, additive = false) {
+    if (!canvas || !nodeId) return;
+    normalizeCanvasJob(canvas);
+    state.imageCanvasSelectedEdgeId = null;
+    if (additive) {
+      const set = new Set(canvas.selectedNodeIds || []);
+      if (set.has(nodeId)) set.delete(nodeId);
+      else set.add(nodeId);
+      canvas.selectedNodeIds = [...set];
+    } else {
+      canvas.selectedNodeIds = [nodeId];
+    }
+    saveImageCanvas(canvas, { sidebar: false });
+    updateImageGenerateBtn();
+  }
+
+  function imageCanvasNodeRect(node) {
+    return {
+      x: Number(node?.x) || 0,
+      y: Number(node?.y) || 0,
+      w: 236,
+      h: 360,
+    };
+  }
+
+  function handleImageCanvasAction(action, target) {
+    const canvas = currentImageCanvas();
+    const nodeId = target?.dataset?.node || '';
+    const node = canvas?.nodes?.find(item => item.id === nodeId);
+    if (node && !['canvas-view-node', 'canvas-focus-node'].includes(action)) {
+      canvas.selectedNodeIds = [node.id];
+      saveImageCanvas(canvas, { sidebar: false });
+    }
+    const selectedNodes = selectedCanvasNodes(canvas);
+    const selected = selectedNodes.filter(item => item.output && isRenderableImageOutput(item.output));
+    if (action === 'canvas-exit') {
+      if (isImageCanvasJob(currentImageJob())) {
+        state.currentImageJobId = state.imageJobs.find(job => !isImageCanvasJob(job))?.id || null;
+      }
+      state.imageCanvasMode = false;
+      persist([KEYS.currentImageJobId, KEYS.imageCanvasMode]);
+      document.body.classList.remove('image-canvas-open');
+      updateSidebar();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      dom.imagePrompt?.focus();
+      return;
+    }
+    if (action === 'canvas-stop') {
+      state.imageAbortController?.abort();
+      return;
+    }
+    if (action === 'canvas-undo') {
+      undoImageCanvas(canvas);
+      return;
+    }
+    if (action === 'canvas-redo') {
+      redoImageCanvas(canvas);
+      return;
+    }
+    if (action === 'canvas-export') {
+      exportImageCanvas(canvas);
+      return;
+    }
+    if (action === 'canvas-import') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.addEventListener('change', () => importImageCanvasFile(input.files?.[0]));
+      input.click();
+      return;
+    }
+    if (action === 'canvas-new') {
+      const canvas = createImageCanvasJob('无限画布', sanitizeCurrentImageParams(saveImageParams()));
+      state.imageJobs.unshift(canvas);
+      state.currentImageJobId = canvas.id;
+      state.imageCanvasMode = true;
+      dom.imagePrompt.value = '';
+      state.imageCanvasPlannerOpen = false;
+      imageDbPutJob(persistedImageCanvas(canvas));
+      persist([KEYS.currentImageJobId, KEYS.imageCanvasMode]);
+      updateSidebar();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      return;
+    }
+    if (action === 'canvas-plan-topic') {
+      openImageCanvasPlanner(canvas);
+      return;
+    }
+    if (action === 'canvas-close-planner') {
+      closeImageCanvasPlanner();
+      return;
+    }
+    if (action === 'canvas-submit-planner') {
+      submitImageCanvasPlanner(canvas);
+      return;
+    }
+    if (action === 'canvas-optimize-planner-topic') {
+      optimizeImageCanvasPlannerTopic();
+      return;
+    }
+    if (action === 'canvas-pick-planner-refs') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/png,image/jpeg,image/webp';
+      input.multiple = true;
+      input.addEventListener('change', () => addImageCanvasPlannerRefFiles(input.files));
+      input.click();
+      return;
+    }
+    if (action === 'canvas-remove-planner-ref') {
+      syncImageCanvasPlannerDraft();
+      const index = parseInt(target?.dataset?.ref || '-1', 10);
+      const refs = imageReferencePayload(state.imageCanvasPlannerRefs || [], 10);
+      if (index >= 0) refs.splice(index, 1);
+      state.imageCanvasPlannerRefs = refs;
+      renderImageWorkspace();
+      return;
+    }
+    if (action === 'canvas-add-ref') {
+      dom.imageRefInput?.click();
+      return;
+    }
+    if (action === 'canvas-remove-ref') {
+      const index = parseInt(target?.dataset?.ref || '-1', 10);
+      const refs = imageReferenceList();
+      if (index >= 0) refs.splice(index, 1);
+      setImageReferences(refs);
+      renderImageRefPreview();
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      return;
+    }
+    if (action === 'canvas-focus-task') {
+      const index = parseInt(target?.dataset?.task || '-1', 10);
+      if (!canvas || !Number.isFinite(index) || index < 0) return;
+      if (canvas.planStatus === 'review') {
+        const taskEl = dom.imageCanvasWorkspace?.querySelector(`.image-canvas-task[data-task="${index}"]`);
+        taskEl?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        taskEl?.querySelector('textarea, input')?.focus();
+        return;
+      }
+      const generatedNodes = (canvas.nodes || []).filter(node => node.operation !== 'plan');
+      const node = generatedNodes[index];
+      if (node) selectImageCanvasNode(canvas, node.id);
+      return;
+    }
+    if (action === 'canvas-focus-node') {
+      if (!canvas || !node) return;
+      selectImageCanvasNode(canvas, node.id);
+      focusImageCanvasNode(node);
+      return;
+    }
+    if (action === 'canvas-focus-selected') {
+      if (!canvas || !selectedNodes[0]) return;
+      focusImageCanvasNode(selectedNodes[0]);
+      return;
+    }
+    if (action === 'canvas-clear-selection') {
+      if (!canvas) return;
+      canvas.selectedNodeIds = [];
+      state.imageCanvasSelectedEdgeId = null;
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      return;
+    }
+    if (action === 'canvas-fit') {
+      fitImageCanvas();
+      return;
+    }
+    if (action === 'canvas-auto-layout') {
+      autoLayoutImageCanvas(canvas);
+      return;
+    }
+    if (action === 'canvas-zoom-in' || action === 'canvas-zoom-out') {
+      const vp = canvasViewport(canvas);
+      const factor = action === 'canvas-zoom-in' ? 1.15 : .85;
+      setCanvasViewport({ x: vp.x, y: vp.y, zoom: vp.zoom * factor });
+      return;
+    }
+    if (action === 'canvas-view-node') {
+      if (canvas && node) openImageCanvasNodeViewer(canvas, node);
+      return;
+    }
+    if (action === 'canvas-download-node') {
+      if (canvas && node) downloadImageCanvasNode(canvas, node);
+      return;
+    }
+    if (action === 'canvas-download-selected') {
+      selected.forEach(item => downloadImageCanvasNode(canvas, item));
+      return;
+    }
+    if (action === 'canvas-copy-prompt') {
+      const prompt = (node || selectedNodes[0])?.prompt || '';
+      if (prompt) copyText(prompt);
+      return;
+    }
+    if (action === 'canvas-select-edge') {
+      if (canvas) selectImageCanvasEdge(canvas, target?.dataset?.edge || '');
+      return;
+    }
+    if (action === 'canvas-disconnect-edge') {
+      if (canvas) disconnectImageCanvasEdge(canvas);
+      return;
+    }
+    if (action === 'canvas-connect-node') {
+      if (!canvas || !node) return;
+      if (state.imageCanvasConnectFrom && state.imageCanvasConnectFrom !== node.id) {
+        connectImageCanvasNodes(canvas, state.imageCanvasConnectFrom, node.id);
+        return;
+      }
+      state.imageCanvasConnectFrom = state.imageCanvasConnectFrom === node.id ? null : node.id;
+      state.imageCanvasSelectedEdgeId = null;
+      canvas.selectedNodeIds = [node.id];
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+      showToast(state.imageCanvasConnectFrom ? '已选择连线起点，请点击目标节点' : '已取消连线');
+      return;
+    }
+    if (action === 'canvas-duplicate-node') {
+      if (canvas && node) duplicateImageCanvasNodes(canvas, [node]);
+      return;
+    }
+    if (action === 'canvas-duplicate-selected') {
+      duplicateImageCanvasNodes(canvas, selectedNodes);
+      return;
+    }
+    if (action === 'canvas-variant-selected') {
+      addImageCanvasVariantNodes(canvas, selected);
+      return;
+    }
+    if (action === 'canvas-run-node') {
+      if (canvas && node) runImageCanvasNodes(canvas, [node]);
+      return;
+    }
+    if (action === 'canvas-run-review') {
+      if (canvas) runImageCanvasNodes(canvas, (canvas.nodes || []).filter(item => item.status === 'review'));
+      return;
+    }
+    if (action === 'canvas-delete-node') {
+      if (!canvas || !node) return;
+      pushImageCanvasHistory(canvas);
+      const removeId = node.id;
+      const removedEdgeIds = new Set((canvas.edges || [])
+        .filter(edge => edge.from === removeId || edge.to === removeId)
+        .map(edge => edge.id));
+      canvas.nodes = (canvas.nodes || []).filter(item => item.id !== removeId);
+      canvas.edges = (canvas.edges || []).filter(edge => edge.from !== removeId && edge.to !== removeId);
+      canvas.nodes.forEach(item => {
+        item.sourceNodeIds = (item.sourceNodeIds || []).filter(id => id !== removeId);
+        if (item.parentNodeId === removeId) item.parentNodeId = item.sourceNodeIds[0] || null;
+      });
+      canvas.selectedNodeIds = (canvas.selectedNodeIds || []).filter(id => id !== removeId);
+      if (state.imageCanvasConnectFrom === removeId) state.imageCanvasConnectFrom = null;
+      if (removedEdgeIds.has(state.imageCanvasSelectedEdgeId)) state.imageCanvasSelectedEdgeId = null;
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      return;
+    }
+    if (action === 'canvas-delete-selected') {
+      if (!canvas || !selectedNodes.length) return;
+      pushImageCanvasHistory(canvas);
+      const removeIds = new Set(selectedNodes.map(item => item.id));
+      const removedEdgeIds = new Set((canvas.edges || [])
+        .filter(edge => removeIds.has(edge.from) || removeIds.has(edge.to))
+        .map(edge => edge.id));
+      canvas.nodes = (canvas.nodes || []).filter(item => !removeIds.has(item.id));
+      canvas.edges = (canvas.edges || []).filter(edge => !removeIds.has(edge.from) && !removeIds.has(edge.to));
+      canvas.nodes.forEach(item => {
+        item.sourceNodeIds = (item.sourceNodeIds || []).filter(id => !removeIds.has(id));
+        if (removeIds.has(item.parentNodeId)) item.parentNodeId = item.sourceNodeIds[0] || null;
+      });
+      canvas.selectedNodeIds = [];
+      if (removeIds.has(state.imageCanvasConnectFrom)) state.imageCanvasConnectFrom = null;
+      if (removedEdgeIds.has(state.imageCanvasSelectedEdgeId)) state.imageCanvasSelectedEdgeId = null;
+      if (canvas.planStatus === 'review' && !(canvas.nodes || []).some(item => item.status === 'review')) canvas.planStatus = 'done';
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      return;
+    }
+    if (action === 'canvas-add-task') {
+      if (!canvas?.plan) return;
+      pushImageCanvasHistory(canvas);
+      canvas.plan.tasks = Array.isArray(canvas.plan.tasks) ? canvas.plan.tasks : [];
+      canvas.plan.tasks.push({
+        title: `任务 ${canvas.plan.tasks.length + 1}`,
+        operation: canvas.plan.tasks.length ? 'branch' : 'root',
+        prompt: `${canvas.prompt || canvas.title || ''}。补充一个新的创作方向。`.trim(),
+      });
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+      return;
+    }
+    if (action === 'canvas-remove-task') {
+      const index = parseInt(target?.dataset?.task || '-1', 10);
+      if (!canvas?.plan || !Number.isFinite(index)) return;
+      pushImageCanvasHistory(canvas);
+      canvas.plan.tasks = (canvas.plan.tasks || []).filter((_, taskIndex) => taskIndex !== index);
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+      return;
+    }
+    if (action === 'canvas-run-plan') {
+      runImageCanvasPlan(canvas);
+      return;
+    }
+    if (action === 'canvas-retry-node') {
+      if (canvas && node) retryImageCanvasNode(canvas, node);
+      return;
+    }
+    if (action === 'canvas-retry-selected') {
+      const retryNode = selectedNodes.find(item => item.error || item.status === 'error') || selectedNodes[0];
+      if (canvas && retryNode) retryImageCanvasNode(canvas, retryNode);
+      return;
+    }
+    if (action === 'canvas-retry-failed') {
+      retryFailedImageCanvasNodes(canvas);
+      return;
+    }
+    if (action === 'canvas-branch-node' || action === 'canvas-branch') {
+      if (!canvas) return;
+      const sources = node?.output && isRenderableImageOutput(node.output)
+        ? [node]
+        : selectedCanvasNodes(canvas).filter(item => item.output && isRenderableImageOutput(item.output)).slice(0, 1);
+      if (!sources.length && canvas.nodes?.length) {
+        showToast('请先选择一个已生成节点作为参考');
+        return;
+      }
+      const prompt = dom.imagePrompt.value.trim() || defaultCanvasPrompt('branch', sources);
+      const reviewNode = addImageCanvasReviewNode(canvas, {
+        prompt,
+        params: saveImageParams(),
+        operation: 'branch',
+        sources,
+        inputImages: sources.length ? [] : state.imageRefs,
+      });
+      if (reviewNode) {
+        saveImageCanvas(canvas);
+        renderImageWorkspace();
+        updateImageGenerateBtn();
+        requestAnimationFrame(() => {
+          dom.imageCanvasWorkspace?.querySelector(`.image-canvas-node-prompt-input[data-node="${CSS.escape(reviewNode.id)}"]`)?.focus();
+        });
+      }
+      return;
+    }
+    if (action === 'canvas-optimize' || action === 'canvas-optimize-node') {
+      if (!canvas) return;
+      const sources = node?.output && isRenderableImageOutput(node.output)
+        ? [node]
+        : selectedCanvasNodes(canvas).filter(item => item.output && isRenderableImageOutput(item.output)).slice(0, 1);
+      if (!sources.length) {
+        showToast('请先选择一个已生成节点');
+        return;
+      }
+      const reviewNode = addImageCanvasReviewNode(canvas, {
+        prompt: dom.imagePrompt.value.trim() || defaultCanvasPrompt('optimize', sources),
+        params: saveImageParams(),
+        operation: 'optimize',
+        sources,
+      });
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      requestAnimationFrame(() => {
+        dom.imageCanvasWorkspace?.querySelector(`.image-canvas-node-prompt-input[data-node="${CSS.escape(reviewNode.id)}"]`)?.focus();
+      });
+      return;
+    }
+    if (action === 'canvas-merge') {
+      if (!canvas || selected.length < 2) {
+        showToast('请至少选择两个已生成节点再合并');
+        return;
+      }
+      const reviewNode = addImageCanvasReviewNode(canvas, {
+        prompt: dom.imagePrompt.value.trim() || defaultCanvasPrompt('merge', selected),
+        params: saveImageParams(),
+        operation: 'merge',
+        sources: selected,
+      });
+      saveImageCanvas(canvas);
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+      requestAnimationFrame(() => {
+        dom.imageCanvasWorkspace?.querySelector(`.image-canvas-node-prompt-input[data-node="${CSS.escape(reviewNode.id)}"]`)?.focus();
+      });
+    }
+  }
+
+  function handleImageCanvasPointerDown(e) {
+    if (!state.imageCanvasMode || e.target.closest('.image-canvas-action, input, textarea, select')) return;
+    const canvas = currentImageCanvas();
+    const stage = e.target.closest('.image-canvas-stage');
+    if (!stage) return;
+    const nodeEl = e.target.closest('.image-canvas-node');
+    if (nodeEl && canvas) {
+      const node = canvas.nodes.find(item => item.id === nodeEl.dataset.node);
+      if (!node) return;
+      e.preventDefault();
+      if (state.imageCanvasConnectFrom && state.imageCanvasConnectFrom !== node.id) {
+        connectImageCanvasNodes(canvas, state.imageCanvasConnectFrom, node.id);
+        return;
+      }
+      const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+      setImageCanvasNodeSelection(canvas, node.id, additive);
+      nodeEl.classList.toggle('selected', (canvas.selectedNodeIds || []).includes(node.id));
+      const movedIds = new Set(canvas.selectedNodeIds || []);
+      if (!movedIds.has(node.id)) movedIds.add(node.id);
+      const startNodes = [...movedIds]
+        .map(id => canvas.nodes.find(item => item.id === id))
+        .filter(Boolean)
+        .map(item => ({ id: item.id, x: Number(item.x) || 0, y: Number(item.y) || 0 }));
+      state.imageCanvasPointer = {
+        type: 'node',
+        canvasId: canvas.id,
+        nodeId: node.id,
+        nodeIds: [...movedIds],
+        startNodes,
+        startX: e.clientX,
+        startY: e.clientY,
+        nodeX: Number(node.x) || 0,
+        nodeY: Number(node.y) || 0,
+        before: imageCanvasSnapshot(canvas),
+        moved: false,
+      };
+      return;
+    }
+    if (canvas && state.imageCanvasSelectedEdgeId) {
+      state.imageCanvasSelectedEdgeId = null;
+    }
+    e.preventDefault();
+    const vp = canvasViewport(canvas);
+    if (e.shiftKey && canvas) {
+      const rect = stage.getBoundingClientRect();
+      const startCanvasX = (e.clientX - rect.left - vp.x) / (vp.zoom || 1);
+      const startCanvasY = (e.clientY - rect.top - vp.y) / (vp.zoom || 1);
+      state.imageCanvasPointer = {
+        type: 'select',
+        canvasId: canvas.id,
+        startX: e.clientX,
+        startY: e.clientY,
+        canvasX: startCanvasX,
+        canvasY: startCanvasY,
+        currentX: e.clientX,
+        currentY: e.clientY,
+      };
+      const box = document.createElement('div');
+      box.className = 'image-canvas-selection-box';
+      box.style.left = `${e.clientX - rect.left}px`;
+      box.style.top = `${e.clientY - rect.top}px`;
+      stage.appendChild(box);
+      return;
+    }
+    state.imageCanvasPointer = {
+      type: 'pan',
+      canvasId: canvas?.id || '',
+      startX: e.clientX,
+      startY: e.clientY,
+      viewX: vp.x,
+      viewY: vp.y,
+    };
+    stage.classList.add('is-dragging');
+  }
+
+  function handleImageCanvasPointerMove(e) {
+    const pointer = state.imageCanvasPointer;
+    if (!pointer) return;
+    const canvas = currentImageCanvas();
+    if (!canvas || canvas.id !== pointer.canvasId) return;
+    e.preventDefault();
+    if (pointer.type === 'node') {
+      const zoom = canvasViewport(canvas).zoom || 1;
+      const dx = Math.round((e.clientX - pointer.startX) / zoom);
+      const dy = Math.round((e.clientY - pointer.startY) / zoom);
+      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) pointer.moved = true;
+      (pointer.startNodes || []).forEach(start => {
+        const node = canvas.nodes.find(item => item.id === start.id);
+        if (!node) return;
+        node.x = start.x + dx;
+        node.y = start.y + dy;
+        const nodeEl = dom.imageCanvasWorkspace?.querySelector(`.image-canvas-node[data-node="${CSS.escape(node.id)}"]`);
+        if (nodeEl) {
+          nodeEl.style.left = `${node.x}px`;
+          nodeEl.style.top = `${node.y}px`;
+        }
+      });
+      return;
+    }
+    if (pointer.type === 'select') {
+      const stage = dom.imageCanvasWorkspace?.querySelector('.image-canvas-stage');
+      const box = dom.imageCanvasWorkspace?.querySelector('.image-canvas-selection-box');
+      if (!stage || !box) return;
+      pointer.currentX = e.clientX;
+      pointer.currentY = e.clientY;
+      const rect = stage.getBoundingClientRect();
+      const left = Math.min(pointer.startX, e.clientX) - rect.left;
+      const top = Math.min(pointer.startY, e.clientY) - rect.top;
+      const width = Math.abs(e.clientX - pointer.startX);
+      const height = Math.abs(e.clientY - pointer.startY);
+      box.style.left = `${left}px`;
+      box.style.top = `${top}px`;
+      box.style.width = `${width}px`;
+      box.style.height = `${height}px`;
+      return;
+    }
+    if (pointer.type === 'pan') {
+      const vp = canvasViewport(canvas);
+      canvas.viewport = Object.assign({}, vp, {
+        x: pointer.viewX + e.clientX - pointer.startX,
+        y: pointer.viewY + e.clientY - pointer.startY,
+      });
+      const plane = dom.imageCanvasWorkspace?.querySelector('.image-canvas-plane');
+      if (plane) plane.style.transform = `translate(${canvas.viewport.x}px, ${canvas.viewport.y}px) scale(${canvas.viewport.zoom})`;
+    }
+  }
+
+  function handleImageCanvasPointerUp() {
+    const pointer = state.imageCanvasPointer;
+    if (!pointer) return;
+    state.imageCanvasPointer = null;
+    const canvas = currentImageCanvas();
+    const stage = dom.imageCanvasWorkspace?.querySelector('.image-canvas-stage');
+    stage?.classList.remove('is-dragging');
+    if (canvas && canvas.id === pointer.canvasId) {
+      if (pointer.type === 'node' && pointer.moved) {
+        if (pointer.before) {
+          canvas.history.push(pointer.before);
+          if (canvas.history.length > 40) canvas.history.shift();
+        }
+        canvas.future = [];
+      }
+      if (pointer.type === 'select') {
+        const vp = canvasViewport(canvas);
+        const rect = stage?.getBoundingClientRect();
+        const box = dom.imageCanvasWorkspace?.querySelector('.image-canvas-selection-box');
+        if (rect) {
+          const endX = Number.isFinite(pointer.currentX) ? pointer.currentX : pointer.startX;
+          const endY = Number.isFinite(pointer.currentY) ? pointer.currentY : pointer.startY;
+          const endCanvasX = (endX - rect.left - vp.x) / (vp.zoom || 1);
+          const endCanvasY = (endY - rect.top - vp.y) / (vp.zoom || 1);
+          const minX = Math.min(pointer.canvasX, endCanvasX);
+          const minY = Math.min(pointer.canvasY, endCanvasY);
+          const maxX = Math.max(pointer.canvasX, endCanvasX);
+          const maxY = Math.max(pointer.canvasY, endCanvasY);
+          canvas.selectedNodeIds = (canvas.nodes || []).filter(node => {
+            const r = imageCanvasNodeRect(node);
+            return r.x < maxX && r.x + r.w > minX && r.y < maxY && r.y + r.h > minY;
+          }).map(node => node.id);
+        }
+        box?.remove();
+      }
+      saveImageCanvas(canvas, { sidebar: false });
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+    }
+  }
+
+  function handleImageCanvasWheel(e) {
+    if (!state.imageCanvasMode || !e.target.closest('.image-canvas-stage')) return;
+    const canvas = currentImageCanvas();
+    if (!canvas) return;
+    e.preventDefault();
+    const stage = e.target.closest('.image-canvas-stage');
+    const rect = stage.getBoundingClientRect();
+    const vp = canvasViewport(canvas);
+    const factor = e.deltaY > 0 ? .9 : 1.1;
+    const nextZoom = Math.min(2.4, Math.max(.28, vp.zoom * factor));
+    const worldX = (e.clientX - rect.left - vp.x) / vp.zoom;
+    const worldY = (e.clientY - rect.top - vp.y) / vp.zoom;
+    canvas.viewport = {
+      x: e.clientX - rect.left - worldX * nextZoom,
+      y: e.clientY - rect.top - worldY * nextZoom,
+      zoom: nextZoom,
+    };
+    const plane = dom.imageCanvasWorkspace?.querySelector('.image-canvas-plane');
+    if (plane) plane.style.transform = `translate(${canvas.viewport.x}px, ${canvas.viewport.y}px) scale(${canvas.viewport.zoom})`;
+    scheduleImageCanvasViewportSave(canvas);
+  }
+
+  function handleImageCanvasKeydown(e) {
+    if (!state.imageCanvasMode || !currentImageCanvas()) return;
+    if (e.target?.closest?.('input, textarea, select')) return;
+    const canvas = currentImageCanvas();
+    const mod = e.metaKey || e.ctrlKey;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (state.imageCanvasConnectFrom) {
+        state.imageCanvasConnectFrom = null;
+        renderImageWorkspace();
+        showToast('已取消连线');
+        return;
+      }
+      if (state.imageCanvasSelectedEdgeId) {
+        state.imageCanvasSelectedEdgeId = null;
+        saveImageCanvas(canvas, { sidebar: false });
+        renderImageWorkspace();
+        updateImageGenerateBtn();
+        return;
+      }
+      handleImageCanvasAction('canvas-exit', null);
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && state.imageCanvasSelectedEdgeId) {
+      e.preventDefault();
+      disconnectImageCanvasEdge(canvas);
+      return;
+    }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && selectedCanvasNodes(canvas).length) {
+      e.preventDefault();
+      handleImageCanvasAction('canvas-delete-selected', null);
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redoImageCanvas(canvas);
+      else undoImageCanvas(canvas);
+      return;
+    }
+    if (mod && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      redoImageCanvas(canvas);
+    }
+  }
+
+  function handleImageCanvasTaskInput(e) {
+    const plannerField = e.target.closest('.image-canvas-planner-topic, .image-canvas-planner-template, .image-canvas-planner-complexity');
+    if (plannerField) {
+      syncImageCanvasPlannerDraft();
+      return;
+    }
+    const nodeTitleInput = e.target.closest('.image-canvas-node-title-input');
+    const nodePromptInput = e.target.closest('.image-canvas-node-prompt-input');
+    if (nodeTitleInput || nodePromptInput) {
+      const input = nodeTitleInput || nodePromptInput;
+      const canvas = currentImageCanvas();
+      const node = canvas?.nodes?.find(item => item.id === input.dataset.node);
+      if (!node) return;
+      if (nodeTitleInput) node.title = nodeTitleInput.value.trim();
+      if (nodePromptInput) node.prompt = nodePromptInput.value.trim();
+      saveImageCanvas(canvas, { sidebar: false });
+      return;
+    }
+    const input = e.target.closest('.image-canvas-task-title, .image-canvas-task-prompt');
+    if (!input) return;
+    const canvas = currentImageCanvas();
+    const index = parseInt(input.dataset.task || '-1', 10);
+    const task = canvas?.plan?.tasks?.[index];
+    if (!task) return;
+    if (input.classList.contains('image-canvas-task-title')) task.title = input.value.trim();
+    if (input.classList.contains('image-canvas-task-prompt')) task.prompt = input.value.trim();
+    saveImageCanvas(canvas, { sidebar: false });
+  }
+
+  function handleImageCanvasInputKeydown(e) {
+    const plannerTopic = e.target.closest('.image-canvas-planner-topic');
+    if (plannerTopic && e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) {
+      e.preventDefault();
+      e.stopPropagation();
+      submitImageCanvasPlanner(currentImageCanvas());
+      return;
+    }
+    if (state.imageCanvasPlannerOpen && e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeImageCanvasPlanner();
+    }
   }
 
   async function updateRemoteImageOutputMeta(job, out, metaEl) {
@@ -5476,7 +8619,20 @@
       };
     }
     const job = state.imageJobs.find(j => j.id === item.jobId);
-    return job && item.out ? { job, out: item.out } : null;
+    if (!job || !item.out) return null;
+    if (item.nodeId && isImageCanvasJob(job)) {
+      const node = (job.nodes || []).find(entry => entry.id === item.nodeId);
+      if (node) {
+        return {
+          job: Object.assign({}, job, {
+            title: node.title || job.title,
+            params: node.params || job.params,
+          }),
+          out: item.out,
+        };
+      }
+    }
+    return { job, out: item.out };
   }
 
   function estimateImageSeconds(params) {
@@ -5490,7 +8646,7 @@
   function startImageProgressTimer() {
     stopImageProgressTimer();
     state.imageProgressTimer = setInterval(() => {
-      if (state.mode === 'image' && state.imageJobs.some(job => job.status === 'generating')) {
+      if (isImageModeLike() && state.imageJobs.some(job => job.status === 'generating')) {
         updateImageProgressElapsed();
       }
     }, 1000);
@@ -5765,9 +8921,11 @@
       await clearImageSession();
       state.imageJobs = [];
       state.currentImageJobId = null;
+      state.imageCanvasMode = false;
+      document.body.classList.remove('image-canvas-open');
       setImageReferences([]);
       resetSidebarBulkMode();
-      persist([KEYS.currentImageJobId]);
+      persist([KEYS.currentImageJobId, KEYS.imageCanvasMode]);
       await imageDbClearJobs();
       updateSidebar();
       renderImageRefPreview();
@@ -5884,8 +9042,8 @@
     const requestSingleImage = () => state.imageMapModel
       ? ImageApi.requestMappedImage(imageMapEndpoint(), reply.prompt || job.prompt || '', params, refs, controller.signal)
       : refs.length
-        ? ImageApi.requestImageEdit({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, reply.prompt || job.prompt || '', params, refs, controller.signal)
-        : ImageApi.requestOneImage({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, reply.prompt || job.prompt || '', params, controller.signal);
+        ? ImageApi.requestImageEdit(effectiveImageEndpoint(), state.imageModel, reply.prompt || job.prompt || '', params, refs, controller.signal)
+        : ImageApi.requestOneImage(effectiveImageEndpoint(), state.imageModel, reply.prompt || job.prompt || '', params, controller.signal);
 
     try {
       const result = await requestSingleImage();
@@ -5934,8 +9092,22 @@
   function renderImageWorkspace() {
     const selected = currentImageJob();
     const isLoading = state.isImageHistoryLoading;
-    dom.imageEmpty.classList.toggle('hidden', isLoading || !!selected);
-    dom.imageGallery.innerHTML = ImageRenderer.renderWorkspace(selected, {
+    const showCanvas = state.mode === 'image' && state.imageCanvasMode && canUseImageCanvas() && isImageCanvasJob(selected);
+    state.imageCanvasMode = showCanvas;
+    if (dom.imageCanvasToggleBtn) dom.imageCanvasToggleBtn.classList.toggle('active', showCanvas);
+    if (dom.imageWorkspace) dom.imageWorkspace.classList.toggle('canvas-mode', showCanvas);
+    document.body.classList.toggle('image-canvas-open', showCanvas);
+    dom.imageInputArea?.classList.toggle('hidden', state.mode !== 'image' || showCanvas);
+    dom.imageCanvasWorkspace?.classList.toggle('hidden', !showCanvas);
+    dom.imageGallery?.classList.toggle('hidden', showCanvas);
+    dom.imageEmpty.classList.toggle('hidden', showCanvas || isLoading || !!selected);
+    if (showCanvas) {
+      dom.imageCanvasWorkspace.innerHTML = renderImageCanvasWorkspace();
+      dom.imageCanvasWorkspace.querySelectorAll('button[title]:not([data-tooltip])').forEach(btn => { btn.dataset.tooltip = btn.title; });
+      return;
+    }
+    if (dom.imageCanvasWorkspace) dom.imageCanvasWorkspace.innerHTML = '';
+    dom.imageGallery.innerHTML = ImageRenderer.renderWorkspace(isImageCanvasJob(selected) ? null : selected, {
       isLoading,
       defaultParams: DEFAULT_IMAGE_PARAMS,
       maxRefs: MAX_IMAGE_REFS,
@@ -6138,7 +9310,7 @@
           stopSwImage();
         }};
         const swData = ImageApi.buildServiceWorkerRequest({
-          imageEndpoint: { baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() },
+          imageEndpoint: effectiveImageEndpoint(),
           mapEndpoint: imageMapEndpoint(),
           model: state.imageModel,
           mapModel: state.imageMapModel,
@@ -6246,8 +9418,8 @@
         const requestSingleImage = () => state.imageMapModel
           ? ImageApi.requestMappedImage(imageMapEndpoint(), prompt, params, refs, controller.signal)
           : refs.length
-            ? ImageApi.requestImageEdit({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, refs, controller.signal)
-            : ImageApi.requestOneImage({ baseUrl: effectiveImageBaseUrl(), apiKey: effectiveImageApiKey() }, state.imageModel, prompt, params, controller.signal);
+            ? ImageApi.requestImageEdit(effectiveImageEndpoint(), state.imageModel, prompt, params, refs, controller.signal)
+            : ImageApi.requestOneImage(effectiveImageEndpoint(), state.imageModel, prompt, params, controller.signal);
         const maxParallel = Math.max(1, Math.min(requestCount, 5));
         const outputs = [];
         const usages = [];
@@ -6405,8 +9577,9 @@
   });
   dom.modeImageBtn.addEventListener('click', () => switchMode('image'));
   dom.newChatBtn.addEventListener('click', () => {
-    if (state.mode === 'image') {
+    if (isImageModeLike()) {
       state.currentImageJobId = null;
+      state.imageCanvasMode = false;
       dom.imagePrompt.value = '';
       setImageReferences([]);
       renderImageRefPreview();
@@ -6415,7 +9588,7 @@
       updateSidebar();
       renderImageWorkspace();
       closeSidebarMobile();
-      dom.imagePrompt.focus();
+      if (state.mode === 'image') dom.imagePrompt.focus();
       return;
     }
     pauseActivePolls();
@@ -6806,10 +9979,10 @@
   async function deleteSelectedSidebarItems() {
     const ids = state.sidebarVisibleIds.filter(id => state.sidebarSelectedIds.has(id));
     if (!ids.length) return;
-    const typeLabel = state.mode === 'image' ? '绘画记录' : '对话';
+    const typeLabel = isImageModeLike() ? '绘画记录' : '对话';
     if (!confirm(`确认删除选中的 ${ids.length} 条${typeLabel}？此操作不可恢复。`)) return;
     const idSet = new Set(ids);
-    if (state.mode === 'image') {
+    if (isImageModeLike()) {
       state.imageJobs = state.imageJobs.filter(j => !idSet.has(j.id));
       if (state.currentImageJobId && idSet.has(state.currentImageJobId)) {
         state.currentImageJobId = state.imageJobs[0]?.id || null;
@@ -6820,7 +9993,7 @@
       updateSidebar();
       syncImageParams();
       renderImageWorkspace();
-      scrollImageWorkspaceToBottom(false);
+      if (state.mode === 'image') scrollImageWorkspaceToBottom(false);
       updateStorageStatsIfOpen();
       return;
     }
@@ -6854,7 +10027,7 @@
       return;
     }
 
-    if (state.mode === 'image') {
+    if (isImageModeLike()) {
       const renameBtn = e.target.closest('.conv-item-rename');
       if (renameBtn) {
         const item = renameBtn.closest('.conv-item');
@@ -6878,6 +10051,8 @@
         const id = item.dataset.id;
         state.imageJobs = state.imageJobs.filter(j => j.id !== id);
         if (state.currentImageJobId === id) state.currentImageJobId = state.imageJobs[0]?.id || null;
+        const nextJob = state.imageJobs.find(j => j.id === state.currentImageJobId);
+        state.imageCanvasMode = isImageCanvasJob(nextJob) && canUseImageCanvas();
         persist();
         await imageDbDeleteJob(id);
         updateSidebar();
@@ -6890,11 +10065,22 @@
       const item = e.target.closest('.conv-item');
       if (item) {
         state.currentImageJobId = item.dataset.id;
+        const selectedJob = state.imageJobs.find(j => j.id === state.currentImageJobId);
+        if (isImageCanvasJob(selectedJob)) {
+          if (!canUseImageCanvas()) {
+            state.imageCanvasMode = false;
+            showToast('移动端暂不支持无限画布');
+          } else {
+            state.imageCanvasMode = true;
+          }
+        } else {
+          state.imageCanvasMode = false;
+        }
         persist();
         updateSidebar();
         syncImageParams();
         renderImageWorkspace();
-        scrollImageWorkspaceToBottom(false);
+        if (!state.imageCanvasMode) scrollImageWorkspaceToBottom(false);
         closeSidebarMobile();
       }
       return;
@@ -6995,6 +10181,49 @@
   dom.settingsImageTab.addEventListener('click', () => {
     switchSettingsTab('image');
   });
+  dom.cfgChatEndpointSelect.addEventListener('change', () => {
+    try { captureEndpointForm('chat', { normalize: false }); } catch { /* keep switching responsive */ }
+    selectEndpoint('chat', dom.cfgChatEndpointSelect.value);
+    refreshEndpointForm('chat');
+    populateImageMapModelSelect();
+    populateImagePromptModelSelect();
+  });
+  dom.cfgImageEndpointSelect.addEventListener('change', () => {
+    try { captureEndpointForm('image', { normalize: false, allowFallback: true }); } catch { /* keep switching responsive */ }
+    selectEndpoint('image', dom.cfgImageEndpointSelect.value);
+    refreshEndpointForm('image');
+    populateImageMapModelSelect();
+    populateImagePromptModelSelect();
+    syncImageBackgroundSupport();
+  });
+  dom.cfgAddChatEndpoint.addEventListener('click', () => {
+    try { captureEndpointForm('chat', { normalize: false }); } catch { /* ignore incomplete draft */ }
+    createEndpoint('chat');
+    refreshEndpointForm('chat');
+    populateImageMapModelSelect();
+    populateImagePromptModelSelect();
+  });
+  dom.cfgAddImageEndpoint.addEventListener('click', () => {
+    try { captureEndpointForm('image', { normalize: false, allowFallback: true }); } catch { /* ignore incomplete draft */ }
+    createEndpoint('image');
+    refreshEndpointForm('image');
+    populateImageMapModelSelect();
+    populateImagePromptModelSelect();
+    syncImageBackgroundSupport();
+  });
+  dom.cfgDeleteChatEndpoint.addEventListener('click', () => {
+    if (!deleteCurrentEndpoint('chat')) return;
+    refreshEndpointForm('chat');
+    populateImageMapModelSelect();
+    populateImagePromptModelSelect();
+  });
+  dom.cfgDeleteImageEndpoint.addEventListener('click', () => {
+    if (!deleteCurrentEndpoint('image')) return;
+    refreshEndpointForm('image');
+    populateImageMapModelSelect();
+    populateImagePromptModelSelect();
+    syncImageBackgroundSupport();
+  });
   [dom.cfgImageModelSelect, dom.cfgImageModelManual, dom.cfgImageMapModelSelect, dom.cfgImageMapModelManual].forEach(el => {
     el.addEventListener('change', syncImageBackgroundSupport);
     el.addEventListener('input', syncImageBackgroundSupport);
@@ -7036,10 +10265,12 @@
   });
 
   dom.cfgRefreshModels.addEventListener('click', () => {
+    try { captureEndpointForm('chat', { normalize: false }); } catch { /* refresh will validate below */ }
     refreshModelsForSelect(dom.cfgBaseUrl.value.trim(), dom.cfgApiKey.value.trim(), dom.cfgModelSelect, dom.cfgRefreshModels);
   });
 
   dom.cfgRefreshImageModels.addEventListener('click', async () => {
+    try { captureEndpointForm('image', { normalize: false, allowFallback: true }); } catch { /* refresh will validate below */ }
     await refreshModelsForSelect(dom.cfgImageBaseUrl.value.trim(), dom.cfgImageApiKey.value.trim(), dom.cfgImageModelSelect, dom.cfgRefreshImageModels, { image: true });
     populateImageMapModelSelect();
     populateImagePromptModelSelect();
@@ -7075,7 +10306,8 @@
       applyImportedConfig(state.pendingImportConfig);
       hideConfigImportConfirm();
       hideSetup();
-      hideSettings();
+      state.settingsSnapshot = null;
+      hideModal(dom.settingsModal);
       if (!currentConv()) newConv();
       updateSidebar();
       syncConvParams();
@@ -7092,12 +10324,6 @@
 
   dom.cfgSave.addEventListener('click', () => {
     const savingImageTab = dom.settingsImageTab.classList.contains('active');
-    const b = dom.cfgBaseUrl.value.trim();
-    const k = dom.cfgApiKey.value.trim();
-    const m = dom.cfgModelManual.value.trim() || dom.cfgModelSelect.value;
-    const ib = dom.cfgImageBaseUrl.value.trim();
-    const ik = dom.cfgImageApiKey.value.trim();
-    const im = dom.cfgImageModelManual.value.trim() || dom.cfgImageModelSelect.value;
     const imm = dom.cfgImageMapModelManual.value.trim();
     const mapModel = parseMapModelRef(imm || dom.cfgImageMapModelSelect.value).value;
     const ipm = dom.cfgImagePromptModelManual.value.trim();
@@ -7106,31 +10332,31 @@
     const needChat = !savingImageTab;
     const needImage = savingImageTab;
 
-    if (needChat && (!b || !k || !m)) { alert('请填写对话配置项并选择模型'); return; }
-    if (needImage && (!ib || !ik || !im)) { alert('请填写绘画配置项并选择模型'); return; }
-
-    if (needChat || b || k || dom.cfgModelManual.value.trim()) {
-      if (!b || !k || !m) { alert('对话配置需要同时填写 Base URL、API Key 和模型'); return; }
-      state.baseUrl = normalizeUrl(b);
-      state.apiKey = k;
-      state.model = m;
-      state.modelsCache = mergeUnique([m], state.modelsCache);
-      if (currentConv() && !currentConv().model) currentConv().model = m;
-    }
-    if (needImage || ib || ik || dom.cfgImageModelManual.value.trim()) {
-      if (!ib || !ik || !im) { alert('绘画配置需要同时填写 Base URL、API Key 和模型'); return; }
-      state.imageBaseUrl = normalizeUrl(ib);
-      state.imageApiKey = ik;
-      state.imageModel = im;
-      state.imageMapModel = mapModel || '';
-      state.imagePromptModel = promptModel || '';
-      state.imageModelsCache = mergeUnique([im], state.imageModelsCache, DEFAULT_IMAGE_MODELS);
-      state.imageDefaults = sanitizeImageParams(state.imageDefaults);
+    try {
+      const chatEndpoint = captureEndpointForm('chat', { requireComplete: needChat });
+      const imageEndpoint = captureEndpointForm('image', { requireComplete: needImage, allowFallback: true });
+      if (needChat && currentConv()) {
+        currentConv().endpointId = chatEndpoint.id;
+        currentConv().model = chatEndpoint.model;
+      }
+      state.conversations.forEach(conv => {
+        if (conv.endpointId && !state.chatEndpoints.some(endpoint => endpoint.id === conv.endpointId)) {
+          conv.endpointId = state.currentChatEndpointId;
+        }
+      });
+      if (needImage || imageEndpoint.model) {
+        state.imageMapModel = mapModel || '';
+        state.imagePromptModel = promptModel || '';
+        state.imageDefaults = sanitizeImageParams(state.imageDefaults);
+      }
+    } catch (e) {
+      alert(e.message);
+      return;
     }
     persist();
     updateModelBadge();
     syncImageParams();
-    hideSettings();
+    closeSettingsAfterSave();
     updateSendBtn();
     updateImageGenerateBtn();
   });
@@ -7145,10 +10371,17 @@
     const k = dom.setupApiKey.value.trim();
     const m = dom.setupModelSelect.value;
     if (!b || !k || !m) { alert('请填写所有配置项并选择模型'); return; }
-    state.baseUrl = normalizeUrl(b);
-    state.apiKey = k;
-    state.model = m;
-    if (currentConv() && !currentConv().model) currentConv().model = m;
+    updateEndpoint('chat', {
+      name: currentChatEndpoint().name || '默认对话接口',
+      baseUrl: normalizeUrl(b),
+      apiKey: k,
+      model: m,
+      models: mergeUnique([m], currentChatEndpoint().models),
+    });
+    if (currentConv()) {
+      currentConv().endpointId = currentChatEndpoint().id;
+      if (!currentConv().model) currentConv().model = m;
+    }
     persist();
     updateModelBadge();
     hideSetup();
@@ -7176,23 +10409,30 @@
     e.stopPropagation();
     const opt = e.target.closest('.model-option');
     if (!opt) return;
-    if (state.mode === 'image') {
-      state.imageModel = opt.dataset.model;
+    if (isImageModeLike()) {
+      updateEndpoint('image', {
+        model: opt.dataset.model,
+        models: mergeUnique([opt.dataset.model], currentImageEndpoint().models, DEFAULT_IMAGE_MODELS),
+      });
       state.imageDefaults = sanitizeImageParams(state.imageDefaults);
-      persist([KEYS.imageModel]);
+      persist([KEYS.imageModel, KEYS.imageEndpoints, KEYS.currentImageEndpointId, KEYS.imageModelsCache]);
       syncImageParams();
     }
     else {
       const conv = currentConv() || newConv();
       conv.model = opt.dataset.model;
-      state.modelsCache = mergeUnique([conv.model], state.modelsCache);
-      persist([KEYS.conversations, KEYS.currentConvId, KEYS.modelsCache]);
+      conv.endpointId = chatEndpointForConversation(conv)?.id || state.currentChatEndpointId;
+      const endpoint = chatEndpointForConversation(conv);
+      endpoint.model = conv.model;
+      endpoint.models = mergeUnique([conv.model], endpoint.models);
+      syncLegacyFromEndpoints();
+      persist([KEYS.conversations, KEYS.currentConvId, KEYS.chatEndpoints, KEYS.currentChatEndpointId, KEYS.modelsCache, KEYS.model]);
     }
     updateModelBadge();
     closeModelDropdown();
     updateSendBtn();
     updateImageGenerateBtn();
-    showToast(`已切换到 ${state.mode === 'image' ? state.imageModel : conversationModel()}`);
+    showToast(`已切换到 ${isImageModeLike() ? state.imageModel : conversationModel()}`);
   });
 
   document.addEventListener('click', (e) => {
@@ -7313,10 +10553,15 @@
 
   function setImageReferenceFile(file, opts = {}) {
     if (!file || !file.type.startsWith('image/')) return false;
-    if (imageReferenceList().length >= MAX_IMAGE_REFS) return false;
+    if (!state.imageCanvasMode && imageReferenceList().length >= MAX_IMAGE_REFS) return false;
     const name = opts.name || file.name || pastedImageName(file, opts.index || 0);
     const reader = new FileReader();
     reader.onload = ev => {
+      if (state.imageCanvasMode) {
+        addImageCanvasReferenceNode({ name, type: file.type, base64: ev.target.result });
+        showToast('参考图已添加到画布');
+        return;
+      }
       setImageReferences([...imageReferenceList(), { name, type: file.type, base64: ev.target.result }]);
       renderImageRefPreview();
       updateImageGenerateBtn();
@@ -7329,10 +10574,10 @@
   function addImageReferenceFiles(files, opts = {}) {
     let added = 0;
     Array.from(files || []).some((file, index) => {
-      if (imageReferenceList().length >= MAX_IMAGE_REFS) return true;
+      if (!state.imageCanvasMode && imageReferenceList().length >= MAX_IMAGE_REFS) return true;
       const name = opts.pasted ? (file.name || pastedImageName(file, index)) : file.name;
       if (setImageReferenceFile(file, { name, index })) added += 1;
-      return false;
+      return !state.imageCanvasMode && imageReferenceList().length >= MAX_IMAGE_REFS;
     });
     return added;
   }
@@ -7395,6 +10640,13 @@
   });
   dom.imageRefBtn.addEventListener('click', () => dom.imageRefInput.click());
   dom.imageOptimizeBtn.addEventListener('click', optimizeImagePrompt);
+  dom.imageCanvasToggleBtn?.addEventListener('click', () => {
+    if (!canUseImageCanvas()) {
+      showToast('移动端暂不支持无限画布');
+      return;
+    }
+    setImageCanvasMode(true);
+  });
   dom.imageRefInput.addEventListener('change', () => {
     const added = addImageReferenceFiles(dom.imageRefInput.files);
     if (!added && dom.imageRefInput.files?.length) showToast(`最多添加 ${MAX_IMAGE_REFS} 张参考图`);
@@ -7421,6 +10673,20 @@
     const params = saveImageParams();
     const prompt = dom.imagePrompt.value.trim();
     if (!ensureModeConfigured('image')) return;
+    if (state.imageCanvasMode) {
+      const canvas = currentImageCanvas();
+      if (canvas?.planStatus === 'review') {
+        showToast('请先确认任务拆解，或点击开始执行');
+        return;
+      }
+      const selected = selectedCanvasNodes(canvas).filter(node => node.output && isRenderableImageOutput(node.output));
+      const operation = !canvas || !canvas.nodes.length ? 'root' : selected.length >= 2 ? 'merge' : 'branch';
+      if (!prompt && operation === 'root') return;
+      generateImageCanvasNode(prompt, params, { operation, sources: selected });
+      dom.imagePrompt.value = '';
+      updateImageGenerateBtn();
+      return;
+    }
     if (!prompt) return;
     generateImage(prompt, params, currentImageJob());
     dom.imagePrompt.value = '';
@@ -7432,6 +10698,20 @@
       dom.imageGenerateBtn.click();
     }
   });
+  dom.imageCanvasWorkspace?.addEventListener('click', (e) => {
+    const action = e.target.closest('.image-canvas-action');
+    if (!action) return;
+    e.preventDefault();
+    handleImageCanvasAction(action.dataset.action, action);
+  });
+  dom.imageCanvasWorkspace?.addEventListener('input', handleImageCanvasTaskInput);
+  dom.imageCanvasWorkspace?.addEventListener('keydown', handleImageCanvasInputKeydown);
+  dom.imageCanvasWorkspace?.addEventListener('pointerdown', handleImageCanvasPointerDown);
+  dom.imageCanvasWorkspace?.addEventListener('wheel', handleImageCanvasWheel, { passive: false });
+  document.addEventListener('keydown', handleImageCanvasKeydown);
+  document.addEventListener('pointermove', handleImageCanvasPointerMove);
+  document.addEventListener('pointerup', handleImageCanvasPointerUp);
+  document.addEventListener('pointercancel', handleImageCanvasPointerUp);
   dom.imageGallery.addEventListener('click', (e) => {
     const inputPreview = e.target.closest('.image-input-preview');
     if (inputPreview) {
@@ -7578,6 +10858,9 @@
     prevBtn: dom.imageViewerPrev,
     nextBtn: dom.imageViewerNext,
     counter: dom.imageViewerCounter,
+    zoomOutBtn: dom.imageViewerZoomOut,
+    zoomResetBtn: dom.imageViewerZoomReset,
+    zoomInBtn: dom.imageViewerZoomIn,
     copyBtn: dom.imageViewerCopy,
     downloadBtn: dom.imageViewerDownload,
   }, {
@@ -8192,11 +11475,20 @@
     state.sidebarCollapsed = true;
     dom.sidebar.classList.add('collapsed');
     dom.sidebarBackdrop.classList.add('hidden');
+    state.imageCanvasMode = false;
   } else {
     dom.sidebar.classList.toggle('collapsed', state.sidebarCollapsed);
   }
+  window.addEventListener('resize', () => {
+    if (isMobile() && state.imageCanvasMode) {
+      state.imageCanvasMode = false;
+      persist([KEYS.imageCanvasMode]);
+      renderImageWorkspace();
+      updateImageGenerateBtn();
+    }
+  });
   document.documentElement.removeAttribute('data-boot-sidebar');
-  if (state.mode === 'image') state.isImageHistoryLoading = true;
+  if (isImageModeLike()) state.isImageHistoryLoading = true;
   updateModelBadge();
   updateSidebar();
   updateSendBtn();
@@ -8227,7 +11519,7 @@
           dom.welcome.classList.remove('hidden');
           dom.messages.innerHTML = '';
         }
-        switchMode(state.mode === 'image' ? 'image' : 'chat');
+        switchMode(isImageModeLike(state.mode) ? state.mode : 'chat');
       } else {
         state.mode = 'chat';
         switchMode('chat');

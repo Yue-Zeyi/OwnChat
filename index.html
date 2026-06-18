@@ -70,7 +70,7 @@
     <main id="main">
       <!-- Header -->
       <header id="header">
-        <button id="sidebar-toggle" class="header-btn" title="展开/收起侧栏">
+        <button id="sidebar-toggle" class="header-btn" title="展开/收起侧栏" data-tooltip="展开/收起侧栏">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
             <line x1="9" y1="3" x2="9" y2="21" />
@@ -83,7 +83,7 @@
           </div>
         </div>
         <div class="header-actions">
-          <button id="theme-btn" class="header-btn" type="button" title="切换主题">
+          <button id="theme-btn" class="header-btn" type="button" title="切换主题" data-tooltip="切换主题">
             <svg class="theme-icon-dark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2">
               <circle cx="12" cy="12" r="5" />
@@ -121,6 +121,7 @@
           <h1>绘画模式</h1>
           <p>输入提示词生成图片，配置和历史记录与对话模式独立保存。</p>
         </div>
+        <div id="image-canvas-workspace" class="image-canvas-workspace hidden"></div>
         <div id="image-gallery" class="image-gallery"></div>
       </div>
 
@@ -238,6 +239,18 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M12 3l1.7 5.2L19 10l-5.3 1.8L12 17l-1.7-5.2L5 10l5.3-1.8L12 3z" />
                   <path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z" />
+                </svg>
+              </button>
+              <button id="image-canvas-toggle-btn" class="toolbar-btn" type="button" title="无限画布" data-tooltip="无限画布">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="6" cy="7" r="2" />
+                  <circle cx="17" cy="6" r="2" />
+                  <circle cx="18" cy="17" r="2" />
+                  <circle cx="7" cy="18" r="2" />
+                  <path d="M8 7h7" />
+                  <path d="M17 8v7" />
+                  <path d="M16 17H9" />
+                  <path d="M7 16V9" />
                 </svg>
               </button>
               <button id="image-settings-btn" class="toolbar-btn" type="button" title="绘画设置" data-tooltip="绘画设置">
@@ -362,12 +375,24 @@
         </div>
         <div class="modal-body">
           <div id="settings-chat-panel" class="settings-panel">
-            <div class="form-group">
+            <div class="endpoint-manager">
+              <div class="endpoint-manager-head">
+                <label for="cfg-chat-endpoint-select">对话接口</label>
+                <div class="endpoint-actions">
+                  <button id="cfg-add-chat-endpoint" class="endpoint-action" type="button">添加</button>
+                  <button id="cfg-delete-chat-endpoint" class="endpoint-action danger" type="button">删除</button>
+                </div>
+              </div>
+              <select id="cfg-chat-endpoint-select" title="选择对话接口"></select>
+              <input type="text" id="cfg-chat-endpoint-name" class="endpoint-name-input" placeholder="接口名称" maxlength="40" spellcheck="false">
+              <div class="field-hint">可保存多个 OpenAI-compatible 对话接口，当前会话默认使用选中的接口</div>
+            </div>
+            <div class="form-group endpoint-field-connection">
               <label>Base URL</label>
               <input type="text" id="cfg-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
               <div class="field-hint">兼容 OpenAI API 格式的服务地址</div>
             </div>
-            <div class="form-group">
+            <div class="form-group endpoint-field-secret">
               <label>API Key</label>
               <div class="secret-field">
                 <input type="password" id="cfg-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
@@ -381,7 +406,7 @@
               </div>
               <div class="field-hint">密钥仅保存在浏览器本地，不会发送到第三方</div>
             </div>
-            <div class="form-group">
+            <div class="form-group endpoint-field-wide endpoint-field-model">
               <label>模型</label>
               <div class="model-field">
                 <select id="cfg-model-select" title="选择模型"></select>
@@ -413,12 +438,24 @@
             </div>
           </div>
           <div id="settings-image-panel" class="settings-panel hidden">
-            <div class="form-group">
+            <div class="endpoint-manager">
+              <div class="endpoint-manager-head">
+                <label for="cfg-image-endpoint-select">绘画接口</label>
+                <div class="endpoint-actions">
+                  <button id="cfg-add-image-endpoint" class="endpoint-action" type="button">添加</button>
+                  <button id="cfg-delete-image-endpoint" class="endpoint-action danger" type="button">删除</button>
+                </div>
+              </div>
+              <select id="cfg-image-endpoint-select" title="选择绘画接口"></select>
+              <input type="text" id="cfg-image-endpoint-name" class="endpoint-name-input" placeholder="接口名称" maxlength="40" spellcheck="false">
+              <div class="field-hint">绘画接口可独立配置；Base URL 或 Key 留空时沿用当前对话接口</div>
+            </div>
+            <div class="form-group endpoint-field-connection">
               <label>Image Base URL</label>
               <input type="text" id="cfg-image-base-url" placeholder="https://api.openai.com/v1" spellcheck="false">
-              <div class="field-hint">绘画接口地址，独立于对话 Base URL</div>
+              <div class="field-hint">绘画接口地址；留空时使用当前对话接口 Base URL</div>
             </div>
-            <div class="form-group">
+            <div class="form-group endpoint-field-secret">
               <label>Image API Key</label>
               <div class="secret-field">
                 <input type="password" id="cfg-image-api-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
@@ -430,9 +467,9 @@
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
               </div>
-              <div class="field-hint">绘画密钥仅保存在浏览器本地</div>
+              <div class="field-hint">绘画密钥仅保存在浏览器本地；留空时使用当前对话接口 API Key</div>
             </div>
-            <div class="form-group">
+            <div class="form-group endpoint-field-wide endpoint-field-model">
               <label>绘画模型</label>
               <div class="model-field">
                 <select id="cfg-image-model-select" title="选择绘画模型"></select>
@@ -446,14 +483,14 @@
               <input type="text" id="cfg-image-model-manual" class="model-manual-input" placeholder="手动填写适配 OpenAI Image 协议的模型" spellcheck="false">
               <div class="field-hint">手动填写优先；适配 OpenAI Image 协议的绘画接口</div>
             </div>
-            <div class="form-group">
+            <div class="form-group endpoint-field-optional">
               <label>映射模型</label>
               <div class="model-field">
                 <select id="cfg-image-map-model-select" title="选择映射模型"></select>
               </div>
               <input type="text" id="cfg-image-map-model-manual" class="model-manual-input" placeholder="可选，如 chat:gpt-5.5 或 image:gpt-image-2" spellcheck="false">
             </div>
-            <div class="form-group">
+            <div class="form-group endpoint-field-optional">
               <label>提示词优化模型</label>
               <div class="model-field">
                 <select id="cfg-image-prompt-model-select" title="选择提示词优化模型"></select>
@@ -512,28 +549,31 @@
     <!-- Image viewer -->
     <div id="image-viewer" class="image-viewer hidden">
       <div class="image-viewer-backdrop"></div>
+      <button id="image-viewer-close" class="modal-close-btn image-viewer-close" type="button" title="关闭" data-tooltip="关闭">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      </button>
       <div class="image-viewer-content">
-        <button id="image-viewer-close" class="modal-close-btn image-viewer-close" type="button" title="关闭">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-        <button id="image-viewer-prev" class="image-viewer-nav image-viewer-prev" type="button" title="上一张" aria-label="上一张">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="15 18 9 12 15 6" />
-          </svg>
-        </button>
-        <button id="image-viewer-next" class="image-viewer-nav image-viewer-next" type="button" title="下一张" aria-label="下一张">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-        </button>
         <img id="image-viewer-img" src="" alt="生成图片预览">
         <div class="image-viewer-toolbar">
-          <button id="image-viewer-copy" class="btn-secondary" type="button">复制</button>
+          <button id="image-viewer-zoom-out" class="btn-secondary" type="button" title="缩小" data-tooltip="缩小">-</button>
+          <button id="image-viewer-zoom-reset" class="btn-secondary" type="button" title="还原" data-tooltip="还原">1:1</button>
+          <button id="image-viewer-zoom-in" class="btn-secondary" type="button" title="放大" data-tooltip="放大">+</button>
+          <button id="image-viewer-prev" class="image-viewer-nav image-viewer-prev" type="button" title="上一张" data-tooltip="上一张" aria-label="上一张">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="15 18 9 12 15 6" />
+            </svg>
+          </button>
           <span id="image-viewer-counter" class="image-viewer-counter hidden"></span>
-          <button id="image-viewer-download" class="btn-primary" type="button">下载</button>
+          <button id="image-viewer-next" class="image-viewer-nav image-viewer-next" type="button" title="下一张" data-tooltip="下一张" aria-label="下一张">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </button>
+          <button id="image-viewer-copy" class="btn-secondary" type="button" title="复制图片" data-tooltip="复制图片">复制</button>
+          <button id="image-viewer-download" class="btn-primary" type="button" title="下载图片" data-tooltip="下载图片">下载</button>
         </div>
       </div>
     </div>

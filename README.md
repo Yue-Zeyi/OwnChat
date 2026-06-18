@@ -56,6 +56,7 @@ OwnChat 使用原生 HTML / CSS / JavaScript 实现，不需要后端服务和�
 - 支持 Markdown、代码块、表格、任务列表和代码复制
 - 支持图片、PDF、Office、文本、代码等附件
 - 支持多会话管理、搜索、重命名、删除和批量删除
+- 支持多个对话接口和绘画接口配置，会话可绑定不同对话接口
 - 支持绘画历史、参考图编辑、以图编辑、重绘、图片查看、复制和下载
 - 支持图片生成 token 用量记录和展示
 - 支持提示词优化模型和 Responses API 映射生图
@@ -86,13 +87,14 @@ http://127.0.0.1:8097
 
 ## 配置
 
-打开「设置」填写接口信息。
+打开「设置」填写接口信息。对话和绘画都支持添加多个接口配置，可以在设置页顶部切换、命名、添加或删除接口。
 
 对话模式：
 
 - Base URL，例如 `https://api.openai.com/v1`
 - API Key
 - 对话模型名
+- 新建对话默认使用当前选中的对话接口；已有对话会保存自己的接口和模型
 
 绘画模式：
 
@@ -100,6 +102,7 @@ http://127.0.0.1:8097
 - Image API Key
 - 绘画模型名
 - 可选：映射模型、提示词优化模型
+- 绘画接口可独立配置；Base URL 或 API Key 留空时沿用当前对话接口
 
 对话和绘画配置互相隔离；如果使用同一个服务，可以填写相同的 Base URL 和 API Key。
 
@@ -122,12 +125,28 @@ http://127.0.0.1:8097
   "chat": {
     "baseUrl": "https://api.openai.com/v1",
     "apiKey": "sk-...",
-    "model": "gpt-4o"
+    "model": "gpt-4o",
+    "endpoints": [
+      {
+        "name": "主接口",
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "sk-...",
+        "model": "gpt-4o"
+      }
+    ]
   },
   "image": {
     "baseUrl": "https://api.openai.com/v1",
     "apiKey": "sk-...",
-    "model": "gpt-image-2"
+    "model": "gpt-image-2",
+    "endpoints": [
+      {
+        "name": "绘画接口",
+        "baseUrl": "https://api.openai.com/v1",
+        "apiKey": "sk-...",
+        "model": "gpt-image-2"
+      }
+    ]
   }
 }
 ```
